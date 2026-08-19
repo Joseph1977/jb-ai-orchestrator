@@ -1,0 +1,87 @@
+# Copyright 2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+# LiteLLM gateway config for the SHARED stack (docker-compose.shared.yml).
+# Local Ollama models are the default so workflows run for free; cloud models
+# stay available on demand.
+#
+# On Linux/Windows the in-stack `ollama` container serves these. On macOS use the
+# docker-compose.shared.mac.yml override, which remaps the "ollama" hostname to
+# your host Ollama (Metal GPU) via an nginx proxy — so `api_base: http://ollama:11434`
+# needs no change. The orchestrator picks a model by MAIN_AGENT_MODEL (.env).
+
+model_list:
+
+  # ------------------------------------------------------------------
+  # LOCAL MODELS (free, run via Ollama)
+  #
+  # Use the `ollama_chat/` prefix (NOT `ollama/`): it routes to Ollama's
+  # /api/chat, which returns NATIVE tool_calls that LiteLLM turns into real
+  # function calls. The old `ollama/` prefix leaks tool calls as raw text.
+  # Encode the parameter size in the name so variants never clash.
+  # ------------------------------------------------------------------
+
+  # Small, fast local tool-caller (Qwen 2.5, 7B, ~5 GB). Excellent NATIVE
+  # tool-calling; the default for all workflows. Pull: `ollama pull qwen2.5:7b`.
+  # TEXT-ONLY: for local image understanding pull `qwen2.5vl:7b` and add it as a
+  # SEPARATE `local-qwen2.5vl-7b` entry (it does not replace this one).
+  - model_name: local-qwen2.5-7b
+    litellm_params:
+      model: ollama_chat/qwen2.5:7b
+      api_base: http://ollama:11434
+    model_info:
+      mode: chat
+      supports_function_calling: true
+
+  # Higher-quality local reasoning + tool-calling (Qwen 2.5, 32B, ~19 GB).
+  # Optional quality tier / fallback. Pull: `ollama pull qwen2.5:32b`.
+  - model_name: local-qwen2.5-32b
+    litellm_params:
+      model: ollama_chat/qwen2.5:32b
+      api_base: http://ollama:11434
+    model_info:
+      mode: chat
+      supports_function_calling: true
+
+  # ------------------------------------------------------------------
+  # CLOUD MODELS (paid, require API keys in .env) — available on demand.
+  # ------------------------------------------------------------------
+  - model_name: gpt-4o
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+  - model_name: anthropic-sonnet-4.5
+    litellm_params:
+      model: anthropic/claude-sonnet-4-5-20250929
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: anthropic-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  # Example additional provider (uncomment and set ANTHROPIC_API_KEY):
+  # - model_name: claude-3-5-sonnet
+  #   litellm_params:
+  #     model: anthropic/claude-3-5-sonnet-latest
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+litellm_settings:
+  # Drop request params a provider doesn't support (prevents Ollama errors on
+  # OpenAI-specific params).
+  drop_params: true
+  # Retry a failed request before returning an error.
+  num_retries: 2
+  # Local models (especially first token / cold start) can be slow; give headroom.
+  request_timeout: 900
+  # Safety net: if the pinned local model is unavailable (removed/OOM), fall back
+  # to the other local tier instead of hard-failing. (No cloud fallback so a
+  # local run never silently incurs API cost.)
+  fallbacks:
+    - local-qwen2.5-7b: ["local-qwen2.5-32b"]
+    - local-qwen2.5-32b: ["local-qwen2.5-7b"]

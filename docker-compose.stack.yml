@@ -1,0 +1,38 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+# ============================================================================
+# AGENT STACK — overlay that attaches docker-compose.yml to a SHARED stack, so
+# the agent reaches Postgres and LiteLLM by service name instead of a host or
+# cloud endpoint. Layer it on top of the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.stack.yml up -d
+#
+# The launchers (start-agent-mac.sh / start-agent-windows.bat) do that for you and
+# attach to the `jb-ai-shared` stack. Without this overlay, docker-compose.yml
+# stands alone and talks to whatever src/.env/docker/.env points at — which is
+# the right mode when Postgres and LiteLLM are managed elsewhere.
+#
+# The network is `external`, so this overlay can only JOIN infrastructure and
+# never creates it. Start the shared stack first.
+# ============================================================================
+services:
+  orchestrator:
+    environment:
+      # Override whatever src/.env/docker/.env says: in the stack, infrastructure
+      # is reachable by service name over the shared network.
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pyagent}
+      - LITELLM_BASE_URL=http://litellm:4000
+      - LITELLM_API_KEY=${LITELLM_MASTER_KEY:-sk-1234}
+    # Replaces the base mapping rather than adding to it — two entries publishing
+    # container port 8000 would collide.
+    ports: !override
+      - "${AGENT_PORT:-8000}:8000"
+    networks:
+      - default
+      - shared
+
+networks:
+  shared:
+    external: true
+    name: ${SHARED_NET:-jb-ai-shared-net}

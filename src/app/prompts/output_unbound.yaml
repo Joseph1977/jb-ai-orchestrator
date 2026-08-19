@@ -1,0 +1,21 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: output_unbound
+description: Injected when output is null (no durable persist)
+
+system: |
+  <!-- run-binding:start -->
+  ## Run binding
+  Mode: {{mode}}
+  Output: none
+
+  No durable output binding is set. In workflow mode the input is observation-only;
+  no input or durable-output writes are available. Callers needing input writes must
+  explicitly use working_copy mode. Do not invent an output location or claim that
+  generated artifacts were persisted.
+  `.agent/offload` and `.agent/todos` are runtime files. Read them with
+  {{read_file_tool}} only.
+  <!-- run-binding:end -->
+
+prompt: ""

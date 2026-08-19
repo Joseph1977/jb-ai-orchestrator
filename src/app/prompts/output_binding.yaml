@@ -1,0 +1,31 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: output_binding
+description: Injected when a durable output binding is active (Phase 2+)
+
+system: |
+  <!-- run-binding:start -->
+  ## Run binding
+  Mode: {{mode}}
+  Output provider: {{output_type}}
+  Logical prefix: {{logical_prefix}}
+
+  When an input workspace is present, it is the playbook and primitives. Do not
+  persist workflow state there.
+  The bound output store is the sole destination for every durable write (memory
+  files, generated artifacts, and project outputs). Always use
+  {{write_output_tool}} to persist them; use {{read_output_tool}} and
+  {{list_output_tool}} to inspect them. Never use input-writing tools for durable
+  output.
+
+  Tool paths are logical and relative to the configured prefix. The output backend
+  already applies that prefix: do not prepend the prefix or a physical URI to a
+  tool path.
+
+  If a path exists in both input and output, output is authoritative for workflow state.
+  `.agent/offload` and `.agent/todos` are runtime files. Read them with
+  {{read_file_tool}} only. Never write them with output tools.
+  <!-- run-binding:end -->
+
+prompt: ""

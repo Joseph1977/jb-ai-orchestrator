@@ -1,0 +1,10 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: offload_pointer_note
+description: Note field on an offloaded tool-result pointer
+
+system: ""
+
+prompt: |
+  Full tool result saved to '{{path}}'. The preview may be sufficient; use {{read_file_tool}} on that path only if you need omitted detail.

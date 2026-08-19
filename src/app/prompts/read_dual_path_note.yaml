@@ -1,0 +1,10 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+name: read_dual_path_note
+description: Note when a path exists in both input and output
+
+system: ""
+
+prompt: |
+  This is the input copy. Output is authoritative for workflow state; use {{read_output_tool}} for the durable file.

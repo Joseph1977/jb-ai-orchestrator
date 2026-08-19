@@ -1,0 +1,23 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+.env
+# Per-environment secret files (provided at runtime via env_file / environment)
+src/.env/
+# Deployment assets: consumed by Compose on the host, never inside the image.
+litellm/
+docker-compose*.yml
+start-*.sh
+start-*.bat
+*.md
+docs/
+ag-ui-demo/
+.vscode/
+.idea/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+node_modules/

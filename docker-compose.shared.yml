@@ -1,0 +1,87 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+# ============================================================================
+# SHARED STACK — infrastructure the agent talks to, deployed once per machine:
+#   postgres  (one server, many databases)   -> localhost:${SHARED_PG_PORT:-5432}
+#   litellm   (LLM gateway, local + cloud)   -> localhost:${LITELLM_PORT:-4000}
+#   ollama    (added by the platform override below)
+#
+# Start this FIRST, then start the agent with start-agent-mac.sh /
+# start-agent-windows.bat, which JOINS this stack's network and reaches these
+# services by name (postgres:5432, litellm:4000). The agent stack never deploys
+# infrastructure.
+#
+# Only one stack may own the host ports (5432, 4000) at a time. If you already
+# run Postgres and LiteLLM elsewhere, skip this file and point the orchestrator
+# at them through src/.env/docker/.env instead.
+#
+# Run (pick your platform override):
+#   macOS:         ./start-shared-mac.sh        (host Ollama on the Metal GPU)
+#   Windows/Linux: start-shared-windows.bat     (containerized Ollama + auto-pull)
+#
+# Uses public images only — no git auth needed.
+# ============================================================================
+name: jb-ai-shared
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: jb-ai-shared-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # Neutral admin DB; the agent creates its own (pyagent) on first boot.
+      POSTGRES_DB: ${SHARED_POSTGRES_DB:-postgres}
+    ports:
+      - "${SHARED_PG_PORT:-5432}:5432"
+    volumes:
+      - shared_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - default
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: jb-ai-shared-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-1234}
+      # Admin UI (models/keys/spend/logs) is DB-backed. Points at the shared
+      # Postgres over the network; the `litellm` DB is created by the launcher.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${LITELLM_DB:-litellm}
+      # Surface config.yaml models in the UI and allow adding more from there.
+      STORE_MODEL_IN_DB: "true"
+      # UI login: use these, or the master key above.
+      UI_USERNAME: ${LITELLM_UI_USERNAME:-admin}
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-${LITELLM_MASTER_KEY:-sk-1234}}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - default
+
+# The shared network the agent stack attaches to (as external: jb-ai-shared-net).
+networks:
+  default:
+    name: jb-ai-shared-net
+
+volumes:
+  shared_pgdata:

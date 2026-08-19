@@ -1,0 +1,62 @@
+# Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
+# SPDX-License-Identifier: Apache-2.0
+
+# ============================================================================
+# SHARED STACK — Windows/Linux override: run Ollama INSIDE Docker and auto-pull
+# the default model. Reachable as "ollama" on the shared network, so
+# litellm/config.yaml's `api_base: http://ollama:11434` works unchanged.
+#
+# NVIDIA GPU: uncomment the deploy.resources block (needs the NVIDIA Container
+# Toolkit on the host). On macOS use docker-compose.shared.mac.yml instead.
+# ============================================================================
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: jb-ai-shared-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ${OLLAMA_MODELS_PATH:-shared_ollama_data}:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=30m
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS=*
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: jb-ai-shared-ollama-pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama pull ${OLLAMA_DEFAULT_MODEL:-qwen2.5:7b} &&
+        echo 'Models ready.'
+    restart: "no"
+
+  litellm:
+    depends_on: !override
+      ollama:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  shared_ollama_data:

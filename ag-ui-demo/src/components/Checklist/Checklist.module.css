@@ -1,0 +1,58 @@
+.checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.checklist-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.checklist-item:hover {
+  background: var(--color-surface-hover, #f3f4f6);
+}
+
+.checklist-item--active {
+  background: var(--color-primary-bg, #eff6ff);
+  font-weight: 600;
+}
+
+.checklist-item--done {
+  color: var(--color-text-muted, #6b7280);
+}
+
+/* icon area */
+.checklist-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 0.85rem;
+}
+
+/* spinner for active step */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.checklist-spinner {
+  width: 1.1rem;
+  height: 1.1rem;
+  border: 2px solid var(--color-primary, #3b82f6);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+.checklist-check {
+  color: var(--color-success, #22c55e);
+  font-size: 1.1rem;
+}
