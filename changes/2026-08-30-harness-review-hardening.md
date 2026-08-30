@@ -135,6 +135,86 @@ run is closed rather than left active, and that the workspace is cleaned up —
 plus the success paths and the generic-handler path, so the new branch cannot
 shadow it.
 
+## Fourth review round
+
+### Containment moved out of the walker and into one opener (high)
+
+The previous round put symlink checks in the directory walker, which meant the
+guarantee covered only the paths that walked. It missed a symlinked discovery
+root — `.claude/rules -> /outside` was traversed, because only *children* were
+checked, never the root itself — and it did not apply at all to adapter
+enumeration or root-instruction reads, which open files without walking
+anything. The file check was also resolve-then-open, so a link swapped in
+between the two calls would be followed.
+
+Containment is now a property of opening a file, not of how the path was found.
+A path is held as validated components relative to the workspace, and absolute
+paths, `..`, empty components and embedded separators are rejected before any
+syscall. The opener then walks those components one at a time relative to a
+descriptor anchored on the workspace, opening each with `O_NOFOLLOW`. The open
+is the check, so there is no window to race, and because `O_NOFOLLOW` constrains
+only the final component of the path it is given, feeding components one at a
+time is what extends the guarantee to symlinked parents rather than just
+symlinked leaves.
+
+Three consequences are deliberate. Symlinks are refused rather than resolved,
+including ones pointing inside the workspace, because resolving is the raceable
+pattern being removed. Leaves must be regular files, verified with `fstat` and
+opened with `O_NONBLOCK` so a planted FIFO cannot block discovery before it is
+rejected. And where the platform lacks `os.open(dir_fd=)` or `os.scandir(fd)`
+the reader refuses to construct, rather than falling back to path-based opens
+that would silently drop the guarantee.
+
+The opener re-anchors per operation instead of holding a descriptor per level,
+so it uses a constant number of descriptors and correctness does not depend on
+the process descriptor limit. The cost is O(depth) additional opens.
+
+Every remaining `Path.glob` and `rglob` in the adapters was replaced, including
+the non-recursive ones, so no alternate enumeration path survives to bypass the
+opener.
+
+### One candidate transaction owns the whole sequence (high)
+
+Deduplication, the ceiling check, the metadata read and the append were
+scattered across three adapters and two shared discovery functions, each
+responsible for getting the order right. They now go through a single
+`consider()` operation which sets and validates the entry's `path` and `kind`
+itself; adapters supply only provider-specific name, description, policy, scope
+and source. The ordering guarantees are structural rather than a convention each
+call site has to remember, and an adapter can no longer file an entry under a
+path it never opened.
+
+`REJECTED` joins the outcome enum. A file that cannot be read safely is skipped
+and logged rather than catalogued from its filename — an entry the model cannot
+read is worse than no entry, because it will try. A readable file with no
+frontmatter still keeps its filename/prose fallback.
+
+### Confirmed-capped kinds no longer walk (medium)
+
+`_discover_primitives` called `iter_skill_files()` even with `"skill"` already
+capped, and `_discover_scoped_instructions` walked the whole workspace with
+`"rule"` capped. Both now short-circuit before traversing, per-pattern roots are
+skipped for capped kinds, and discovery stops entirely once every kind has
+overflowed. Detecting the one excess candidate still happens without reading it.
+
+### `AddOutcome` is compared by identity (medium)
+
+Cursor and Claude wrote `if added and policy is LoadingPolicy.EAGER`. Every
+string enum member is truthy, including `CEILING`, so a rule refused by the
+ceiling still had its body read and injected into eager context — the ceiling
+bounded the catalog while the eager path ignored it. All comparisons are now
+`is AddOutcome.ADDED`, and eager content is read only after a candidate is
+actually added.
+
+### Read failures are no longer reported as size failures (medium)
+
+`read_root_instructions` raised one exception for both an over-budget file and
+an unreadable one, and both mapped to `ROOT_INSTRUCTIONS_TOO_LARGE`. An operator
+hitting a permissions error was told to split their playbook. The exception now
+splits into `RootInstructionTooLarge` and `RootInstructionUnreadable`, each
+carrying its own `code`, and the controllers report `exc.code` rather than a
+fixed constant.
+
 ## Migration / breaking
 
 No schema or configuration change.
@@ -150,26 +230,45 @@ No schema or configuration change.
 - **`initiate` can now return `ROOT_INSTRUCTIONS_TOO_LARGE`** (HTTP 400) where
   it previously returned 400 with no code. Callers matching on the message
   rather than the code are unaffected; the message is unchanged.
-- **Symlinked directories are no longer followed** during discovery. A workspace
-  that reached primitives through a directory symlink will no longer see them.
-  This closes a path out of the sandbox and was never intended behaviour.
+- **Symlinks are no longer followed** during discovery — not directories, not
+  files, and not a symlinked discovery root. A workspace that reached primitives
+  through a link will no longer see them. This closes a path out of the sandbox
+  and was never intended behaviour. Note this is stricter than the third round,
+  which still read a linked file whose target resolved inside the workspace.
+- **Non-regular files are never read.** A FIFO or device node named `AGENTS.md`
+  is rejected instead of opened.
+- **New error code `ROOT_INSTRUCTIONS_UNREADABLE`** (HTTP 400). Root instruction
+  failures that are not about size — permissions, I/O, or a path the opener
+  refuses — previously reported `ROOT_INSTRUCTIONS_TOO_LARGE`. A caller matching
+  on that code for read failures must now match both.
 
 ## Verification
 
-620 tests pass. New coverage: `test_bounded_eager_reads.py` (10),
-`test_invocation_policy.py` (9), `test_discovery_limits.py` (9),
-`test_execute_root_budget.py` (4), `test_discovery_traversal.py` (15),
-`test_endpoint_root_budget.py` (8), plus additions to
-`test_frontmatter_hardening.py`, `test_cursor_rule_activation.py`,
-`test_scoped_instructions.py` and `test_skill_discovery_roots.py`.
+650 tests pass on Python 3.11 (the CI version) and on 3.14. New coverage:
+`test_workspace_containment.py` (24) and a rewritten
+`test_discovery_traversal.py` (18), plus additions to
+`test_bounded_eager_reads.py` and `test_endpoint_root_budget.py`.
 
-The bounded-read tests assert against the read operation itself: they serve the
-file through a handle that fails the test if an unbounded read is requested,
-and assert the maximum size actually requested. A call-count test would not
-detect a single full-file read.
+The bounded-read tests assert against the read operation itself: they wrap
+`os.fdopen` so the real descriptor-anchored traversal, `O_NOFOLLOW` and `fstat`
+checks all still run underneath, fail the test if an unbounded read is
+requested, and assert the maximum size actually requested. A call-count test
+would not detect a single full-file read.
 
-The traversal tests assert against the walk rather than its output for the same
-reason. Ordering is pinned by equality with `sorted()` over a tree whose names
-make component order and string order differ, laziness by taking one item from a
-300-directory tree, and the ceiling by counting reads: 700 candidates now cost
-200 reads where they previously cost 700.
+Containment is tested per entry point rather than through one traversal, since
+the finding was precisely that one traversal did not cover the others:
+symlinked root, symlinked parent component, symlinked leaf, an inside-the-
+workspace link, a broken link, a FIFO, and a directory opened as a file. The
+swap-after-traversal case uses a deterministic hook between component traversal
+and leaf open rather than a thread race, because the claim under test is that
+the guarantee holds whenever the swap lands, not that one interleaving happens
+to be caught.
+
+Descriptor behaviour is asserted by counting the process's open descriptors
+across repeated success and failure operations, and across a 300-level tree, so
+a leak or per-level accumulation fails the suite. Per the review, no timing
+assertions were added.
+
+The capped-kind and ceiling guarantees are asserted as absence of work — zero
+`os.scandir` calls for a confirmed-capped kind, zero opens for the 201st
+candidate — rather than as absence of output.

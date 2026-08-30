@@ -396,6 +396,26 @@ reports the latest status and the currently-waiting `stateGuid`. Every execution
 ends `completed` or `failed`, and final responses are persisted, so dashboards
 can poll without replaying the run.
 
+### Error codes
+
+A failed `initiate`, `execute` or `resume` may carry a stable `errorCode`
+alongside the human-readable `error`. Provider failures use `QUOTA`,
+`RATE_LIMIT`, `AUTH` or `UNAVAILABLE`; raw provider response bodies are never
+returned.
+
+Two codes describe a workspace whose root instructions (`AGENTS.md` /
+`CLAUDE.md`) cannot be loaded. They are separate because they need different
+fixes:
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `ROOT_INSTRUCTIONS_TOO_LARGE` | The file loaded but exceeds the eager budget | Split the file, or raise `HARNESS_EAGER_BUDGET_CHARS` |
+| `ROOT_INSTRUCTIONS_UNREADABLE` | The file could not be read at all — permissions, I/O, or a path discovery refuses such as a symlink or a non-regular file | Check the file's permissions and type |
+
+Both fail the call rather than silently running against partial or stale
+context, and `initiate` and `execute` report the same code for the same
+condition.
+
 ### Request and response shapes
 
 ```json

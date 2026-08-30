@@ -275,10 +275,16 @@ Returns either a completed result, or when input is required:
 
 Failed execute/resume results may include a stable `errorCode`. Provider
 failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
-response bodies are never returned. A workspace whose root instructions exceed
-the eager budget fails execute with `ROOT_INSTRUCTIONS_TOO_LARGE` rather than
-running against stale eager context. `initiate` reports the same code for the
-same condition, so a caller sees one error whichever call first reaches it.
+response bodies are never returned.
+
+Root instruction failures carry two distinct codes, because they send an
+operator to different fixes. `ROOT_INSTRUCTIONS_TOO_LARGE` means the file loaded
+but exceeds the eager budget — split it, or raise
+`HARNESS_EAGER_BUDGET_CHARS`. `ROOT_INSTRUCTIONS_UNREADABLE` means it could not
+be read at all: permissions, I/O, or a path the workspace opener refuses such as
+a symlink or a non-regular file. Either way execute fails rather than running
+against stale eager context, and `initiate` reports the same code for the same
+condition, so a caller sees one error whichever call first reaches it.
 
 ### `POST /v1/orchestrator/resume`
 
@@ -376,16 +382,55 @@ it truncates.
 The walk is depth-first over each directory's name-sorted entries, descending as
 each directory is met, which yields that order while holding only the entries
 along the current path — O(depth × directory width), independent of how many
-files the tree contains. `node_modules`, `.git`, `.venv`, `dist`, `build` and
-similar are pruned *before* descent. Symlinked directories are never descended,
-and a symlinked file is read only when its target resolves inside the workspace.
-A directory or entry that cannot be read is logged and skipped rather than
-failing discovery.
+files the tree contains. An explicit stack rather than recursion, so a tree
+deeper than the interpreter's stack limit does not abort discovery.
+`node_modules`, `.git`, `.venv`, `dist`, `build` and similar are pruned *before*
+descent. A directory or entry that cannot be read is logged and skipped rather
+than failing discovery.
 
-At most 200 primitives per kind are kept as a safety ceiling. Reaching it stops
-that kind's traversal, so a capped kind costs no further reads, and the omission
-is noted on the manifest and logged. A workspace holding exactly 200 of a kind
-reports no omission.
+**Workspace containment.** A workspace is untrusted input, and the walker is not
+the boundary: adapters enumerate their own locations and root instructions are
+read without walking anything. Every discovery read therefore goes through one
+workspace-bound opener.
+
+Paths are held as validated components relative to the workspace — absolute
+paths, `..`, empty components and embedded separators are rejected before any
+syscall. The opener then walks those components one at a time relative to a
+directory descriptor anchored on the workspace, opening each with `O_NOFOLLOW`.
+The open *is* the check, so there is no resolve-then-reopen window to race, and
+because `O_NOFOLLOW` constrains only the final component of the path it is
+given, feeding components in one at a time is what extends the guarantee to
+symlinked *parents* as well as symlinked leaves. A symlinked discovery root is
+covered by the same rule.
+
+Consequences worth knowing:
+
+- **Symlinks are refused, not resolved.** A link is skipped even when its target
+  is inside the workspace. Resolving and comparing is the raceable pattern this
+  design removes.
+- **Only regular files are read.** The leaf is `fstat`-checked, and opened with
+  `O_NONBLOCK`, so a FIFO planted in a workspace cannot block discovery before
+  it is rejected.
+- **One descriptor at a time.** The opener re-anchors per operation rather than
+  holding a descriptor per level, so correctness does not depend on the process
+  descriptor limit. The cost is O(depth) extra opens.
+- **Rejected means absent.** A file that cannot be read safely is skipped and
+  logged, never catalogued from its filename — an entry the model cannot read is
+  worse than no entry, because it will try. A *readable* file with no
+  frontmatter still gets its filename/prose fallback.
+- **Fail closed.** Where the platform lacks `os.open(dir_fd=)` or
+  `os.scandir(fd)`, the reader refuses to construct rather than falling back to
+  path-based opens.
+
+**Discovery ceiling.** At most 200 primitives per kind are kept as a safety
+ceiling. Every catalog entry, from shared discovery and adapter enumeration
+alike, goes through one candidate transaction that deduplicates, checks the
+ceiling, then reads — in that order. So a path already catalogued is never
+mistaken for overflow, and the 201st candidate is refused on count alone without
+being opened. Once a kind has confirmed overflow its remaining roots are not
+walked at all, and when every kind is capped discovery stops entirely. The
+omission is noted on the manifest and logged; a workspace holding exactly 200 of
+a kind reports no omission.
 
 ### Loading policy
 
