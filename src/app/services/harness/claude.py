@@ -15,11 +15,11 @@ from app.services.harness.base import (
     LoadingPolicy,
     PrimitiveRef,
     PrimitiveScan,
-    first_description,
     normalize_catalog_path,
     read_root_instructions,
     rel,
     scan_primitive,
+    skill_policy,
 )
 
 
@@ -55,51 +55,67 @@ class ClaudeCodeAdapter(HarnessAdapter):
         )
         claude_dir = workspace / ".claude"
 
-        # Agents: .claude/agents/*.md
+        # Agents: .claude/agents/*.md. Model-selectable, so the invocation
+        # opt-out applies here as it does to skills.
         agents_dir = claude_dir / "agents"
         if agents_dir.is_dir():
             for agent_file in sorted(agents_dir.glob("*.md")):
+                scan = scan_primitive(agent_file)
                 manifest.agents.append(
                     PrimitiveRef(
                         name=agent_file.stem,
                         path=normalize_catalog_path(agent_file, workspace),
-                        description=first_description(agent_file),
+                        description=scan.description,
                         kind="agent",
+                        policy=skill_policy(scan),
+                        source="claude-agents",
                     )
                 )
 
-        # Commands: .claude/commands/*.md
+        # Commands: .claude/commands/*.md. Invoked by name, so they stay
+        # model-discoverable regardless of disable-model-invocation.
         commands_dir = claude_dir / "commands"
         if commands_dir.is_dir():
             for cmd_file in sorted(commands_dir.glob("*.md")):
+                scan = scan_primitive(cmd_file)
                 manifest.commands.append(
                     PrimitiveRef(
                         name=cmd_file.stem,
                         path=normalize_catalog_path(cmd_file, workspace),
-                        description=first_description(cmd_file),
+                        description=scan.description,
                         kind="command",
+                        policy=LoadingPolicy.MODEL_DISCOVERABLE,
+                        source="claude-commands",
                     )
                 )
 
-        # Skills: .claude/skills/*/SKILL.md or *.md
+        # Skills: .claude/skills/*/SKILL.md or *.md. Adapter entries win during
+        # deduplication, so the invocation opt-out has to be honoured here --
+        # shared discovery never gets the chance to correct it.
         skills_dir = claude_dir / "skills"
         if skills_dir.is_dir():
             for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+                scan = scan_primitive(skill_md)
                 manifest.skills.append(
                     PrimitiveRef(
                         name=skill_md.parent.name,
                         path=normalize_catalog_path(skill_md, workspace),
-                        description=first_description(skill_md),
+                        description=scan.description,
                         kind="skill",
+                        policy=skill_policy(scan),
+                        source="claude-skills",
                     )
                 )
             for skill_md in sorted(skills_dir.glob("*.md")):
+                scan = scan_primitive(skill_md)
                 manifest.skills.append(
                     PrimitiveRef(
                         name=skill_md.stem,
                         path=normalize_catalog_path(skill_md, workspace),
-                        description=first_description(skill_md),
+                        description=scan.description,
                         kind="skill",
+                        policy=skill_policy(scan),
+                        source="claude-skills",
                     )
                 )
 

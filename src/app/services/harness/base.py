@@ -421,6 +421,23 @@ def scan_primitive(path: Path) -> PrimitiveScan:
     )
 
 
+def skill_policy(scan: PrimitiveScan) -> LoadingPolicy:
+    """Loading policy for a model-selectable capability.
+
+    ``disable-model-invocation`` is the cross-vendor opt-out: the capability
+    stays invocable but must never be auto-selected, so it is withheld from the
+    model-facing catalog.
+
+    Commands are deliberately not routed through here. A slash command is
+    reached by name, so withholding it from the catalog would hide it from the
+    only mechanism that invokes it; commands stay model-discoverable whatever
+    their frontmatter says.
+    """
+    if scan.metadata.get("disable-model-invocation") is True:
+        return LoadingPolicy.EXPLICIT_ONLY
+    return LoadingPolicy.MODEL_DISCOVERABLE
+
+
 def parse_frontmatter_fields(path: Path) -> dict[str, str]:
     """Frontmatter name/description as strings, without the prose fallback."""
     scan = scan_primitive(path)
@@ -694,12 +711,10 @@ class HarnessAdapter:
                 return
             seen_paths.add(norm_path)
             scan = scan_primitive(md)
-            # Cross-vendor opt-out: the skill is invocable but must not be
-            # auto-selected, so it is withheld from the model-facing catalog.
             policy = (
-                LoadingPolicy.EXPLICIT_ONLY
-                if scan.metadata.get("disable-model-invocation") is True
-                else LoadingPolicy.MODEL_DISCOVERABLE
+                LoadingPolicy.MODEL_DISCOVERABLE
+                if kind == "command"
+                else skill_policy(scan)
             )
             bucket.append(
                 PrimitiveRef(
