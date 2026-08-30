@@ -222,3 +222,57 @@ def test_scan_reads_each_file_once(tmp_path, monkeypatch):
     assert scan.name == "once"
     assert scan.description == "One read"
     assert opens.count(str(path)) == 1
+
+
+# --- only a leading unterminated comment suppresses metadata -----------------
+
+
+def test_unterminated_comment_after_frontmatter_keeps_the_scan(tmp_path):
+    """A stray marker in prose must not discard metadata already parsed."""
+    path = write(
+        tmp_path,
+        "stray.md",
+        "---\nname: stray\ndescription: Still readable\n---\n\n# Body\n\n<!-- never closed\n",
+    )
+
+    scan = scan_primitive(path)
+
+    assert scan.status is FrontmatterStatus.OK
+    assert scan.name == "stray"
+    assert scan.description == "Still readable"
+
+
+def test_unterminated_leading_comment_still_marks_truncation(tmp_path):
+    path = write(tmp_path, "lead.md", "<!-- opening comment that never closes\nname: hidden\n")
+
+    scan = scan_primitive(path)
+
+    assert scan.status is FrontmatterStatus.TRUNCATED
+    assert scan.metadata == {}
+
+
+def test_closed_leading_comment_does_not_block_frontmatter(tmp_path):
+    path = write(
+        tmp_path,
+        "closed.md",
+        "<!-- licence header -->\n---\nname: ok\ndescription: Parsed\n---\n# Body\n",
+    )
+
+    scan = scan_primitive(path)
+
+    assert scan.status is FrontmatterStatus.OK
+    assert scan.name == "ok"
+    assert scan.description == "Parsed"
+
+
+def test_closed_leading_comment_then_stray_marker_still_parses(tmp_path):
+    path = write(
+        tmp_path,
+        "both.md",
+        "<!-- header -->\n---\nname: both\ndescription: Fine\n---\n<!-- dangling\n",
+    )
+
+    scan = scan_primitive(path)
+
+    assert scan.status is FrontmatterStatus.OK
+    assert scan.description == "Fine"

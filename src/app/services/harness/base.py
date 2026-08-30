@@ -267,13 +267,19 @@ def _strip_bom(text: str) -> str:
 
 
 def _strip_html_comments(text: str) -> tuple[str, bool]:
-    """Remove complete comments; report whether an unterminated one remains.
+    """Remove complete comments; report an unterminated *leading* one.
 
-    An unterminated ``<!--`` means the comment runs past the scan window, so
-    everything we can see is comment body rather than metadata.
+    A leading comment that never closes means the comment runs past the scan
+    window, so everything visible is comment body rather than metadata.
+
+    An unterminated marker anywhere else is just prose. Frontmatter above it
+    has already been read, and treating that as truncation would throw away a
+    perfectly good scan because of a stray "<!--" further down the file.
     """
+    leading = text.lstrip()
+    leading_unterminated = leading.startswith("<!--") and not _HTML_COMMENT_RE.match(leading)
     stripped = _HTML_COMMENT_RE.sub("", text)
-    return stripped.strip(), "<!--" in stripped
+    return stripped.strip(), leading_unterminated
 
 
 def _read_metadata_window(path: Path) -> str:
