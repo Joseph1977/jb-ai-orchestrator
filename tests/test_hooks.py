@@ -89,6 +89,30 @@ def test_missing_hook_configs_have_no_diagnostics(tmp_path):
     assert cfg.diagnostics == []
 
 
+def test_claude_settings_without_hooks_do_not_emit_hook_notes(tmp_path):
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "settings.json").write_text(json.dumps({"model": "example-model"}))
+
+    cfg = load_hooks_for_workspace(str(tmp_path))
+    manifest = collect_manifest(str(tmp_path))
+
+    assert cfg.source == "none"
+    assert not any("hook configuration" in note.lower() for note in manifest.notes)
+
+
+def test_cursor_adapter_does_not_note_hookless_claude_settings(tmp_path):
+    (tmp_path / ".cursor").mkdir()
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "settings.json").write_text(json.dumps({"model": "example-model"}))
+
+    manifest = collect_manifest(str(tmp_path))
+
+    assert manifest.orchestration_type == "cursor"
+    assert not any("hook configuration" in note.lower() for note in manifest.notes)
+
+
 def test_unsafe_hook_config_is_not_loaded_or_executed(tmp_path, monkeypatch):
     monkeypatch.setattr("app.config.Config.HOOKS_ENABLED", True)
     outside = tmp_path.parent / "outside-hooks.json"

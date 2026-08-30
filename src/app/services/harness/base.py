@@ -564,6 +564,8 @@ def iter_workspace_files(
                     frontier.append((True, child))
             elif entry.kind is WorkspaceEntryKind.FILE:
                 frontier.append((False, child))
+            elif entry.kind is WorkspaceEntryKind.SYMLINK:
+                logger.warning("Skipping symlink %s", child)
         stack.extend(reversed(frontier))
 
 

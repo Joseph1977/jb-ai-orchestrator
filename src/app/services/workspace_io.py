@@ -63,7 +63,7 @@ class ReaderUnavailableError(Exception):
     """The platform lacks the primitives required to read safely."""
 
 
-def platform_supports_safe_io() -> bool:
+def platform_supports_workspace_io() -> bool:
     return os.open in os.supports_dir_fd and os.scandir in os.supports_fd
 
 
@@ -104,11 +104,6 @@ class WorkspacePath:
             raise UnsafePathError(f"Absolute path rejected: {text!r}")
         return cls(tuple(normalized.split("/")))
 
-    def extend(self, names) -> "WorkspacePath":
-        for name in names:
-            self = self.child(name)
-        return self
-
     def child(self, name: str) -> "WorkspacePath":
         return WorkspacePath(self.parts + (name,))
 
@@ -139,6 +134,7 @@ class WorkspacePath:
 class WorkspaceEntryKind(str, Enum):
     FILE = "file"
     DIRECTORY = "directory"
+    SYMLINK = "symlink"
     OTHER = "other"
 
 
@@ -165,7 +161,7 @@ class WorkspaceReader:
     """Opens files only through the workspace, one validated component deep."""
 
     def __init__(self, workspace: Path) -> None:
-        if not platform_supports_safe_io():
+        if not platform_supports_workspace_io():
             raise ReaderUnavailableError(
                 "Safe workspace reads need os.open(dir_fd=) and os.scandir(fd); "
                 "refusing to fall back to path-based opens"
@@ -219,14 +215,16 @@ class WorkspaceReader:
         Best effort by design: one subtree we cannot read must not abort
         discovery for the whole workspace.
         """
+        entries: List[WorkspaceEntry] = []
         fd = None
         try:
             fd = self._open_dir(wp)
             with os.scandir(fd) as scan:
-                entries: List[WorkspaceEntry] = []
                 for entry in scan:
                     try:
-                        if entry.is_dir(follow_symlinks=False):
+                        if entry.is_symlink():
+                            kind = WorkspaceEntryKind.SYMLINK
+                        elif entry.is_dir(follow_symlinks=False):
                             kind = WorkspaceEntryKind.DIRECTORY
                         elif entry.is_file(follow_symlinks=False):
                             kind = WorkspaceEntryKind.FILE
@@ -240,10 +238,18 @@ class WorkspaceReader:
                             entry.name,
                             exc,
                         )
-                return sorted(entries, key=lambda entry: entry.name)
+            return sorted(entries, key=lambda entry: entry.name)
         except OSError as exc:
-            logger.warning("Skipping unreadable directory %s: %s", wp, exc)
-            return []
+            if entries:
+                logger.warning(
+                    "Directory scan ended early for %s; preserving %d entries: %s",
+                    wp,
+                    len(entries),
+                    exc,
+                )
+            else:
+                logger.warning("Skipping unreadable directory %s: %s", wp, exc)
+            return sorted(entries, key=lambda entry: entry.name)
         finally:
             if fd is not None:
                 os.close(fd)

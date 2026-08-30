@@ -252,6 +252,21 @@ Classification now happens inside the scandir context and callers receive only
 immutable name/type facts. Discovery therefore behaves consistently across
 local filesystems, bind mounts, and network-backed workspaces.
 
+Symlinks retain their own entry kind so strict rejection remains visible in
+logs rather than looking like an absent capability. If a network filesystem
+fails partway through `readdir`, entries already classified are preserved and
+the incomplete scan is reported instead of discarding useful partial results.
+
+### Hook reporting describes only hook-bearing configuration (low)
+
+Claude `settings.json` is general configuration, not necessarily a hook file.
+A readable settings document now counts as detected hook configuration only
+when it actually carries a `hooks` key, preventing both adapters from emitting
+misleading hook notes for model or permission settings alone. Documentation
+also makes the trust boundary explicit: configuration reads are contained, hook
+commands are arbitrary shell, and manifest notes are collection-time snapshots
+because runtime loading deliberately re-reads safe workspace changes.
+
 ## Migration / breaking
 
 No schema or configuration change.
@@ -285,7 +300,7 @@ No schema or configuration change.
 
 ## Verification
 
-673 tests pass on Python 3.11 (the CI version). Earlier rounds also passed on
+677 tests pass on Python 3.11 (the CI version). Earlier rounds also passed on
 3.14. New coverage:
 `test_workspace_containment.py` (24) and a rewritten
 `test_discovery_traversal.py` (18), plus additions to

@@ -218,12 +218,12 @@ def _load_hooks(
         text = _read_candidate(reader, wp, diagnostics)
         if text is None:
             continue
-        claude_detected = True
         data = _parse_json(text, wp, diagnostics)
         if data is None:
             continue
         if not isinstance(data, dict) or "hooks" not in data:
             continue
+        claude_detected = True
         cfg = _parse_claude_hooks(data, _config_dir(workspace_path, wp))
         if cfg.events:
             cfg.diagnostics.extend(diagnostics)

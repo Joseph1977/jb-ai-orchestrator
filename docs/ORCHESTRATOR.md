@@ -946,6 +946,12 @@ execution time. Symlinks and non-regular files are refused, input is bounded to
 surfaces the rejection in manifest notes; execution-time loading logs it and
 continues with no hooks.
 
+This containment applies to reading the configuration, not to sandboxing what a
+hook may run: hook commands are arbitrary shell by definition and may name
+absolute paths. Manifest notes are a discovery-time snapshot, not an execution
+contract; runtime loading intentionally re-reads the configuration, so safe
+workspace changes made after collection take effect on the next hook event.
+
 ### Path policy (multi-tenant)
 
 `resolve_within` still blocks `..` escape. With `PATH_POLICY_ENABLED=true`:

@@ -13,6 +13,7 @@ to a workspace descriptor with `O_NOFOLLOW`, so there is no validate-then-open
 window to race.
 """
 
+import errno
 import os
 
 import pytest
@@ -23,7 +24,7 @@ from app.services.harness.base import (
     scan_primitive,
 )
 from app.services.harness.registry import collect_manifest
-from app.services import workspace_io as safe_io
+from app.services import workspace_io
 from app.services.workspace_io import (
     ReaderUnavailableError,
     UnsafePathError,
@@ -108,14 +109,21 @@ def test_scandir_classifies_entries_before_descriptor_context_closes(
     class Entry:
         name = "file.md"
 
+        def is_symlink(self):
+            assert state["active"]
+            os.fstat(state["fd"])
+            return False
+
         def is_dir(self, *, follow_symlinks):
             assert follow_symlinks is False
             assert state["active"]
+            os.fstat(state["fd"])
             return False
 
         def is_file(self, *, follow_symlinks):
             assert follow_symlinks is False
             assert state["active"]
+            os.fstat(state["fd"])
             return True
 
     class Scan:
@@ -129,12 +137,55 @@ def test_scandir_classifies_entries_before_descriptor_context_closes(
         def __iter__(self):
             return iter([Entry()])
 
+    def fake_scandir(fd):
+        state["fd"] = fd
+        return Scan()
+
     with WorkspaceReader(tmp_path) as reader:
-        monkeypatch.setattr(safe_io.os, "scandir", lambda _fd: Scan())
+        monkeypatch.setattr(workspace_io.os, "scandir", fake_scandir)
         assert [wp.posix for wp in iter_workspace_files(reader, WorkspacePath())] == [
             "file.md"
         ]
     assert state["active"] is False
+
+
+def test_scandir_preserves_entries_before_mid_iteration_failure(
+    tmp_path, monkeypatch
+):
+    class Entry:
+        name = "first.md"
+
+        def is_symlink(self):
+            return False
+
+        def is_dir(self, *, follow_symlinks):
+            return False
+
+        def is_file(self, *, follow_symlinks):
+            return True
+
+    class Scan:
+        def __enter__(self):
+            self.calls = 0
+            return self
+
+        def __exit__(self, *_exc):
+            return None
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.calls += 1
+            if self.calls == 1:
+                return Entry()
+            raise OSError(errno.ESTALE, "stale directory handle")
+
+    with WorkspaceReader(tmp_path) as reader:
+        monkeypatch.setattr(workspace_io.os, "scandir", lambda _fd: Scan())
+        entries = reader.scandir(WorkspacePath())
+
+    assert [entry.name for entry in entries] == ["first.md"]
 
 
 # --- symlink containment, per component ---------------------------------------
@@ -202,6 +253,20 @@ def test_broken_symlink_does_not_abort_discovery(tmp_path):
         assert reader.read_capped(wp("dangling.md"), 100) is None
 
 
+def test_symlink_skipped_by_walker_is_logged(tmp_path, caplog):
+    write(tmp_path / "target.md", "content")
+    os.symlink(tmp_path / "target.md", tmp_path / "alias.md")
+
+    with reader_for(tmp_path) as reader:
+        found = [
+            candidate.posix
+            for candidate in iter_workspace_files(reader, WorkspacePath())
+        ]
+
+    assert found == ["target.md"]
+    assert "Skipping symlink alias.md" in caplog.text
+
+
 def test_leaf_swapped_to_a_symlink_after_traversal_is_refused(tmp_path):
     """The open is the check, so there is no window between them to exploit.
 
@@ -220,12 +285,12 @@ def test_leaf_swapped_to_a_symlink_after_traversal_is_refused(tmp_path):
             target.unlink()
             os.symlink(outside, target)
 
-    safe_io.set_before_leaf_open(swap)
+    workspace_io.set_before_leaf_open(swap)
     try:
         with reader_for(workspace) as reader:
             assert reader.read_capped(wp("sub/rule.md"), 100) is None
     finally:
-        safe_io.set_before_leaf_open(None)
+        workspace_io.set_before_leaf_open(None)
 
 
 # --- non-regular files --------------------------------------------------------
@@ -297,7 +362,7 @@ def test_empty_file_is_catalogued_but_unreadable_one_is_not(tmp_path):
 
 def test_reader_refuses_to_construct_without_the_primitives(tmp_path, monkeypatch):
     """Fail closed. A path-based fallback would silently drop containment."""
-    monkeypatch.setattr(safe_io, "platform_supports_safe_io", lambda: False)
+    monkeypatch.setattr(workspace_io, "platform_supports_workspace_io", lambda: False)
     with pytest.raises(ReaderUnavailableError):
         WorkspaceReader(tmp_path)
 
