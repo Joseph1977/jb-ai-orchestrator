@@ -396,6 +396,26 @@ reports the latest status and the currently-waiting `stateGuid`. Every execution
 ends `completed` or `failed`, and final responses are persisted, so dashboards
 can poll without replaying the run.
 
+### Error codes
+
+A failed `initiate`, `execute` or `resume` may carry a stable `errorCode`
+alongside the human-readable `error`. Provider failures use `QUOTA`,
+`RATE_LIMIT`, `AUTH` or `UNAVAILABLE`; raw provider response bodies are never
+returned.
+
+Two codes describe a workspace whose root instructions (`AGENTS.md` /
+`CLAUDE.md`) cannot be loaded. They are separate because they need different
+fixes:
+
+| Code | Meaning | Fix |
+| --- | --- | --- |
+| `ROOT_INSTRUCTIONS_TOO_LARGE` | The file loaded but exceeds the eager budget | Split the file, or raise `HARNESS_EAGER_BUDGET_CHARS` |
+| `ROOT_INSTRUCTIONS_UNREADABLE` | The file could not be read at all — permissions, I/O, or a path discovery refuses such as a symlink or a non-regular file | Check the file's permissions and type |
+
+Both fail the call rather than silently running against partial or stale
+context, and `initiate` and `execute` report the same code for the same
+condition.
+
 ### Request and response shapes
 
 ```json
@@ -511,6 +531,12 @@ name and URL. See
 | `General_LogFolder` | `./Logs` | Log directory |
 | `Logging_LogLevel_Default` | `Information` | Log level |
 
+### Harness
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HARNESS_EAGER_BUDGET_CHARS` | `24000` | Total characters of eagerly-injected context. Root `AGENTS.md`/`CLAUDE.md` are one mandatory allocation of this budget and fail explicitly when they exceed it, rather than being silently truncated; raise this instead of splitting a large playbook. Optional rules take what remains, whole or not at all. A non-numeric or non-positive value is logged and ignored. |
+
 ### Lifecycle
 
 | Variable | Default | Purpose |
@@ -580,6 +606,12 @@ name and URL. See
 | `MULTIMODAL_MODEL_ALLOWLIST` | empty | When set, only matching model ids receive attachments |
 | `MULTIMODAL_MODEL_DENYLIST` | `gpt-3.5-turbo`, embeddings, … | Model ids that never receive attachments |
 | `MULTIMODAL_VISION_MARKERS` | `gpt-4o`, Claude, Gemini, … | Vision-capable markers used when no allowlist is set |
+
+Hook configuration keeps Cursor-first precedence, followed by Claude
+`hooks.json` and `settings.json`. Files are opened within the workspace without
+following symlinks and are limited to 64,000 characters. Unsafe, malformed,
+excessively nested, or oversized hook configuration is ignored and no hooks
+from it execute; discovery reports the reason in manifest notes.
 
 Full orchestrator and harness knobs are documented in
 [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) §11, and every key above appears in

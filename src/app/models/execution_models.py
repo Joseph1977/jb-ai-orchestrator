@@ -27,6 +27,16 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _enum_values(enum_cls: type[Enum]) -> list[str]:
+    """Persist enum *values*, not member names.
+
+    The Alembic revisions create these Postgres types with the lowercase values
+    below. Left to itself SQLAlchemy stores the member name instead, so a status
+    would be written as 'PENDING' against a type that only accepts 'pending'.
+    """
+    return [member.value for member in enum_cls]
+
+
 class ExecutionStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -132,7 +142,7 @@ class Execution(Base):
         default=uuid.uuid4,
     )
     status: Mapped[ExecutionStatus] = mapped_column(
-        SqlEnum(ExecutionStatus, name="execution_status"),
+        SqlEnum(ExecutionStatus, name="execution_status", values_callable=_enum_values),
         nullable=False,
         default=ExecutionStatus.PENDING,
     )
@@ -196,7 +206,7 @@ class LLMState(Base):
     run_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tool_call_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     status: Mapped[LLMStateStatus] = mapped_column(
-        SqlEnum(LLMStateStatus, name="llm_state_status"),
+        SqlEnum(LLMStateStatus, name="llm_state_status", values_callable=_enum_values),
         nullable=False,
         default=LLMStateStatus.PENDING,
     )

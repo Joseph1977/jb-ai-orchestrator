@@ -13,7 +13,14 @@ conventions of one orchestration type so the same playbook folder can be run
 regardless of which tool authored it.
 """
 
-from app.services.harness.base import HarnessAdapter, HarnessManifest, PrimitiveRef
+from app.services.harness.base import (
+    HarnessAdapter,
+    HarnessManifest,
+    PrimitiveRef,
+    RootInstructionError,
+    RootInstructionTooLarge,
+    RootInstructionUnreadable,
+)
 from app.services.harness.registry import (
     collect_manifest,
     detect_adapter,
@@ -27,6 +34,9 @@ __all__ = [
     "HarnessAdapter",
     "HarnessManifest",
     "PrimitiveRef",
+    "RootInstructionError",
+    "RootInstructionTooLarge",
+    "RootInstructionUnreadable",
     "detect_adapter",
     "get_adapter",
     "collect_manifest",

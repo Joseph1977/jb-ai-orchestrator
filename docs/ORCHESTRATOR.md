@@ -23,7 +23,7 @@ but exactly when instructions, primitives, tools, and persisted state are loaded
 | **Workspace** | The directory the harness operates on. It is normally an isolated sandbox at `WORKSPACES_ROOT/{orchestratorGuid}/workspace`, but an approved local path can be used in place. All local file tools are confined to the selected workspace. |
 | **Orchestration type** | Which tool authored the playbook: `cursor`, `claude-code`, or `generic`. Either passed explicitly or auto-detected. |
 | **Harness adapter** | Per-orchestration-type logic that decides what to inject eagerly (rules / `AGENTS.md` / `CLAUDE.md`) and what to index for **lazy** loading (skills, agents, commands). |
-| **Primitive** | A cataloged capability (skill/agent/rule/command). Usually only its name/path/description is surfaced up front and its body is read on demand; Cursor rules are the exception because they are both eagerly applied and cataloged. |
+| **Primitive** | A cataloged capability (skill/agent/rule/command). Only its name/path/description is surfaced up front; its body is read on demand. A primitive's **loading policy** decides whether it is injected eagerly, catalogued lazily, or withheld from the model entirely. |
 | **Local built-in tools** | In-process tools (filesystem, search, shell, git, `ask_user`) exposed to the LLM alongside MCP and AG-UI tools, scoped to the workspace. |
 | **Context compaction** | When the prompt grows large, older turns can be summarized and older tool messages compacted. Individual oversized tool results can be offloaded under `.agent/offload/`. |
 | **Orchestrator session** | A bound folder, tracked by an `Execution` row (`orchestratorGuid`). Execute/resume run against it. |
@@ -277,6 +277,15 @@ Failed execute/resume results may include a stable `errorCode`. Provider
 failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
 response bodies are never returned.
 
+Root instruction failures carry two distinct codes, because they send an
+operator to different fixes. `ROOT_INSTRUCTIONS_TOO_LARGE` means the file loaded
+but exceeds the eager budget — split it, or raise
+`HARNESS_EAGER_BUDGET_CHARS`. `ROOT_INSTRUCTIONS_UNREADABLE` means it could not
+be read at all: permissions, I/O, or a path the workspace opener refuses such as
+a symlink or a non-regular file. Either way execute fails rather than running
+against stale eager context, and `initiate` reports the same code for the same
+condition, so a caller sees one error whichever call first reaches it.
+
 ### `POST /v1/orchestrator/resume`
 
 Continue a run that awaited input. Works from **any** instance.
@@ -342,43 +351,170 @@ equal scores keep the first registered adapter in stable order:
 
 | Adapter | Detection signal | Eager context, in order | Adapter-specific catalog |
 | --- | --- | --- | --- |
-| `cursor` | `.cursor/`, `.cursor/rules/`, `.cursorrules` | Root `AGENTS.md`, otherwise `.cursor/AGENTS.md`; then `.cursor/rules/*.mdc` | `.cursor/skills/*`, `.cursor/agents/*`, `.cursor/commands/*`; Cursor rules also appear as catalog references |
-| `claude-code` | `.claude/`, `CLAUDE.md` | `CLAUDE.md`, then root `AGENTS.md` | `.claude/skills/*`, `.claude/agents/*`, `.claude/commands/*` |
+| `cursor` | `.cursor/`, `.cursor/rules/`, `.cursorrules` | Root `AGENTS.md`, otherwise `.cursor/AGENTS.md`; then `.cursor/rules/*.mdc` carrying `alwaysApply: true`, then `.cursorrules` | `.cursor/skills/*`, `.cursor/agents/*`, `.cursor/commands/*`; rules that are not always-on |
+| `claude-code` | `.claude/`, `CLAUDE.md` | `CLAUDE.md`, otherwise `.claude/CLAUDE.md`; then root `AGENTS.md`; then `.claude/rules/**` without `paths` | `.claude/skills/*`, `.claude/agents/*`, `.claude/commands/*`, path-scoped rules |
 | `generic` | Root or dotted-directory `AGENTS.md`, otherwise fallback | Root `AGENTS.md`, otherwise the first `.*/AGENTS.md`; then README context | Generic `skills/**`, `agents/**`, `commands/**`, and `rules/**` |
 
 After adapter-specific collection, the common scanner deduplicates paths and
 recognizes all of these conventions:
 
 ```text
-.cursor/skills/*/SKILL.md    .cursor/skills/*.md
-.claude/skills/*/SKILL.md    .claude/skills/*.md
+.agents/skills/**/SKILL.md   .cursor/skills/**/SKILL.md
+.claude/skills/**/SKILL.md   .codex/skills/**/SKILL.md
 .cursor/commands/*.md        .claude/commands/*.md
 .cursor/agents/*.md          .claude/agents/*.md
+.cursor/rules/**/*.mdc       .claude/rules/**/*.md
 skills/**/*.md               agents/**/*.md
 commands/**/*.md             rules/**/*.md
+nested AGENTS.md             nested CLAUDE.md
 ```
+
+A `<root>/skills` directory is recognized **anywhere** in the tree, so category
+folders (`.cursor/skills/shipping/land-it/SKILL.md`) and monorepo packages
+(`apps/web/.cursor/skills/deploy-web/SKILL.md`) are both discovered.
+
+**Ordering contract.** Discovery visits files in **lexicographic order by path
+component**, comparing `a/c.md` before `a.md` because the component `a` sorts
+before `a.md`. This is the order Python's `sorted()` produces over the matching
+paths; it is stable across platforms and is what the per-kind ceiling keeps when
+it truncates.
+
+The walk is depth-first over each directory's name-sorted entries, descending as
+each directory is met, which yields that order while holding only the entries
+along the current path — O(depth × directory width), independent of how many
+files the tree contains. An explicit stack rather than recursion, so a tree
+deeper than the interpreter's stack limit does not abort discovery.
+`node_modules`, `.git`, `.venv`, `dist`, `build` and similar are pruned *before*
+descent. A directory or entry that cannot be read is logged and skipped rather
+than failing discovery.
+
+**Workspace containment.** A workspace is untrusted input, and the walker is not
+the boundary: adapters enumerate their own locations, root instructions are
+read without walking anything, and hooks are reloaded when tools execute.
+Workspace file access therefore goes through one provider-neutral,
+workspace-bound opener.
+
+Paths are held as validated components relative to the workspace — absolute
+paths, `..`, empty components and embedded separators are rejected before any
+syscall. The opener then walks those components one at a time relative to a
+directory descriptor anchored on the workspace, opening each with `O_NOFOLLOW`.
+The open *is* the check, so there is no resolve-then-reopen window to race, and
+because `O_NOFOLLOW` constrains only the final component of the path it is
+given, feeding components in one at a time is what extends the guarantee to
+symlinked *parents* as well as symlinked leaves. A symlinked discovery root is
+covered by the same rule.
+
+Consequences worth knowing:
+
+- **Symlinks are refused, not resolved.** A link is skipped even when its target
+  is inside the workspace. Resolving and comparing is the raceable pattern this
+  design removes.
+- **Only regular files are read.** The leaf is `fstat`-checked, and opened with
+  `O_NONBLOCK`, so a FIFO planted in a workspace cannot block discovery before
+  it is rejected.
+- **One descriptor at a time.** The opener re-anchors per operation rather than
+  holding a descriptor per level, so correctness does not depend on the process
+  descriptor limit. The cost is O(depth) extra opens.
+- **Rejected means absent.** A file that cannot be read safely is skipped and
+  logged, never catalogued from its filename — an entry the model cannot read is
+  worse than no entry, because it will try. A *readable* file with no
+  frontmatter still gets its filename/prose fallback.
+- **Fail closed.** Where the platform lacks `os.open(dir_fd=)` or
+  `os.scandir(fd)`, the reader refuses to construct rather than falling back to
+  path-based opens.
+- **Entries are classified while their directory is open.** The reader returns
+  immutable name/type facts, not `DirEntry` objects tied to a descriptor it has
+  already closed. This keeps traversal correct on NFS and other filesystems that
+  report `DT_UNKNOWN` and need a live descriptor for `is_file` / `is_dir`.
+
+**Discovery ceiling.** At most 200 primitives per kind are kept as a safety
+ceiling. Every catalog entry, from shared discovery and adapter enumeration
+alike, goes through one candidate transaction that deduplicates, checks the
+ceiling, then reads — in that order. So a path already catalogued is never
+mistaken for overflow, and the 201st candidate is refused on count alone without
+being opened. Once a kind has confirmed overflow its remaining roots are not
+walked at all, and when every kind is capped discovery stops entirely. The
+omission is noted on the manifest and logged; a workspace holding exactly 200 of
+a kind reports no omission.
+
+### Loading policy
+
+Adapters translate their own conventions into one vendor-neutral policy, so the
+renderer holds no harness-specific knowledge:
+
+| Policy | Eager | In catalog | Cursor source | Claude source |
+| --- | --- | --- | --- | --- |
+| `EAGER` | yes | no | `alwaysApply: true`, `.cursorrules` | `.claude/rules/**` without `paths` |
+| `SCOPED` | no | yes, with its paths | `globs` | `paths` |
+| `MODEL_DISCOVERABLE` | no | yes | `description`, no globs | default |
+| `EXPLICIT_ONLY` | no | no | none of the three | `disable-model-invocation` |
+
+`EXPLICIT_ONLY` entries are withheld from the catalog rather than labelled,
+since a label does not stop the model selecting them. **Commands are exempt**:
+they are user-invoked by nature and the model must know they exist to answer
+`/help`. Eager entries stay in the API summary but are not listed in the
+catalog, since their bodies are already in the prompt.
+
+Plain `.md` under `.cursor/rules/` is ignored, matching Cursor: without
+frontmatter there is no activation to honour.
 
 ### Eager loading rules
 
-- Root `AGENTS.md` and `CLAUDE.md` are loaded in full up to 512,000 characters.
-  Exceeding that limit fails explicitly; root instructions are never silently
-  truncated.
-- Other eager files are capped at 6,000 characters each, and assembled eager
-  context is capped at 24,000 characters.
+- Root `AGENTS.md` and `CLAUDE.md` are one **mandatory allocation** of the eager
+  budget. If their combined size exceeds it, collection fails explicitly. They
+  are never partially included.
+- The eager budget defaults to 24,000 characters and is configurable through
+  `HARNESS_EAGER_BUDGET_CHARS`. An unusable value is logged and ignored rather
+  than stopping the service booting.
+- Optional eager rules take what remains and are included **whole or not at
+  all**; omissions are noted on the manifest and logged. A half-injected rule is
+  worse than an absent one, because the model cannot tell the rest is missing.
+- Other eager files are capped at 6,000 characters each. Content a clip does not
+  invalidate, such as a README, is truncated with a marker; rule bodies never
+  are.
+- Every eager and root-instruction read is bounded **at the file handle**, at
+  most `cap + 1` characters. Reading a file in full and slicing afterwards is
+  not a cap: the file is already resident by the time the check runs.
 - Section order is meaningful and follows the adapter table above.
-- Hook files and Claude settings may be noted during discovery. Enabled hooks are
-  executed later at their matching lifecycle events; discovery itself does not run
-  them.
+- Hook files and Claude settings may be noted during discovery. Their reads use
+  the same workspace-bound opener, are capped at 64,000 characters, and reject
+  unsafe, malformed, excessively nested, or oversized inputs whole. Enabled hooks are
+  executed later at their matching lifecycle events; discovery itself does not
+  run them.
 
 ### Catalog construction and progressive disclosure
+
+Metadata is read **once per file**, bounded at the file handle. Two independent
+limits apply: frontmatter is parsed against an 8,192-character window, and the
+prose fallback is taken from the first 4,096 characters after the frontmatter
+block. Both are separate from the 6,000-character eager content read.
 
 For each primitive, the manifest stores only:
 
 - `name` — frontmatter `name`, the parent directory for `SKILL.md`, or filename;
-- `path` — normalized relative path, used for deduplication;
+- `path` — normalized relative path with forward slashes, used for deduplication;
 - `description` — frontmatter `description`, otherwise the first heading or
-  substantive line from a bounded 4,096-character scan;
+  substantive line. Frontmatter is parsed with `yaml.safe_load`, so block
+  scalars (`>`, `|`, and their chomping variants) resolve to their text;
 - `kind` — `skill`, `agent`, `command`, or `rule`.
+
+Only whitelisted keys are retained, normalized to scalars or immutable string
+tuples: `name`, `description`, `alwaysApply`, `disable-model-invocation`,
+`globs`, `paths`. Scope fields are validated by shape without recursion, because
+YAML aliases load cheaply but expand astronomically under any structural walk —
+289 characters of frontmatter reaches roughly 43 million nodes.
+
+A file that cannot be parsed degrades its own catalog entry and never aborts
+discovery. This covers `yaml.YAMLError` and `RecursionError` alike; the latter
+is a `RuntimeError` and deeply nested sequences reach it at around 1,000
+characters. Frontmatter whose closing delimiter falls outside the window, or an
+unterminated leading HTML comment, yields no description rather than leaking
+`---` or comment text.
+
+The rendered catalog is bounded by a total character budget — 12,000 for the
+main prompt, 4,000 for subagents — shared across kinds by max-min fair
+allocation. Anything dropped is declared in the catalog itself, noted on the
+manifest, and logged.
 
 The rendered catalog is headed **Available capabilities (NOT loaded yet)** and
 explicitly tells the model to read a referenced file before applying it. Lazy
@@ -804,6 +940,17 @@ AG-UI exposes a generic `hook_permission` interrupt (no synthetic frontend tool 
 resume with `{"decision":"approve"|"deny","reason":"..."}`. Direct orchestrator
 clients use the equivalent persisted resume path.
 Script paths are resolved relative to the hooks config dir.
+Hook configuration is reopened through the provider-neutral workspace reader at
+execution time. Symlinks and non-regular files are refused, input is bounded to
+64,000 characters, and rejected configuration executes no hooks. Collection
+surfaces the rejection in manifest notes; execution-time loading logs it and
+continues with no hooks.
+
+This containment applies to reading the configuration, not to sandboxing what a
+hook may run: hook commands are arbitrary shell by definition and may name
+absolute paths. Manifest notes are a discovery-time snapshot, not an execution
+contract; runtime loading intentionally re-reads the configuration, so safe
+workspace changes made after collection take effect on the next hook event.
 
 ### Path policy (multi-tenant)
 
@@ -1028,6 +1175,7 @@ python scripts/orchestrator_continuity_exercise.py \
 | `src/app/services/prompt_loader.py` | YAML `{{placeholder}}` templates; leftover mustache fails closed |
 | `src/app/prompts/` | Binding and offload instruction templates |
 | `src/app/services/workspace_manager.py` | Source classification, provisioning, path confinement, cleanup primitive |
+| `src/app/services/workspace_io.py` | Provider-neutral descriptor-bound reads, path validation, entry classification |
 | `src/app/services/harness/base.py` | Manifest types, eager caps, metadata extraction, common primitive discovery |
 | `src/app/services/harness/{cursor,claude,generic}.py` | Adapter scoring and adapter-specific eager/catalog collection |
 | `src/app/services/harness/registry.py` | Adapter selection, manifest collection, progressive-disclosure catalog, basic system prompt |
