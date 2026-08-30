@@ -18,7 +18,6 @@ from app.services.harness.base import (
     first_description,
     normalize_catalog_path,
     read_root_instructions,
-    read_text_capped,
     rel,
     scan_primitive,
 )
@@ -126,9 +125,11 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     )
                 )
                 if policy is LoadingPolicy.EAGER:
-                    rules_sections.append(
-                        (f"Claude Rule: {scan.name}", read_text_capped(rule_file))
+                    section = self._eager_rule_section(
+                        f"Claude Rule: {scan.name}", rule_file, manifest
                     )
+                    if section is not None:
+                        rules_sections.append(section)
 
         if (claude_dir / "settings.json").exists() or (claude_dir / "hooks.json").exists():
             from app.services.hooks import load_hooks_for_workspace

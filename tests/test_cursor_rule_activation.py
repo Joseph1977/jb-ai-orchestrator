@@ -105,3 +105,19 @@ def test_malformed_rule_frontmatter_is_explicit_only_not_eager(tmp_path):
     manifest = collect_manifest(str(tmp_path))
     assert policies(manifest)["broken"] is LoadingPolicy.EXPLICIT_ONLY
     assert "BROKEN BODY" not in manifest.eager_context
+
+
+def test_oversized_always_apply_rule_is_omitted_whole_and_reported(tmp_path):
+    """Whole-or-drop: a clipped rule would look complete to the model."""
+    from app.services.harness.base import MAX_EAGER_FILE_CHARS
+
+    body = "HEAD MARKER\n" + ("padding line\n" * 2000) + "TAIL MARKER"
+    assert len(body) > MAX_EAGER_FILE_CHARS
+    rule(tmp_path, "huge", "alwaysApply: true", body=body)
+
+    manifest = collect_manifest(str(tmp_path))
+
+    assert policies(manifest)["huge"] is LoadingPolicy.EAGER
+    assert "HEAD MARKER" not in manifest.eager_context
+    assert "TAIL MARKER" not in manifest.eager_context
+    assert any("omitted from eager context" in n for n in manifest.notes)

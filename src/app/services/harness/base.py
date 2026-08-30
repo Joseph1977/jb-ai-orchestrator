@@ -183,14 +183,43 @@ class HarnessManifest:
         }
 
 
-def read_text_capped(path: Path, cap: int = MAX_EAGER_FILE_CHARS) -> str:
+def read_capped(path: Path, cap: int) -> tuple[str, bool]:
+    """Read at most ``cap + 1`` characters; report whether the file overflowed.
+
+    Bounded at the handle. Reading the file in full and slicing afterwards
+    would let a hostile multi-gigabyte rule exhaust memory before any cap could
+    apply. The one extra character is what separates "exactly at the cap" from
+    "longer than the cap" without a second metadata lookup.
+    """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            chunk = handle.read(cap + 1)
     except OSError:
-        return ""
-    if len(text) > cap:
-        return text[:cap] + f"\n\n... [truncated, {len(text) - cap} more chars]"
+        return "", False
+    if len(chunk) > cap:
+        return chunk[:cap], True
+    return chunk, False
+
+
+def read_text_capped(path: Path, cap: int = MAX_EAGER_FILE_CHARS) -> str:
+    """Bounded read for content a clip does not invalidate, such as a README."""
+    text, overflowed = read_capped(path, cap)
+    if overflowed:
+        return text + f"\n\n... [truncated at {cap} chars]"
     return text
+
+
+def read_eager_rule(path: Path, cap: int = MAX_EAGER_FILE_CHARS) -> tuple[str, bool]:
+    """Bounded read for a rule body: whole or dropped, never clipped.
+
+    Half a rule is worse than no rule -- the model cannot tell the second half
+    is missing, so it follows an instruction the author never wrote. The caller
+    reports the omission instead.
+    """
+    text, overflowed = read_capped(path, cap)
+    if overflowed:
+        return "", True
+    return text, False
 
 
 def read_root_instructions(path: Path, *, cap: int = MAX_ROOT_INSTRUCTION_CHARS) -> str:
@@ -198,15 +227,16 @@ def read_root_instructions(path: Path, *, cap: int = MAX_ROOT_INSTRUCTION_CHARS)
     if not path.exists():
         return ""
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            chunk = handle.read(cap + 1)
     except OSError as exc:
         raise RootInstructionError(f"Cannot read root instructions at {path}: {exc}") from exc
-    if len(text) > cap:
+    if len(chunk) > cap:
         raise RootInstructionError(
-            f"Root instructions at {path} exceed {cap} chars ({len(text)}); "
+            f"Root instructions at {path} exceed {cap} chars; "
             "refusing silent truncation"
         )
-    return text
+    return chunk
 
 
 def _strip_bom(text: str) -> str:
@@ -485,6 +515,34 @@ class HarnessAdapter:
     def collect(self, workspace: Path, *, detected: bool, confidence: int) -> HarnessManifest:
         """Build the manifest of eager context + lazy primitives."""
         raise NotImplementedError
+
+    def _eager_rule_section(
+        self,
+        title: str,
+        path: Path,
+        manifest: Optional[HarnessManifest] = None,
+    ) -> Optional[tuple[str, str]]:
+        """An eager rule body ready for injection, or ``None`` if oversized.
+
+        Keeps the whole-or-drop guarantee at the point of reading, so no caller
+        can accidentally inject a clipped rule.
+        """
+        body, overflowed = read_eager_rule(path)
+        if overflowed:
+            logger.warning(
+                "Eager rule %s exceeds %d chars; omitted whole rather than truncated",
+                path,
+                MAX_EAGER_FILE_CHARS,
+            )
+            if manifest is not None:
+                manifest.notes.append(
+                    f"Rule '{title}' exceeds {MAX_EAGER_FILE_CHARS} chars; "
+                    "omitted from eager context rather than truncated"
+                )
+            return None
+        if not body:
+            return None
+        return (title, body)
 
     def _assemble_eager(
         self,

@@ -16,7 +16,6 @@ from app.services.harness.base import (
     PrimitiveScan,
     first_description,
     read_root_instructions,
-    read_text_capped,
     normalize_catalog_path,
     rel,
     scan_primitive,
@@ -87,9 +86,11 @@ class CursorAdapter(HarnessAdapter):
                     )
                 )
                 if policy is LoadingPolicy.EAGER:
-                    rules_sections.append(
-                        (f"Cursor Rule: {rule_file.stem}", read_text_capped(rule_file))
+                    section = self._eager_rule_section(
+                        f"Cursor Rule: {rule_file.stem}", rule_file, manifest
                     )
+                    if section is not None:
+                        rules_sections.append(section)
 
         # Legacy .cursorrules predates frontmatter, so it has no activation to
         # read and stays unconditional. Kept for backward compatibility only.
@@ -105,7 +106,11 @@ class CursorAdapter(HarnessAdapter):
                     source="legacy-cursorrules",
                 )
             )
-            rules_sections.append(("Cursor Rules (legacy .cursorrules)", read_text_capped(legacy)))
+            legacy_section = self._eager_rule_section(
+                "Cursor Rules (legacy .cursorrules)", legacy, manifest
+            )
+            if legacy_section is not None:
+                rules_sections.append(legacy_section)
 
         # Agents: .cursor/agents/*.md
         agents_dir = cursor_dir / "agents"
