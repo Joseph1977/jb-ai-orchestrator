@@ -23,7 +23,7 @@ but exactly when instructions, primitives, tools, and persisted state are loaded
 | **Workspace** | The directory the harness operates on. It is normally an isolated sandbox at `WORKSPACES_ROOT/{orchestratorGuid}/workspace`, but an approved local path can be used in place. All local file tools are confined to the selected workspace. |
 | **Orchestration type** | Which tool authored the playbook: `cursor`, `claude-code`, or `generic`. Either passed explicitly or auto-detected. |
 | **Harness adapter** | Per-orchestration-type logic that decides what to inject eagerly (rules / `AGENTS.md` / `CLAUDE.md`) and what to index for **lazy** loading (skills, agents, commands). |
-| **Primitive** | A cataloged capability (skill/agent/rule/command). Usually only its name/path/description is surfaced up front and its body is read on demand; Cursor rules are the exception because they are both eagerly applied and cataloged. |
+| **Primitive** | A cataloged capability (skill/agent/rule/command). Only its name/path/description is surfaced up front; its body is read on demand. A primitive's **loading policy** decides whether it is injected eagerly, catalogued lazily, or withheld from the model entirely. |
 | **Local built-in tools** | In-process tools (filesystem, search, shell, git, `ask_user`) exposed to the LLM alongside MCP and AG-UI tools, scoped to the workspace. |
 | **Context compaction** | When the prompt grows large, older turns can be summarized and older tool messages compacted. Individual oversized tool results can be offloaded under `.agent/offload/`. |
 | **Orchestrator session** | A bound folder, tracked by an `Execution` row (`orchestratorGuid`). Execute/resume run against it. |
@@ -342,29 +342,65 @@ equal scores keep the first registered adapter in stable order:
 
 | Adapter | Detection signal | Eager context, in order | Adapter-specific catalog |
 | --- | --- | --- | --- |
-| `cursor` | `.cursor/`, `.cursor/rules/`, `.cursorrules` | Root `AGENTS.md`, otherwise `.cursor/AGENTS.md`; then `.cursor/rules/*.mdc` | `.cursor/skills/*`, `.cursor/agents/*`, `.cursor/commands/*`; Cursor rules also appear as catalog references |
-| `claude-code` | `.claude/`, `CLAUDE.md` | `CLAUDE.md`, then root `AGENTS.md` | `.claude/skills/*`, `.claude/agents/*`, `.claude/commands/*` |
+| `cursor` | `.cursor/`, `.cursor/rules/`, `.cursorrules` | Root `AGENTS.md`, otherwise `.cursor/AGENTS.md`; then `.cursor/rules/*.mdc` carrying `alwaysApply: true`, then `.cursorrules` | `.cursor/skills/*`, `.cursor/agents/*`, `.cursor/commands/*`; rules that are not always-on |
+| `claude-code` | `.claude/`, `CLAUDE.md` | `CLAUDE.md`, otherwise `.claude/CLAUDE.md`; then root `AGENTS.md`; then `.claude/rules/**` without `paths` | `.claude/skills/*`, `.claude/agents/*`, `.claude/commands/*`, path-scoped rules |
 | `generic` | Root or dotted-directory `AGENTS.md`, otherwise fallback | Root `AGENTS.md`, otherwise the first `.*/AGENTS.md`; then README context | Generic `skills/**`, `agents/**`, `commands/**`, and `rules/**` |
 
 After adapter-specific collection, the common scanner deduplicates paths and
 recognizes all of these conventions:
 
 ```text
-.cursor/skills/*/SKILL.md    .cursor/skills/*.md
-.claude/skills/*/SKILL.md    .claude/skills/*.md
+.agents/skills/**/SKILL.md   .cursor/skills/**/SKILL.md
+.claude/skills/**/SKILL.md   .codex/skills/**/SKILL.md
 .cursor/commands/*.md        .claude/commands/*.md
 .cursor/agents/*.md          .claude/agents/*.md
+.cursor/rules/**/*.mdc       .claude/rules/**/*.md
 skills/**/*.md               agents/**/*.md
 commands/**/*.md             rules/**/*.md
+nested AGENTS.md             nested CLAUDE.md
 ```
+
+A `<root>/skills` directory is recognized **anywhere** in the tree, so category
+folders (`.cursor/skills/shipping/land-it/SKILL.md`) and monorepo packages
+(`apps/web/.cursor/skills/deploy-web/SKILL.md`) are both discovered. The walk is
+top-down with `node_modules`, `.git`, `.venv`, `dist`, `build` and similar
+pruned *before* descent, and directory and file order sorted, so discovery is
+bounded and deterministic. At most 200 primitives per kind are kept as a safety
+ceiling; exceeding it is noted on the manifest and logged.
+
+### Loading policy
+
+Adapters translate their own conventions into one vendor-neutral policy, so the
+renderer holds no harness-specific knowledge:
+
+| Policy | Eager | In catalog | Cursor source | Claude source |
+| --- | --- | --- | --- | --- |
+| `EAGER` | yes | no | `alwaysApply: true`, `.cursorrules` | `.claude/rules/**` without `paths` |
+| `SCOPED` | no | yes, with its paths | `globs` | `paths` |
+| `MODEL_DISCOVERABLE` | no | yes | `description`, no globs | default |
+| `EXPLICIT_ONLY` | no | no | none of the three | `disable-model-invocation` |
+
+`EXPLICIT_ONLY` entries are withheld from the catalog rather than labelled,
+since a label does not stop the model selecting them. **Commands are exempt**:
+they are user-invoked by nature and the model must know they exist to answer
+`/help`. Eager entries stay in the API summary but are not listed in the
+catalog, since their bodies are already in the prompt.
+
+Plain `.md` under `.cursor/rules/` is ignored, matching Cursor: without
+frontmatter there is no activation to honour.
 
 ### Eager loading rules
 
-- Root `AGENTS.md` and `CLAUDE.md` are loaded in full up to 512,000 characters.
-  Exceeding that limit fails explicitly; root instructions are never silently
-  truncated.
-- Other eager files are capped at 6,000 characters each, and assembled eager
-  context is capped at 24,000 characters.
+- Root `AGENTS.md` and `CLAUDE.md` are one **mandatory allocation** of the eager
+  budget. If their combined size exceeds it, collection fails explicitly. They
+  are never partially included.
+- The eager budget defaults to 24,000 characters and is configurable through
+  `HARNESS_EAGER_BUDGET_CHARS`. An unusable value is logged and ignored rather
+  than stopping the service booting.
+- Optional eager rules take what remains and are included **whole or not at
+  all**; omissions are noted on the manifest and logged. A half-injected rule is
+  worse than an absent one, because the model cannot tell the rest is missing.
+- Other eager files are capped at 6,000 characters each.
 - Section order is meaningful and follows the adapter table above.
 - Hook files and Claude settings may be noted during discovery. Enabled hooks are
   executed later at their matching lifecycle events; discovery itself does not run
@@ -372,16 +408,37 @@ commands/**/*.md             rules/**/*.md
 
 ### Catalog construction and progressive disclosure
 
+Metadata is read **once per file**, bounded at the file handle. Two independent
+limits apply: frontmatter is parsed against an 8,192-character window, and the
+prose fallback is taken from the first 4,096 characters after the frontmatter
+block. Both are separate from the 6,000-character eager content read.
+
 For each primitive, the manifest stores only:
 
 - `name` — frontmatter `name`, the parent directory for `SKILL.md`, or filename;
-- `path` — normalized relative path, used for deduplication;
+- `path` — normalized relative path with forward slashes, used for deduplication;
 - `description` — frontmatter `description`, otherwise the first heading or
-  substantive line from a bounded 4,096-character scan. Frontmatter is parsed
-  with `yaml.safe_load`, so block scalars (`>`, `|`, and their chomping
-  variants) resolve to their text; a file whose frontmatter does not parse
-  falls back to the heading scan rather than failing discovery;
+  substantive line. Frontmatter is parsed with `yaml.safe_load`, so block
+  scalars (`>`, `|`, and their chomping variants) resolve to their text;
 - `kind` — `skill`, `agent`, `command`, or `rule`.
+
+Only whitelisted keys are retained, normalized to scalars or immutable string
+tuples: `name`, `description`, `alwaysApply`, `disable-model-invocation`,
+`globs`, `paths`. Scope fields are validated by shape without recursion, because
+YAML aliases load cheaply but expand astronomically under any structural walk —
+289 characters of frontmatter reaches roughly 43 million nodes.
+
+A file that cannot be parsed degrades its own catalog entry and never aborts
+discovery. This covers `yaml.YAMLError` and `RecursionError` alike; the latter
+is a `RuntimeError` and deeply nested sequences reach it at around 1,000
+characters. Frontmatter whose closing delimiter falls outside the window, or an
+unterminated leading HTML comment, yields no description rather than leaking
+`---` or comment text.
+
+The rendered catalog is bounded by a total character budget — 12,000 for the
+main prompt, 4,000 for subagents — shared across kinds by max-min fair
+allocation. Anything dropped is declared in the catalog itself, noted on the
+manifest, and logged.
 
 The rendered catalog is headed **Available capabilities (NOT loaded yet)** and
 explicitly tells the model to read a referenced file before applying it. Lazy
