@@ -8,9 +8,8 @@ import pytest
 from app.services.harness.base import (
     MAX_PRIMITIVES_PER_KIND,
     LoadingPolicy,
-    iter_skill_files,
-    iter_workspace_files,
 )
+from tests.harness_helpers import skill_files, workspace_files
 from app.services.harness.registry import collect_manifest
 
 
@@ -79,9 +78,7 @@ def test_walk_prunes_heavy_directories(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "y.md").write_text("y", encoding="utf-8")
 
-    visited = {
-        str(p.relative_to(tmp_path)) for p in iter_workspace_files(tmp_path, tmp_path)
-    }
+    visited = set(workspace_files(tmp_path))
     assert "src/y.md" in visited
     assert not any(v.startswith("node_modules") for v in visited)
     assert not any(v.startswith(".git") for v in visited)
@@ -90,7 +87,7 @@ def test_walk_prunes_heavy_directories(tmp_path):
 def test_skills_inside_pruned_directories_are_not_discovered(tmp_path):
     skill(tmp_path, "node_modules/dep/.cursor/skills/vendored/SKILL.md", name="vendored")
     skill(tmp_path, ".cursor/skills/ours/SKILL.md", name="ours")
-    found = {p.parent.name for p in iter_skill_files(tmp_path)}
+    found = {p.rsplit("/", 2)[-2] for p in skill_files(tmp_path)}
     assert "ours" in found
     assert "vendored" not in found
 
@@ -98,8 +95,8 @@ def test_skills_inside_pruned_directories_are_not_discovered(tmp_path):
 def test_discovery_order_is_deterministic(tmp_path):
     for n in ("charlie", "alpha", "bravo"):
         skill(tmp_path, f".cursor/skills/{n}/SKILL.md", name=n)
-    first = [str(p) for p in iter_skill_files(tmp_path)]
-    second = [str(p) for p in iter_skill_files(tmp_path)]
+    first = skill_files(tmp_path)
+    second = skill_files(tmp_path)
     assert first == second == sorted(first)
 
 

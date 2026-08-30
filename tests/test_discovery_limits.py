@@ -9,7 +9,8 @@ a workspace the adapter claimed was traversed without pruning and catalogued
 without limit.
 """
 
-from app.services.harness.base import MAX_PRIMITIVES_PER_KIND, iter_pruned_files
+from app.services.harness.base import MAX_PRIMITIVES_PER_KIND
+from tests.harness_helpers import pruned_files
 from app.services.harness.registry import collect_manifest
 
 
@@ -27,7 +28,7 @@ def test_pruned_iterator_skips_excluded_directories(tmp_path):
     write(tmp_path / "node_modules" / "pkg" / "b.md")
     write(tmp_path / ".git" / "c.md")
 
-    found = [p.name for p in iter_pruned_files(tmp_path, "*.md", recursive=True)]
+    found = [p.rsplit("/", 1)[-1] for p in pruned_files(tmp_path, "*.md", recursive=True)]
 
     assert found == ["a.md"]
 
@@ -36,13 +37,13 @@ def test_pruned_iterator_is_not_recursive_when_told_not_to_be(tmp_path):
     write(tmp_path / "top.md")
     write(tmp_path / "nested" / "deep.md")
 
-    found = [p.name for p in iter_pruned_files(tmp_path, "*.md", recursive=False)]
+    found = [p.rsplit("/", 1)[-1] for p in pruned_files(tmp_path, "*.md", recursive=False)]
 
     assert found == ["top.md"]
 
 
 def test_pruned_iterator_tolerates_a_missing_root(tmp_path):
-    assert list(iter_pruned_files(tmp_path / "absent", "*.md", recursive=True)) == []
+    assert pruned_files(tmp_path, "*.md", recursive=True, root="absent") == []
 
 
 def test_cursor_rules_in_node_modules_are_not_catalogued(tmp_path):

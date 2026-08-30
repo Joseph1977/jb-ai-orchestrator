@@ -6,7 +6,7 @@
 from pathlib import Path
 
 from app.services.harness import collect_manifest
-from app.services.harness.base import first_description, parse_frontmatter_fields
+from tests.harness_helpers import first_description, parse_frontmatter_fields
 from app.services.harness.registry import (
     PROGRESSIVE_DISCLOSURE_INSTRUCTION,
     enrich_system_prompt,

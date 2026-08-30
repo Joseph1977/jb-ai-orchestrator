@@ -5,6 +5,8 @@
 
 import pytest
 
+from tests.harness_helpers import read_root_instructions
+
 from app.services.harness.base import (
     DEFAULT_EAGER_TOTAL_CHARS,
     EAGER_BUDGET_ENV_VAR,
@@ -14,7 +16,6 @@ from app.services.harness.base import (
     HarnessAdapter,
     RootInstructionError,
     eager_budget_from_env,
-    read_root_instructions,
 )
 from app.services.harness.registry import collect_manifest
 

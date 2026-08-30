@@ -6,13 +6,23 @@
 Slicing after ``read_text()`` is not a cap: the whole file is already resident
 by then, so a hostile multi-gigabyte rule exhausts memory before the check
 runs. These tests fail if any of these paths ever requests an unbounded read.
+
+Instrumentation wraps ``os.fdopen`` rather than replacing the opener, so the
+real descriptor-anchored traversal, ``O_NOFOLLOW`` and ``fstat`` checks all
+still run underneath the measurement.
 """
+
+import os
 
 import pytest
 
 from app.services.harness.base import (
     MAX_EAGER_FILE_CHARS,
     RootInstructionError,
+    RootInstructionTooLarge,
+    RootInstructionUnreadable,
+)
+from tests.harness_helpers import (
     read_capped,
     read_eager_rule,
     read_root_instructions,
@@ -23,37 +33,36 @@ from app.services.harness.base import (
 class _RecordingHandle:
     """Fails the test if the caller ever requests an unbounded read."""
 
-    def __init__(self, text, sizes):
-        self._text = text
-        self._pos = 0
+    def __init__(self, handle, sizes):
+        self._handle = handle
         self._sizes = sizes
 
     def read(self, size=-1):
         if size is None or size < 0:
             raise AssertionError("unbounded read of an eager file")
         self._sizes.append(size)
-        chunk = self._text[self._pos : self._pos + size]
-        self._pos += len(chunk)
-        return chunk
+        return self._handle.read(size)
+
+    def close(self):
+        self._handle.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
+        self.close()
         return False
 
 
-def instrument(monkeypatch, path, text):
-    """Serve ``path`` through a handle that records every requested size."""
+def instrument(monkeypatch):
+    """Record every requested read size across the real open path."""
     sizes: list[int] = []
-    real_open = type(path).open
+    real_fdopen = os.fdopen
 
-    def recording_open(self, *args, **kwargs):
-        if self == path:
-            return _RecordingHandle(text, sizes)
-        return real_open(self, *args, **kwargs)
+    def recording_fdopen(fd, *args, **kwargs):
+        return _RecordingHandle(real_fdopen(fd, *args, **kwargs), sizes)
 
-    monkeypatch.setattr(type(path), "open", recording_open)
+    monkeypatch.setattr(os, "fdopen", recording_fdopen)
     return sizes
 
 
@@ -67,8 +76,8 @@ def write(tmp_path, name, text):
 
 
 def test_read_capped_reports_overflow_without_reading_everything(tmp_path, monkeypatch):
-    path = write(tmp_path, "big.md", "x")
-    sizes = instrument(monkeypatch, path, "x" * 10_000)
+    path = write(tmp_path, "big.md", "x" * 10_000)
+    sizes = instrument(monkeypatch)
 
     text, overflowed = read_capped(path, 100)
 
@@ -84,18 +93,20 @@ def test_read_capped_at_exactly_the_cap_is_not_overflow(tmp_path):
     assert text == "y" * 100
 
 
-def test_read_capped_returns_empty_for_unreadable_path(tmp_path):
-    text, overflowed = read_capped(tmp_path / "missing.md", 100)
-    assert text == ""
-    assert overflowed is False
+def test_read_capped_reports_unreadable_distinctly_from_empty(tmp_path):
+    # None and ("", False) are different answers: one file cannot be read, the
+    # other is simply empty and still deserves a catalog entry.
+    assert read_capped(tmp_path / "missing.md", 100) is None
+    empty = write(tmp_path, "empty.md", "")
+    assert read_capped(empty, 100) == ("", False)
 
 
 # --- truncating variant, for content a clip does not invalidate --------------
 
 
 def test_read_text_capped_is_bounded_and_marks_truncation(tmp_path, monkeypatch):
-    path = write(tmp_path, "readme.md", "x")
-    sizes = instrument(monkeypatch, path, "z" * 50_000)
+    path = write(tmp_path, "readme.md", "z" * 50_000)
+    sizes = instrument(monkeypatch)
 
     text = read_text_capped(path, cap=200)
 
@@ -113,8 +124,8 @@ def test_read_text_capped_leaves_small_files_alone(tmp_path):
 
 
 def test_oversized_rule_is_dropped_whole_rather_than_clipped(tmp_path, monkeypatch):
-    path = write(tmp_path, "rule.mdc", "x")
-    sizes = instrument(monkeypatch, path, "r" * (MAX_EAGER_FILE_CHARS * 3))
+    path = write(tmp_path, "rule.mdc", "r" * (MAX_EAGER_FILE_CHARS * 3))
+    sizes = instrument(monkeypatch)
 
     body, overflowed = read_eager_rule(path)
 
@@ -134,14 +145,28 @@ def test_rule_within_the_cap_is_returned_intact(tmp_path):
 
 
 def test_oversized_root_instructions_raise_without_full_read(tmp_path, monkeypatch):
-    path = write(tmp_path, "AGENTS.md", "x")
-    sizes = instrument(monkeypatch, path, "a" * 5_000)
+    path = write(tmp_path, "AGENTS.md", "a" * 5_000)
+    sizes = instrument(monkeypatch)
 
-    with pytest.raises(RootInstructionError) as excinfo:
+    with pytest.raises(RootInstructionTooLarge) as excinfo:
         read_root_instructions(path, cap=1_000)
 
     assert "refusing silent truncation" in str(excinfo.value)
+    assert excinfo.value.code == "ROOT_INSTRUCTIONS_TOO_LARGE"
     assert max(sizes) <= 1_001
+
+
+def test_unreadable_root_instructions_are_not_reported_as_oversized(tmp_path):
+    # A permissions or I/O failure sends the operator to a different fix than
+    # an over-budget playbook, so the two carry different codes.
+    fifo = tmp_path / "AGENTS.md"
+    os.mkfifo(fifo)
+
+    with pytest.raises(RootInstructionUnreadable) as excinfo:
+        read_root_instructions(fifo, cap=1_000)
+
+    assert excinfo.value.code == "ROOT_INSTRUCTIONS_UNREADABLE"
+    assert isinstance(excinfo.value, RootInstructionError)
 
 
 def test_root_instructions_within_budget_load_whole(tmp_path):

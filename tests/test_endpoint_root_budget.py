@@ -20,16 +20,27 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.controllers.orchestrator_controller import execute, initiate
-from app.models.bindings import ROOT_INSTRUCTIONS_TOO_LARGE, TransientCredentials
+from app.models.bindings import (
+    ROOT_INSTRUCTIONS_TOO_LARGE,
+    ROOT_INSTRUCTIONS_UNREADABLE,
+    TransientCredentials,
+)
 from app.models.execution_models import ExecutionStatus
 from app.models.requests import ExecuteOrchestratorInput, InitiateOrchestratorInput
-from app.services.harness import HarnessManifest, RootInstructionError
+from app.services.harness import (
+    HarnessManifest,
+    RootInstructionTooLarge,
+    RootInstructionUnreadable,
+)
 from app.services.run_lifecycle import RUN_STATUS_COMPLETED, RUN_STATUS_FAILED
 
 CONTROLLER = "app.controllers.orchestrator_controller"
 
-TOO_LARGE = RootInstructionError(
+TOO_LARGE = RootInstructionTooLarge(
     "Root instructions are 9000 characters, over the 8000 character eager budget"
+)
+UNREADABLE = RootInstructionUnreadable(
+    "Cannot read root instructions at AGENTS.md: Permission denied"
 )
 
 
@@ -130,6 +141,21 @@ async def test_initiate_root_budget_failure_finalizes_and_cleans_up():
 
 
 @pytest.mark.asyncio
+async def test_initiate_distinguishes_unreadable_from_oversized():
+    """A permissions failure must not tell the operator their file is too big."""
+    updates: list[dict] = []
+    cleanup = MagicMock()
+
+    _execution, response = await run_initiate(updates, cleanup, manifest_error=UNREADABLE)
+
+    assert response.status_code == 400
+    payload = body(response)
+    assert payload["errorCode"] == ROOT_INSTRUCTIONS_UNREADABLE
+    assert updates[-1]["status"] is ExecutionStatus.FAILED
+    cleanup.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_initiate_other_failures_still_report_without_a_code():
     """The new branch must not shadow the generic handler."""
     updates: list[dict] = []
@@ -221,6 +247,17 @@ async def test_execute_reports_the_root_budget_error_code():
     payload = body(response)
     assert payload["success"] is False
     assert payload["errorCode"] == ROOT_INSTRUCTIONS_TOO_LARGE
+
+
+@pytest.mark.asyncio
+async def test_execute_distinguishes_unreadable_from_oversized():
+    finalized: list[dict] = []
+    run_statuses: list[str] = []
+
+    response = await run_execute(finalized, run_statuses, prompt_error=UNREADABLE)
+
+    assert body(response)["errorCode"] == ROOT_INSTRUCTIONS_UNREADABLE
+    assert run_statuses == [RUN_STATUS_FAILED]
 
 
 @pytest.mark.asyncio

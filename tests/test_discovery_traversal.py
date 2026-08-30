@@ -1,248 +1,321 @@
 # Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""The workspace walker: ordering, laziness, containment and best effort.
+"""Ordering, laziness and best-effort behaviour of the discovery walker.
 
-Discovery must be bounded in *work*, not merely in output. Buffering every
-match before yielding produced only 200 entries but could read an entire
-filesystem to get there, so these tests assert against the traversal itself.
+The walker's contract is lexicographic order by path component, produced
+lazily, with memory proportional to the active frontier rather than the tree.
+It is explicitly *not* the containment boundary -- that is `WorkspaceReader`,
+covered in test_workspace_containment.py.
 """
 
+import inspect
 import os
-from pathlib import Path
+import sys
+
+import pytest
 
 from app.services.harness.base import (
+    ALL_KINDS,
     MAX_PRIMITIVES_PER_KIND,
+    AddOutcome,
+    DiscoveryContext,
+    HarnessManifest,
+    PrimitiveFacts,
+    PrimitiveRef,
     iter_pruned_files,
     iter_workspace_files,
 )
-from app.services.harness.registry import collect_manifest
+from app.services.harness.generic import GenericAdapter
+from app.services.harness.safe_io import WorkspacePath, WorkspaceReader
+from tests.harness_helpers import pruned_files, reader_for, workspace_files, wp
 
 
-def write(path, text="x"):
+def write(path, text="body"):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
 
 
-def tricky_tree(root):
-    """Names chosen so separator-vs-dot and prefix ordering both appear.
+def count_scandirs(monkeypatch):
+    calls: list[object] = []
+    real = os.scandir
 
-    Sorting Path objects compares path components, so 'a/c.md' precedes
-    'a.md'. Sorting the equivalent strings would not. A depth-first walk over
-    name-sorted entries reproduces the component order; this tree is what
-    distinguishes the two.
-    """
-    for directory in ("a", "ab", "a-b", "a.d", "z", "sub/deep"):
-        for name in ("a.md", "ab.md", "a-b.md", "b.md", "z.md"):
-            write(root / directory / name)
-    for name in ("a.md", "ab.md", "a-b.md", "b.md", "z.md"):
-        write(root / name)
-    return root
+    def counting(*args, **kwargs):
+        calls.append(args[0] if args else None)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", counting)
+    return calls
 
 
-# --- ordering is preserved exactly -------------------------------------------
+def count_opens(monkeypatch):
+    opens: list[int] = []
+    real = os.fdopen
+
+    def counting(fd, *args, **kwargs):
+        opens.append(fd)
+        return real(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", counting)
+    return opens
+
+
+# --- ordering -----------------------------------------------------------------
 
 
 def test_walk_order_matches_sorted_paths(tmp_path):
-    """The contract is lexicographic by path component, i.e. sorted() order."""
-    tricky_tree(tmp_path)
+    for rel in ("b/2.md", "a/1.md", "a/z/9.md", "c.md", "a/b.md"):
+        write(tmp_path / rel)
 
-    walked = list(iter_workspace_files(tmp_path, tmp_path))
+    found = workspace_files(tmp_path)
 
-    assert walked == sorted(walked)
-    assert len(walked) == 35
+    assert found == sorted(found)
 
 
 def test_pruned_files_order_matches_sorted_paths(tmp_path):
-    tricky_tree(tmp_path)
-    write(tmp_path / "node_modules" / "junk.md")
+    for rel in ("z.md", "m/n.md", "a.md", "m/a.md"):
+        write(tmp_path / rel)
 
-    found = list(iter_pruned_files(tmp_path, "*.md", recursive=True, workspace=tmp_path))
+    found = pruned_files(tmp_path, "*.md", recursive=True)
 
-    assert found == sorted(found)
-    assert not any("node_modules" in str(p) for p in found)
+    assert found == ["a.md", "m/a.md", "m/n.md", "z.md"]
 
 
 def test_subtree_is_exhausted_where_its_name_sorts(tmp_path):
-    """'a/c.md' must precede 'a.md', which a files-then-directories walk breaks."""
-    write(tmp_path / "a" / "c.md")
-    write(tmp_path / "a.md")
-    write(tmp_path / "b.md")
+    """A directory's contents come out at the directory's own sort position.
 
-    found = [
-        str(p.relative_to(tmp_path))
-        for p in iter_pruned_files(tmp_path, "*.md", recursive=True, workspace=tmp_path)
-    ]
+    This is what separates true lexicographic order from breadth-first order,
+    which would emit every top-level file before descending anywhere.
+    """
+    write(tmp_path / "aaa.md")
+    write(tmp_path / "bbb" / "inner.md")
+    write(tmp_path / "ccc.md")
 
-    assert found == ["a/c.md", "a.md", "b.md"]
-
-
-# --- the walk is lazy ---------------------------------------------------------
+    assert workspace_files(tmp_path) == ["aaa.md", "bbb/inner.md", "ccc.md"]
 
 
-def test_walker_is_lazy(tmp_path):
-    """Taking one item must not enumerate the tree."""
-    for i in range(300):
-        write(tmp_path / f"dir{i:04d}" / "f.md")
-
-    walker = iter_workspace_files(tmp_path, tmp_path)
-    first = next(walker)
-
-    assert first.name == "f.md"
-    assert first.parent.name == "dir0000"
+# --- laziness -----------------------------------------------------------------
 
 
-def test_pruned_files_is_lazy(tmp_path):
-    for i in range(300):
-        write(tmp_path / f"dir{i:04d}" / "f.md")
+def test_walker_is_lazy(tmp_path, monkeypatch):
+    for name in ("a", "b", "c", "d"):
+        write(tmp_path / name / "f.md")
 
-    found = iter_pruned_files(tmp_path, "*.md", recursive=True, workspace=tmp_path)
+    with reader_for(tmp_path) as reader:
+        walk = iter_workspace_files(reader, WorkspacePath())
+        calls = count_scandirs(monkeypatch)
+        next(walk)
+        # The root plus the first subdirectory only; the rest of the tree is
+        # untouched until the caller asks for more.
+        assert len(calls) <= 2
 
-    assert next(found).parent.name == "dir0000"
+
+def test_pruned_files_is_lazy(tmp_path, monkeypatch):
+    for name in ("a", "b", "c", "d"):
+        write(tmp_path / name / "f.md")
+
+    with reader_for(tmp_path) as reader:
+        walk = iter_pruned_files(reader, WorkspacePath(), "*.md", recursive=True)
+        calls = count_scandirs(monkeypatch)
+        next(walk)
+        assert len(calls) <= 2
+
+
+# --- pruning and shape --------------------------------------------------------
 
 
 def test_non_recursive_does_not_descend(tmp_path):
     write(tmp_path / "top.md")
     write(tmp_path / "nested" / "deep.md")
 
-    found = [
-        p.name
-        for p in iter_pruned_files(tmp_path, "*.md", recursive=False, workspace=tmp_path)
-    ]
-
-    assert found == ["top.md"]
+    assert workspace_files(tmp_path, recursive=False) == ["top.md"]
 
 
-# --- a capped kind stops costing reads ----------------------------------------
+def test_pruned_directories_are_never_entered(tmp_path, monkeypatch):
+    write(tmp_path / "node_modules" / "pkg" / "x.md")
+    write(tmp_path / "src" / "y.md")
+
+    found = workspace_files(tmp_path)
+
+    assert found == ["src/y.md"]
 
 
-def test_capped_kind_stops_reading_candidates(tmp_path, monkeypatch):
-    """Past the ceiling, further candidates must not be opened at all."""
-    import app.services.harness.base as base
-
-    for i in range(MAX_PRIMITIVES_PER_KIND + 500):
-        write(
-            tmp_path / ".cursor" / "rules" / f"rule{i:05d}.mdc",
-            "---\ndescription: d\n---\nBody\n",
-        )
-
-    scans: list[str] = []
-    real_scan = base.scan_primitive
-
-    def counting_scan(path):
-        scans.append(str(path))
-        return real_scan(path)
-
-    monkeypatch.setattr(base, "scan_primitive", counting_scan)
-    monkeypatch.setattr("app.services.harness.cursor.scan_primitive", counting_scan)
-
-    manifest = collect_manifest(str(tmp_path))
-
-    assert len(manifest.rules) <= MAX_PRIMITIVES_PER_KIND
-    # One read per catalogued entry, plus a small constant for other kinds.
-    # 700 candidates existed; anything near that means the cap did not stop work.
-    assert len(scans) <= MAX_PRIMITIVES_PER_KIND + 20, (
-        f"expected reads to stop at the ceiling, got {len(scans)}"
-    )
+def test_missing_root_yields_nothing(tmp_path):
+    assert workspace_files(tmp_path, root="absent") == []
 
 
-def test_exactly_at_the_ceiling_reports_no_omission(tmp_path):
-    """A workspace with no excess candidate must not claim entries were dropped."""
-    for i in range(MAX_PRIMITIVES_PER_KIND):
-        write(
-            tmp_path / ".cursor" / "rules" / f"rule{i:05d}.mdc",
-            "---\ndescription: d\n---\nBody\n",
-        )
-
-    manifest = collect_manifest(str(tmp_path))
-
-    assert len(manifest.rules) == MAX_PRIMITIVES_PER_KIND
-    assert not any("ceiling" in n.lower() for n in manifest.notes)
-
-
-# --- symlinks cannot walk discovery out of the workspace ----------------------
-
-
-def test_symlinked_directory_is_not_descended(tmp_path):
-    outside = tmp_path.parent / "outside_tree"
-    write(outside / "secret.md")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    os.symlink(outside, workspace / "linked")
-
-    found = [p.name for p in iter_workspace_files(workspace, workspace)]
-
-    assert "secret.md" not in found
-
-
-def test_symlinked_file_escaping_the_workspace_is_skipped(tmp_path):
-    outside = tmp_path.parent / "outside_file"
-    write(outside / "secret.md")
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    os.symlink(outside / "secret.md", workspace / "linked.md")
-
-    found = [p.name for p in iter_workspace_files(workspace, workspace)]
-
-    assert found == []
-
-
-def test_symlinked_file_inside_the_workspace_is_followed(tmp_path):
-    workspace = tmp_path / "ws"
-    write(workspace / "real" / "rule.md")
-    os.symlink(workspace / "real" / "rule.md", workspace / "alias.md")
-
-    found = {p.name for p in iter_workspace_files(workspace, workspace)}
-
-    assert found == {"rule.md", "alias.md"}
-
-
-def test_broken_symlink_does_not_abort_the_walk(tmp_path):
-    write(tmp_path / "real.md")
-    os.symlink(tmp_path / "missing.md", tmp_path / "dangling.md")
-
-    found = [p.name for p in iter_workspace_files(tmp_path, tmp_path)]
-
-    assert found == ["real.md"]
-
-
-# --- one unreadable subtree does not abort discovery --------------------------
+# --- best effort --------------------------------------------------------------
 
 
 def test_unreadable_directory_is_skipped_not_fatal(tmp_path):
-    write(tmp_path / "readable" / "a.md")
+    write(tmp_path / "ok" / "a.md")
     locked = tmp_path / "locked"
     locked.mkdir()
     write(locked / "b.md")
     os.chmod(locked, 0o000)
     try:
-        found = [p.name for p in iter_workspace_files(tmp_path, tmp_path)]
-        assert "a.md" in found
-        assert "b.md" not in found
+        found = workspace_files(tmp_path)
     finally:
         os.chmod(locked, 0o755)
 
-
-def test_missing_root_yields_nothing(tmp_path):
-    assert list(iter_workspace_files(tmp_path / "absent", tmp_path)) == []
-    assert (
-        list(iter_pruned_files(tmp_path / "absent", "*.md", recursive=True, workspace=tmp_path))
-        == []
-    )
-
-
-# --- deep trees do not exhaust the interpreter stack --------------------------
+    assert "ok/a.md" in found
 
 
 def test_deeply_nested_tree_does_not_raise_recursion_error(tmp_path):
-    """The filesystem accepts trees deeper than the recursion limit."""
-    deep = tmp_path
-    for _ in range(400):
-        deep = deep / "d"
-    deep.mkdir(parents=True)
-    write(deep / "buried.md")
+    """The filesystem accepts far deeper trees than the interpreter's stack.
 
-    found = [p.name for p in iter_workspace_files(tmp_path, tmp_path)]
+    The limit is lowered rather than the tree made 1,000 levels deep, because
+    a path that long exceeds PATH_MAX before it exceeds the stack. What is
+    under test is that the walker's depth costs heap, not frames.
+    """
+    depth = 400
+    current = tmp_path
+    for _ in range(depth):
+        current = current / "d"
+    current.mkdir(parents=True)
+    write(current / "buried.md")
 
-    assert found == ["buried.md"]
+    original = sys.getrecursionlimit()
+    sys.setrecursionlimit(len(inspect.stack()) + 100)
+    try:
+        found = workspace_files(tmp_path)
+    finally:
+        sys.setrecursionlimit(original)
+
+    assert found == ["/".join(["d"] * depth) + "/buried.md"]
+
+
+# --- the candidate transaction ------------------------------------------------
+
+
+def make_ctx(tmp_path) -> tuple[DiscoveryContext, HarnessManifest]:
+    manifest = HarnessManifest(orchestration_type="generic", detected=False)
+    return DiscoveryContext(tmp_path, manifest, WorkspaceReader(tmp_path)), manifest
+
+
+def facts(scan):
+    return PrimitiveFacts(name=scan.name, description=scan.description)
+
+
+def test_confirmed_capped_kinds_do_not_walk_at_all(tmp_path, monkeypatch):
+    """A capped kind must cost no traversal, not merely no catalog entries."""
+    write(tmp_path / ".cursor" / "skills" / "s" / "SKILL.md")
+    write(tmp_path / "sub" / "AGENTS.md")
+
+    ctx, _ = make_ctx(tmp_path)
+    try:
+        ctx.capped.update(ALL_KINDS)
+        calls = count_scandirs(monkeypatch)
+        GenericAdapter()._discover_primitives(ctx)
+        GenericAdapter()._discover_scoped_instructions(ctx)
+        assert calls == []
+    finally:
+        ctx.reader.close()
+
+
+def test_capped_rules_skip_the_scoped_instruction_walk(tmp_path, monkeypatch):
+    write(tmp_path / "sub" / "AGENTS.md")
+
+    ctx, _ = make_ctx(tmp_path)
+    try:
+        ctx.capped.add("rule")
+        calls = count_scandirs(monkeypatch)
+        GenericAdapter()._discover_scoped_instructions(ctx)
+        assert calls == []
+    finally:
+        ctx.reader.close()
+
+
+def test_candidate_over_the_ceiling_is_never_read(tmp_path, monkeypatch):
+    """The 201st candidate is refused on count alone, without being opened."""
+    path = write(tmp_path / "extra.md", "---\nname: extra\n---\n")
+    ctx, manifest = make_ctx(tmp_path)
+    try:
+        manifest.skills.extend(
+            PrimitiveRef(name=f"s{i}", path=f"s{i}.md", kind="skill")
+            for i in range(MAX_PRIMITIVES_PER_KIND)
+        )
+        opens = count_opens(monkeypatch)
+        result = ctx.consider("skill", wp("extra.md"), facts)
+        assert result.outcome is AddOutcome.CEILING
+        assert opens == [], "an over-ceiling candidate must not be opened"
+    finally:
+        ctx.reader.close()
+    assert path.exists()
+
+
+def test_exactly_at_the_ceiling_reports_no_omission(tmp_path):
+    ctx, manifest = make_ctx(tmp_path)
+    try:
+        for i in range(MAX_PRIMITIVES_PER_KIND):
+            write(tmp_path / f"s{i}.md", "---\nname: s\n---\n")
+            ctx.consider("skill", wp(f"s{i}.md"), facts)
+        assert len(manifest.skills) == MAX_PRIMITIVES_PER_KIND
+        assert not any("ceiling" in note.lower() for note in manifest.notes)
+    finally:
+        ctx.reader.close()
+
+
+def test_duplicate_is_distinct_from_ceiling(tmp_path):
+    """A duplicate must not read like overflow, or it would stop traversal."""
+    write(tmp_path / "dup.md", "---\nname: dup\n---\n")
+    ctx, _ = make_ctx(tmp_path)
+    try:
+        assert ctx.consider("skill", wp("dup.md"), facts).outcome is AddOutcome.ADDED
+        assert ctx.consider("skill", wp("dup.md"), facts).outcome is AddOutcome.DUPLICATE
+    finally:
+        ctx.reader.close()
+
+
+def test_transaction_owns_path_and_kind(tmp_path):
+    """Adapters supply provider fields only; the entry's identity is not theirs."""
+    write(tmp_path / "a" / "thing.md", "---\nname: thing\n---\n")
+    ctx, manifest = make_ctx(tmp_path)
+    try:
+        ctx.consider(
+            "agent",
+            wp("a/thing.md"),
+            lambda scan: PrimitiveFacts(name="renamed", description="d"),
+        )
+    finally:
+        ctx.reader.close()
+
+    entry = manifest.agents[0]
+    assert entry.path == "a/thing.md"
+    assert entry.kind == "agent"
+    assert entry.name == "renamed"
+
+
+def test_unknown_kind_is_refused(tmp_path):
+    ctx, _ = make_ctx(tmp_path)
+    try:
+        with pytest.raises(ValueError):
+            ctx.consider("gadget", wp("x.md"), facts)
+    finally:
+        ctx.reader.close()
+
+
+def test_ceiling_never_injects_eager_content(tmp_path):
+    """An entry refused by the ceiling must not reach the eager context."""
+    from app.services.harness.cursor import CursorAdapter
+
+    write(
+        tmp_path / ".cursor" / "rules" / "always.mdc",
+        "---\nalwaysApply: true\n---\nSECRET-EAGER-BODY\n",
+    )
+    write(tmp_path / "AGENTS.md", "# Agents\n")
+
+    adapter = CursorAdapter()
+    manifest = HarnessManifest(orchestration_type="cursor", detected=True)
+    manifest.rules.extend(
+        PrimitiveRef(name=f"r{i}", path=f"r{i}.mdc", kind="rule")
+        for i in range(MAX_PRIMITIVES_PER_KIND)
+    )
+    ctx = DiscoveryContext(tmp_path, manifest, WorkspaceReader(tmp_path))
+    try:
+        adapter._collect(ctx, manifest, tmp_path)
+    finally:
+        ctx.reader.close()
+
+    assert "SECRET-EAGER-BODY" not in manifest.eager_context

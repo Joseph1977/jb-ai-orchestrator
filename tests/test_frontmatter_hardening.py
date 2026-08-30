@@ -3,22 +3,75 @@
 
 """Bounded, non-recursive frontmatter scanning."""
 
+import os
+
 import pytest
 import yaml
 
 from app.services.harness.base import (
     MAX_FRONTMATTER_SCAN_CHARS,
     FrontmatterStatus,
+)
+from tests.harness_helpers import (
     first_description,
     parse_frontmatter_fields,
-    scan_primitive,
+    scan_path as scan_primitive,
 )
+
+
+class _RecordingHandle:
+    """Wraps a real handle; fails if the caller requests an unbounded read."""
+
+    def __init__(self, handle, sizes):
+        self._handle = handle
+        self._sizes = sizes
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            raise AssertionError("unbounded read of a capability file")
+        self._sizes.append(size)
+        return self._handle.read(size)
+
+    def close(self):
+        self._handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 def write(tmp_path, name, text):
     path = tmp_path / name
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def instrument_reads(monkeypatch):
+    """Record every read size, leaving the real secure opener in place."""
+    sizes: list[int] = []
+    real_fdopen = os.fdopen
+
+    def recording_fdopen(fd, *args, **kwargs):
+        return _RecordingHandle(real_fdopen(fd, *args, **kwargs), sizes)
+
+    monkeypatch.setattr(os, "fdopen", recording_fdopen)
+    return sizes
+
+
+def instrument_opens(monkeypatch):
+    """Record each file actually opened for reading."""
+    opens: list[int] = []
+    real_fdopen = os.fdopen
+
+    def counting_fdopen(fd, *args, **kwargs):
+        opens.append(fd)
+        return real_fdopen(fd, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", counting_fdopen)
+    return opens
 
 
 # --- malformed input never aborts discovery ---------------------------------
@@ -159,29 +212,6 @@ def test_terminated_comment_is_still_stripped(tmp_path):
 # --- the read itself is bounded ---------------------------------------------
 
 
-class _RecordingHandle:
-    """Fails the test if the caller ever requests an unbounded read."""
-
-    def __init__(self, text, sizes):
-        self._text = text
-        self._pos = 0
-        self._sizes = sizes
-
-    def read(self, size=-1):
-        if size is None or size < 0:
-            raise AssertionError("unbounded read of a capability file")
-        self._sizes.append(size)
-        chunk = self._text[self._pos : self._pos + size]
-        self._pos += len(chunk)
-        return chunk
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
 def test_metadata_read_is_bounded_at_the_handle(tmp_path, monkeypatch):
     """Assert the requested size, not the call count.
 
@@ -191,37 +221,24 @@ def test_metadata_read_is_bounded_at_the_handle(tmp_path, monkeypatch):
     huge = "---\nname: huge\ndescription: Bounded\n---\n" + ("y" * 5_000_000)
     path = write(tmp_path, "huge.md", huge)
 
-    sizes: list[int] = []
-    real_open = type(path).open
-
-    def recording_open(self, *args, **kwargs):
-        if self == path:
-            return _RecordingHandle(huge, sizes)
-        return real_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(type(path), "open", recording_open)
+    sizes = instrument_reads(monkeypatch)
 
     scan = scan_primitive(path)
     assert scan.description == "Bounded"
     assert sizes, "expected the scanner to read through the file handle"
-    assert max(sizes) <= MAX_FRONTMATTER_SCAN_CHARS
+    # cap + 1: the extra character is what distinguishes "exactly at the
+    # window" from "larger than it" without a second metadata lookup.
+    assert max(sizes) <= MAX_FRONTMATTER_SCAN_CHARS + 1
 
 
 def test_scan_reads_each_file_once(tmp_path, monkeypatch):
     path = write(tmp_path, "once.md", "---\nname: once\ndescription: One read\n---\n")
-    opens: list[str] = []
-    real_open = type(path).open
-
-    def counting_open(self, *args, **kwargs):
-        opens.append(str(self))
-        return real_open(self, *args, **kwargs)
-
-    monkeypatch.setattr(type(path), "open", counting_open)
+    opens = instrument_opens(monkeypatch)
 
     scan = scan_primitive(path)
     assert scan.name == "once"
     assert scan.description == "One read"
-    assert opens.count(str(path)) == 1
+    assert len(opens) == 1
 
 
 # --- only a leading unterminated comment suppresses metadata -----------------
