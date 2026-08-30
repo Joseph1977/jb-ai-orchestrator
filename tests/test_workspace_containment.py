@@ -17,13 +17,14 @@ import os
 
 import pytest
 
-from app.services.harness import safe_io
 from app.services.harness.base import (
     RootInstructionUnreadable,
+    iter_workspace_files,
     scan_primitive,
 )
 from app.services.harness.registry import collect_manifest
-from app.services.harness.safe_io import (
+from app.services import workspace_io as safe_io
+from app.services.workspace_io import (
     ReaderUnavailableError,
     UnsafePathError,
     WorkspacePath,
@@ -65,12 +66,75 @@ def test_empty_and_dot_components_are_rejected():
             root.child(bad)
 
 
+@pytest.mark.parametrize(
+    "parts",
+    [
+        ("..", "AGENTS.md"),
+        ("",),
+        (".",),
+        ("/etc", "passwd"),
+        ("a/b",),
+        ("a\\b",),
+        ("\0bad",),
+        ("safe", 1),
+        ["safe"],
+    ],
+)
+def test_direct_construction_cannot_bypass_component_validation(parts):
+    with pytest.raises(UnsafePathError):
+        WorkspacePath(parts)
+
+
+@pytest.mark.parametrize("bad", ["", "a//b", "a/", "/a", "C:\\outside"])
+def test_parse_rejects_empty_or_absolute_shapes(bad):
+    with pytest.raises(UnsafePathError):
+        WorkspacePath.parse(bad)
+
+
 def test_parse_keeps_ordinary_relative_paths():
     assert WorkspacePath.parse(".cursor/rules/a.mdc").parts == (
         ".cursor",
         "rules",
         "a.mdc",
     )
+
+
+def test_scandir_classifies_entries_before_descriptor_context_closes(
+    tmp_path, monkeypatch
+):
+    """DT_UNKNOWN filesystems need the live directory fd for classification."""
+    state = {"active": False}
+
+    class Entry:
+        name = "file.md"
+
+        def is_dir(self, *, follow_symlinks):
+            assert follow_symlinks is False
+            assert state["active"]
+            return False
+
+        def is_file(self, *, follow_symlinks):
+            assert follow_symlinks is False
+            assert state["active"]
+            return True
+
+    class Scan:
+        def __enter__(self):
+            state["active"] = True
+            return self
+
+        def __exit__(self, *_exc):
+            state["active"] = False
+
+        def __iter__(self):
+            return iter([Entry()])
+
+    with WorkspaceReader(tmp_path) as reader:
+        monkeypatch.setattr(safe_io.os, "scandir", lambda _fd: Scan())
+        assert [wp.posix for wp in iter_workspace_files(reader, WorkspacePath())] == [
+            "file.md"
+        ]
+    assert state["active"] is False
 
 
 # --- symlink containment, per component ---------------------------------------
@@ -280,8 +344,6 @@ def test_traversal_holds_one_descriptor_at_a_time(tmp_path):
 
     before = open_fd_count()
     with reader_for(tmp_path) as reader:
-        from app.services.harness.base import iter_workspace_files
-
         found = [p.posix for p in iter_workspace_files(reader, WorkspacePath())]
         during = open_fd_count()
     assert len(found) == 1

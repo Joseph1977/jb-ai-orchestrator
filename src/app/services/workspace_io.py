@@ -1,13 +1,11 @@
 # Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
 # SPDX-License-Identifier: Apache-2.0
 
-"""Workspace-bound file access for harness discovery.
+"""Provider-neutral, workspace-bound file access.
 
-A workspace is untrusted input. Discovery must not be walked or read out of it
-by a crafted symlink, and the guarantee cannot live in the directory walker:
-adapters enumerate their own locations, and root instructions are read without
-walking anything at all. So containment lives here, at the only place discovery
-is allowed to open a file.
+A workspace is untrusted input. Services must not be walked or read out of it
+by a crafted symlink, and the guarantee cannot live in individual callers.
+Containment therefore lives here, at the place workspace files are opened.
 
 The design point is that **there is no separate validation step to race
 against**. Rather than resolving a path, checking the result, and reopening the
@@ -34,6 +32,7 @@ import os
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Iterator, List, Optional, TextIO
 
@@ -79,14 +78,31 @@ class WorkspacePath:
 
     parts: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.parts, tuple):
+            raise UnsafePathError("Workspace path components must be a tuple")
+        for part in self.parts:
+            if not isinstance(part, str):
+                raise UnsafePathError("Workspace path components must be strings")
+            if (
+                part in _FORBIDDEN_COMPONENTS
+                or "/" in part
+                or "\\" in part
+                or "\0" in part
+            ):
+                raise UnsafePathError(f"Unsafe path component: {part!r}")
+
     @classmethod
     def parse(cls, text: str) -> "WorkspacePath":
         """Build from a relative POSIX-ish string, rejecting unsafe shapes."""
-        normalized = str(text).replace("\\", "/")
+        if not isinstance(text, str):
+            raise UnsafePathError("Workspace path must be a string")
+        normalized = text.replace("\\", "/")
+        if not normalized:
+            raise UnsafePathError("Empty workspace path rejected")
         if normalized.startswith("/") or (len(normalized) > 1 and normalized[1] == ":"):
             raise UnsafePathError(f"Absolute path rejected: {text!r}")
-        parts = tuple(p for p in normalized.split("/") if p != "")
-        return cls(()).extend(parts)
+        return cls(tuple(normalized.split("/")))
 
     def extend(self, names) -> "WorkspacePath":
         for name in names:
@@ -94,8 +110,6 @@ class WorkspacePath:
         return self
 
     def child(self, name: str) -> "WorkspacePath":
-        if name in _FORBIDDEN_COMPONENTS or "/" in name or "\\" in name or "\0" in name:
-            raise UnsafePathError(f"Unsafe path component: {name!r}")
         return WorkspacePath(self.parts + (name,))
 
     @property
@@ -120,6 +134,20 @@ class WorkspacePath:
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.posix or "."
+
+
+class WorkspaceEntryKind(str, Enum):
+    FILE = "file"
+    DIRECTORY = "directory"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class WorkspaceEntry:
+    """Immutable entry facts captured while the scandir descriptor is open."""
+
+    name: str
+    kind: WorkspaceEntryKind
 
 
 # Test seam. Called with the WorkspacePath after its parent directory has been
@@ -181,8 +209,12 @@ class WorkspaceReader:
             os.close(fd)
             raise
 
-    def scandir(self, wp: WorkspacePath) -> List[os.DirEntry]:
+    def scandir(self, wp: WorkspacePath) -> List[WorkspaceEntry]:
         """Entries of ``wp`` sorted by name; unreadable or unsafe yields none.
+
+        File type is captured before the scandir descriptor closes. Returning
+        raw ``DirEntry`` objects is not portable: on filesystems that report
+        ``DT_UNKNOWN``, their classification needs that live descriptor.
 
         Best effort by design: one subtree we cannot read must not abort
         discovery for the whole workspace.
@@ -191,7 +223,24 @@ class WorkspaceReader:
         try:
             fd = self._open_dir(wp)
             with os.scandir(fd) as scan:
-                return sorted(scan, key=lambda entry: entry.name)
+                entries: List[WorkspaceEntry] = []
+                for entry in scan:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            kind = WorkspaceEntryKind.DIRECTORY
+                        elif entry.is_file(follow_symlinks=False):
+                            kind = WorkspaceEntryKind.FILE
+                        else:
+                            kind = WorkspaceEntryKind.OTHER
+                        entries.append(WorkspaceEntry(entry.name, kind))
+                    except OSError as exc:
+                        logger.warning(
+                            "Skipping unreadable entry %s/%s: %s",
+                            wp,
+                            entry.name,
+                            exc,
+                        )
+                return sorted(entries, key=lambda entry: entry.name)
         except OSError as exc:
             logger.warning("Skipping unreadable directory %s: %s", wp, exc)
             return []

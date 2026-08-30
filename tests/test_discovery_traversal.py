@@ -27,7 +27,7 @@ from app.services.harness.base import (
     iter_workspace_files,
 )
 from app.services.harness.generic import GenericAdapter
-from app.services.harness.safe_io import WorkspacePath, WorkspaceReader
+from app.services.workspace_io import WorkspacePath, WorkspaceReader
 from harness_helpers import pruned_files, reader_for, workspace_files, wp
 
 

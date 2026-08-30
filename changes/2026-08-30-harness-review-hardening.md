@@ -215,6 +215,43 @@ splits into `RootInstructionTooLarge` and `RootInstructionUnreadable`, each
 carrying its own `code`, and the controllers report `exc.code` rather than a
 fixed constant.
 
+## Fifth review round
+
+### Workspace-safe I/O is provider-neutral and covers hook reloads (high)
+
+Hook discovery checked configuration through the workspace reader and then
+reopened it with `Path.read_text`. Runtime hook execution also loaded the same
+files directly. Both paths could follow a symlink swapped in after the check,
+and both reads were unbounded.
+
+The safe reader now lives in the shared services layer, with no knowledge of
+Claude, Cursor, hooks, or workflow structure. The hook loader retains ownership
+of provider-specific locations and precedence, but opens each relative path
+through that reader. Reads stop at 64,001 characters; unsafe, non-regular,
+malformed, excessively nested, and oversized configurations are rejected whole
+and execute no hooks. Discovery adds the reason to manifest notes while runtime
+loading logs it and continues without optional hooks.
+
+### Workspace paths enforce their invariant at construction (medium)
+
+`WorkspacePath.parse` and `child` validated components, but the public dataclass
+constructor did not. A direct `WorkspacePath(("..", ...))` therefore reached
+descriptor-relative opens with traversal components intact. Validation now runs
+in `__post_init__`, covering every construction route and rejecting non-tuples,
+non-string components, empty or dot components, separators, NULs, and absolute
+shapes. Parsing no longer silently removes repeated or trailing separators.
+
+### Directory entries are classified before their descriptor closes (medium)
+
+The reader returned raw `DirEntry` objects after closing the scandir descriptor.
+That happened to work on APFS and ext4 because they usually provide `d_type`,
+but filesystems such as NFS can report `DT_UNKNOWN`; `is_file` and `is_dir` then
+need the descriptor and failed with `EBADF`, dropping valid workflow files.
+
+Classification now happens inside the scandir context and callers receive only
+immutable name/type facts. Discovery therefore behaves consistently across
+local filesystems, bind mounts, and network-backed workspaces.
+
 ## Migration / breaking
 
 No schema or configuration change.
@@ -241,10 +278,15 @@ No schema or configuration change.
   failures that are not about size — permissions, I/O, or a path the opener
   refuses — previously reported `ROOT_INSTRUCTIONS_TOO_LARGE`. A caller matching
   on that code for read failures must now match both.
+- **Unsafe hook configuration is ignored.** Symlinked, non-regular, malformed,
+  excessively nested, or over-64,000-character hook files no longer load. This
+  closes the same containment and resource gaps as primitive discovery; normal
+  Cursor and Claude hook files keep their existing precedence and schema.
 
 ## Verification
 
-650 tests pass on Python 3.11 (the CI version) and on 3.14. New coverage:
+673 tests pass on Python 3.11 (the CI version). Earlier rounds also passed on
+3.14. New coverage:
 `test_workspace_containment.py` (24) and a rewritten
 `test_discovery_traversal.py` (18), plus additions to
 `test_bounded_eager_reads.py` and `test_endpoint_root_budget.py`.

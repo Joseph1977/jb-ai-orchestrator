@@ -17,11 +17,11 @@ from pathlib import Path
 from typing import Optional
 
 from app.services.harness import base
-from app.services.harness.safe_io import WorkspacePath, WorkspaceReader
+from app.services.workspace_io import WorkspacePath, WorkspaceReader
 
 
 def wp(text: str) -> WorkspacePath:
-    return WorkspacePath.parse(text)
+    return WorkspacePath() if text == "" else WorkspacePath.parse(text)
 
 
 @contextmanager

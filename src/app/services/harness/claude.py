@@ -22,7 +22,11 @@ from app.services.harness.base import (
     iter_pruned_files,
     skill_policy,
 )
-from app.services.harness.safe_io import UnsafePathError, WorkspacePath
+from app.services.workspace_io import (
+    UnsafePathError,
+    WorkspaceEntryKind,
+    WorkspacePath,
+)
 
 
 def _rule_policy(scan: PrimitiveScan) -> tuple[LoadingPolicy, tuple[str, ...]]:
@@ -110,7 +114,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
         # has to be honoured here -- shared discovery never gets the chance.
         skills_dir = claude_dir.child("skills")
         for entry in ctx.reader.scandir(skills_dir):
-            if not entry.is_dir(follow_symlinks=False):
+            if entry.kind is not WorkspaceEntryKind.DIRECTORY:
                 continue
             if entry.name in PRUNED_DIR_NAMES:
                 continue
@@ -170,20 +174,21 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 if section is not None:
                     rules_sections.append(section)
 
-        if ctx.reader.exists(claude_dir.child("settings.json")) or ctx.reader.exists(
-            claude_dir.child("hooks.json")
-        ):
-            from app.services.hooks import load_hooks_for_workspace
+        from app.services.hooks import load_hooks_for_workspace
 
-            cfg = load_hooks_for_workspace(str(workspace))
-            if cfg.source == "claude" and cfg.events:
+        cfg = load_hooks_for_workspace(str(workspace), reader=ctx.reader)
+        manifest.notes.extend(cfg.diagnostics)
+        if cfg.source != "none":
+            if cfg.events:
                 manifest.notes.append(
-                    f"Loaded Claude hooks ({len(cfg.enabled_events)} events: "
+                    f"Loaded {cfg.source.title()} hooks "
+                    f"({len(cfg.enabled_events)} events: "
                     f"{', '.join(cfg.enabled_events)})"
                 )
             else:
                 manifest.notes.append(
-                    "Detected .claude settings/hooks (no runnable command hooks found)"
+                    f"Detected {cfg.source.title()} hook configuration "
+                    "(no runnable command hooks found)"
                 )
 
         # Claude treats ./CLAUDE.md and ./.claude/CLAUDE.md as project scope.

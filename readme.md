@@ -607,6 +607,12 @@ name and URL. See
 | `MULTIMODAL_MODEL_DENYLIST` | `gpt-3.5-turbo`, embeddings, … | Model ids that never receive attachments |
 | `MULTIMODAL_VISION_MARKERS` | `gpt-4o`, Claude, Gemini, … | Vision-capable markers used when no allowlist is set |
 
+Hook configuration keeps Cursor-first precedence, followed by Claude
+`hooks.json` and `settings.json`. Files are opened within the workspace without
+following symlinks and are limited to 64,000 characters. Unsafe, malformed,
+excessively nested, or oversized hook configuration is ignored and no hooks
+from it execute; discovery reports the reason in manifest notes.
+
 Full orchestrator and harness knobs are documented in
 [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) §11, and every key above appears in
 `src/.env/localhost/.env.example`.

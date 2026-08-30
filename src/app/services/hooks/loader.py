@@ -10,7 +10,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.services.workspace_io import (
+    ReaderUnavailableError,
+    UnsafePathError,
+    WorkspacePath,
+    WorkspaceReader,
+)
 from app.utils.logger import logger
+
+MAX_HOOK_CONFIG_CHARS = 64_000
 
 # Claude Code uses PascalCase event names; map to Cursor camelCase.
 _CLAUDE_EVENT_MAP = {
@@ -42,6 +50,7 @@ class HookConfig:
     source: str  # cursor | claude | none
     events: Dict[str, List[HookCommand]] = field(default_factory=dict)
     config_dir: Optional[str] = None  # directory containing hooks.json (for rel paths)
+    diagnostics: List[str] = field(default_factory=list)
 
     @property
     def enabled_events(self) -> List[str]:
@@ -135,44 +144,132 @@ def _parse_claude_hooks(data: dict, config_dir: Path) -> HookConfig:
     return HookConfig(source="claude", events=events, config_dir=str(config_dir))
 
 
-def load_hooks_for_workspace(workspace_path: str) -> HookConfig:
-    """Load project hooks from ``.cursor/hooks.json`` or Claude hook files."""
-    root = Path(workspace_path)
-    cursor_hooks = root / ".cursor" / "hooks.json"
-    if cursor_hooks.is_file():
-        try:
-            data = json.loads(cursor_hooks.read_text(encoding="utf-8"))
-            cfg = _parse_cursor_hooks(data if isinstance(data, dict) else {}, cursor_hooks.parent)
+def _config_dir(workspace_path: str, wp: WorkspacePath) -> Path:
+    return Path(workspace_path).joinpath(*wp.parent.parts)
+
+
+def _read_candidate(
+    reader: WorkspaceReader,
+    wp: WorkspacePath,
+    diagnostics: List[str],
+) -> Optional[str]:
+    try:
+        text, overflowed = reader.read_strict(wp, MAX_HOOK_CONFIG_CHARS)
+    except FileNotFoundError:
+        return None
+    except (OSError, UnsafePathError) as exc:
+        message = f"Hook configuration {wp.posix} is unreadable or unsafe; ignored"
+        diagnostics.append(message)
+        logger.warning("%s: %s", message, exc)
+        return None
+    if overflowed:
+        message = (
+            f"Hook configuration {wp.posix} exceeds {MAX_HOOK_CONFIG_CHARS} "
+            "characters; ignored"
+        )
+        diagnostics.append(message)
+        logger.warning(message)
+        return None
+    return text
+
+
+def _parse_json(
+    text: str,
+    wp: WorkspacePath,
+    diagnostics: List[str],
+) -> Optional[Any]:
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        message = f"Hook configuration {wp.posix} is malformed; ignored"
+        diagnostics.append(message)
+        logger.warning("%s: %s", message, exc)
+        return None
+
+
+def _load_hooks(
+    workspace_path: str,
+    reader: WorkspaceReader,
+) -> HookConfig:
+    diagnostics: List[str] = []
+    cursor_wp = WorkspacePath.parse(".cursor/hooks.json")
+    cursor_text = _read_candidate(reader, cursor_wp, diagnostics)
+    if cursor_text is not None:
+        data = _parse_json(cursor_text, cursor_wp, diagnostics)
+        if data is not None:
+            config_dir = _config_dir(workspace_path, cursor_wp)
+            cfg = _parse_cursor_hooks(
+                data if isinstance(data, dict) else {},
+                config_dir,
+            )
+            cfg.diagnostics.extend(diagnostics)
             logger.info(
                 "Loaded Cursor hooks from %s events=%s",
-                cursor_hooks,
+                cursor_wp,
                 cfg.enabled_events,
             )
             return cfg
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to parse %s: %s", cursor_hooks, exc)
 
-    claude_hooks = root / ".claude" / "hooks.json"
-    claude_settings = root / ".claude" / "settings.json"
-    for path in (claude_hooks, claude_settings):
-        if not path.is_file():
+    claude_detected = False
+    for wp in (
+        WorkspacePath.parse(".claude/hooks.json"),
+        WorkspacePath.parse(".claude/settings.json"),
+    ):
+        text = _read_candidate(reader, wp, diagnostics)
+        if text is None:
             continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or "hooks" not in data:
-                continue
-            cfg = _parse_claude_hooks(data, path.parent)
-            if cfg.events:
-                logger.info(
-                    "Loaded Claude hooks from %s events=%s",
-                    path,
-                    cfg.enabled_events,
-                )
-                return cfg
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("Failed to parse %s: %s", path, exc)
+        claude_detected = True
+        data = _parse_json(text, wp, diagnostics)
+        if data is None:
+            continue
+        if not isinstance(data, dict) or "hooks" not in data:
+            continue
+        cfg = _parse_claude_hooks(data, _config_dir(workspace_path, wp))
+        if cfg.events:
+            cfg.diagnostics.extend(diagnostics)
+            logger.info(
+                "Loaded Claude hooks from %s events=%s",
+                wp,
+                cfg.enabled_events,
+            )
+            return cfg
 
-    return HookConfig(source="none", events={})
+    return HookConfig(
+        source="claude" if claude_detected else "none",
+        events={},
+        diagnostics=diagnostics,
+    )
+
+
+def load_hooks_for_workspace(
+    workspace_path: str,
+    *,
+    reader: Optional[WorkspaceReader] = None,
+) -> HookConfig:
+    """Load bounded project hook configuration through workspace-safe I/O.
+
+    Cursor and Claude locations are adapter conventions normalized here; the
+    reader itself has no provider knowledge. A supplied reader is borrowed and
+    remains open. Runtime callers without a discovery context get a temporary
+    reader owned by this function.
+    """
+    owned_reader = reader is None
+    if reader is None:
+        try:
+            reader = WorkspaceReader(Path(workspace_path))
+        except (OSError, ReaderUnavailableError) as exc:
+            message = "Hook configuration could not be read safely; hooks disabled"
+            logger.warning("%s: %s", message, exc)
+            return HookConfig(
+                source="none",
+                events={},
+                diagnostics=[message],
+            )
+    try:
+        return _load_hooks(workspace_path, reader)
+    finally:
+        if owned_reader:
+            reader.close()
 
 
 def tool_matcher_name(function_name: str) -> str:

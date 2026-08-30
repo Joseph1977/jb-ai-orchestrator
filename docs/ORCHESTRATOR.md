@@ -389,8 +389,9 @@ descent. A directory or entry that cannot be read is logged and skipped rather
 than failing discovery.
 
 **Workspace containment.** A workspace is untrusted input, and the walker is not
-the boundary: adapters enumerate their own locations and root instructions are
-read without walking anything. Every discovery read therefore goes through one
+the boundary: adapters enumerate their own locations, root instructions are
+read without walking anything, and hooks are reloaded when tools execute.
+Workspace file access therefore goes through one provider-neutral,
 workspace-bound opener.
 
 Paths are held as validated components relative to the workspace — absolute
@@ -421,6 +422,10 @@ Consequences worth knowing:
 - **Fail closed.** Where the platform lacks `os.open(dir_fd=)` or
   `os.scandir(fd)`, the reader refuses to construct rather than falling back to
   path-based opens.
+- **Entries are classified while their directory is open.** The reader returns
+  immutable name/type facts, not `DirEntry` objects tied to a descriptor it has
+  already closed. This keeps traversal correct on NFS and other filesystems that
+  report `DT_UNKNOWN` and need a live descriptor for `is_file` / `is_dir`.
 
 **Discovery ceiling.** At most 200 primitives per kind are kept as a safety
 ceiling. Every catalog entry, from shared discovery and adapter enumeration
@@ -471,9 +476,11 @@ frontmatter there is no activation to honour.
   most `cap + 1` characters. Reading a file in full and slicing afterwards is
   not a cap: the file is already resident by the time the check runs.
 - Section order is meaningful and follows the adapter table above.
-- Hook files and Claude settings may be noted during discovery. Enabled hooks are
-  executed later at their matching lifecycle events; discovery itself does not run
-  them.
+- Hook files and Claude settings may be noted during discovery. Their reads use
+  the same workspace-bound opener, are capped at 64,000 characters, and reject
+  unsafe, malformed, excessively nested, or oversized inputs whole. Enabled hooks are
+  executed later at their matching lifecycle events; discovery itself does not
+  run them.
 
 ### Catalog construction and progressive disclosure
 
@@ -933,6 +940,11 @@ AG-UI exposes a generic `hook_permission` interrupt (no synthetic frontend tool 
 resume with `{"decision":"approve"|"deny","reason":"..."}`. Direct orchestrator
 clients use the equivalent persisted resume path.
 Script paths are resolved relative to the hooks config dir.
+Hook configuration is reopened through the provider-neutral workspace reader at
+execution time. Symlinks and non-regular files are refused, input is bounded to
+64,000 characters, and rejected configuration executes no hooks. Collection
+surfaces the rejection in manifest notes; execution-time loading logs it and
+continues with no hooks.
 
 ### Path policy (multi-tenant)
 
@@ -1157,6 +1169,7 @@ python scripts/orchestrator_continuity_exercise.py \
 | `src/app/services/prompt_loader.py` | YAML `{{placeholder}}` templates; leftover mustache fails closed |
 | `src/app/prompts/` | Binding and offload instruction templates |
 | `src/app/services/workspace_manager.py` | Source classification, provisioning, path confinement, cleanup primitive |
+| `src/app/services/workspace_io.py` | Provider-neutral descriptor-bound reads, path validation, entry classification |
 | `src/app/services/harness/base.py` | Manifest types, eager caps, metadata extraction, common primitive discovery |
 | `src/app/services/harness/{cursor,claude,generic}.py` | Adapter scoring and adapter-specific eager/catalog collection |
 | `src/app/services/harness/registry.py` | Adapter selection, manifest collection, progressive-disclosure catalog, basic system prompt |

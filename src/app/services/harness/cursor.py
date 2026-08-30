@@ -19,7 +19,7 @@ from app.services.harness.base import (
     read_root_instructions,
     iter_pruned_files,
 )
-from app.services.harness.safe_io import WorkspacePath
+from app.services.workspace_io import WorkspacePath
 
 
 def _rule_policy(scan: PrimitiveScan) -> tuple[LoadingPolicy, tuple[str, ...]]:
@@ -142,17 +142,22 @@ class CursorAdapter(HarnessAdapter):
         self._discover_primitives(ctx)
 
         # Hooks: parse and note; execution happens at tool/shell time via hooks.executor.
-        if ctx.reader.exists(cursor_dir.child("hooks.json")):
-            from app.services.hooks import load_hooks_for_workspace
+        from app.services.hooks import load_hooks_for_workspace
 
-            cfg = load_hooks_for_workspace(str(workspace))
+        cfg = load_hooks_for_workspace(str(workspace), reader=ctx.reader)
+        manifest.notes.extend(cfg.diagnostics)
+        if cfg.source != "none":
             if cfg.events:
                 manifest.notes.append(
-                    f"Loaded .cursor/hooks.json ({len(cfg.enabled_events)} events: "
+                    f"Loaded {cfg.source.title()} hooks "
+                    f"({len(cfg.enabled_events)} events: "
                     f"{', '.join(cfg.enabled_events)})"
                 )
             else:
-                manifest.notes.append("Detected .cursor/hooks.json (no runnable command hooks)")
+                manifest.notes.append(
+                    f"Detected {cfg.source.title()} hook configuration "
+                    "(no runnable command hooks found)"
+                )
 
         # AGENTS.md at the root, or inside .cursor/ (some workflows keep it there).
         agents_md_wp = WorkspacePath.parse("AGENTS.md")

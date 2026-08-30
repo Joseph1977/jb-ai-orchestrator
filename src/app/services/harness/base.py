@@ -16,8 +16,9 @@ import re
 
 import yaml
 
-from app.services.harness.safe_io import (
+from app.services.workspace_io import (
     UnsafePathError,
+    WorkspaceEntryKind,
     WorkspacePath,
     WorkspaceReader,
 )
@@ -558,18 +559,11 @@ def iter_workspace_files(
             except UnsafePathError as exc:
                 logger.warning("Skipping entry with unsafe name: %s", exc)
                 continue
-            try:
-                # follow_symlinks=False makes a symlink neither file nor
-                # directory, so links drop out without a separate branch.
-                if entry.is_dir(follow_symlinks=False):
-                    if recursive and entry.name not in PRUNED_DIR_NAMES:
-                        frontier.append((True, child))
-                elif entry.is_file(follow_symlinks=False):
-                    frontier.append((False, child))
-                elif entry.is_symlink():
-                    logger.warning("Skipping symlink %s", child)
-            except OSError as exc:
-                logger.warning("Skipping unreadable entry %s: %s", child, exc)
+            if entry.kind is WorkspaceEntryKind.DIRECTORY:
+                if recursive and entry.name not in PRUNED_DIR_NAMES:
+                    frontier.append((True, child))
+            elif entry.kind is WorkspaceEntryKind.FILE:
+                frontier.append((False, child))
         stack.extend(reversed(frontier))
 
 

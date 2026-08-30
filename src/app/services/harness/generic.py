@@ -21,7 +21,11 @@ from app.services.harness.base import (
     read_root_instructions,
     read_text_capped,
 )
-from app.services.harness.safe_io import UnsafePathError, WorkspacePath
+from app.services.workspace_io import (
+    UnsafePathError,
+    WorkspaceEntryKind,
+    WorkspacePath,
+)
 
 
 class GenericAdapter(HarnessAdapter):
@@ -40,10 +44,13 @@ class GenericAdapter(HarnessAdapter):
             return root
         # AGENTS.md inside a dotted config dir (e.g. .cursor/AGENTS.md).
         for entry in ctx.reader.scandir(WorkspacePath()):
-            if not entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+            if (
+                not entry.name.startswith(".")
+                or entry.kind is not WorkspaceEntryKind.DIRECTORY
+            ):
                 continue
             try:
-                candidate = WorkspacePath((entry.name,)).child("AGENTS.md")
+                candidate = WorkspacePath().child(entry.name).child("AGENTS.md")
             except UnsafePathError:
                 continue
             if ctx.reader.exists(candidate):
