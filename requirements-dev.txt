@@ -1,0 +1,7 @@
+# Test-only dependencies. Runtime dependencies live in src/requirements.txt
+# and are installed alongside these; pytest.ini sets asyncio_mode = auto, so
+# pytest-asyncio is required rather than optional.
+-r src/requirements.txt
+
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
