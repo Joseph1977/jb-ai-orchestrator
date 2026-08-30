@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from types import MappingProxyType
+from typing import List, Mapping, Optional
 import re
 
 import yaml
@@ -17,11 +19,35 @@ MAX_EAGER_FILE_CHARS = 6000
 MAX_EAGER_TOTAL_CHARS = 24000
 # Root playbook files (AGENTS.md / CLAUDE.md) must load in full or fail explicitly.
 MAX_ROOT_INSTRUCTION_CHARS = 512_000
-# Bounded metadata scan for catalog descriptions (never load full SKILL.md bodies).
+
+# Two independent bounds. The metadata window is what we read from the file
+# handle; the description bound applies to the prose region after frontmatter.
+# They are deliberately not shared with MAX_EAGER_FILE_CHARS: eager content is a
+# separate capped read, so changing one cap can never silently reshape the other.
+MAX_FRONTMATTER_SCAN_CHARS = 8192
 MAX_DESCRIPTION_SCAN_CHARS = 4096
+# Per-field cap for anything lifted out of frontmatter into the catalog.
+MAX_FIELD_CHARS = 200
+# Upper bound on scope patterns retained from a single `globs`/`paths` field.
+MAX_SCOPE_ITEMS = 64
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+
+# Whitelist of frontmatter keys the scanner will retain, by normalized shape.
+# Anything outside this list is discarded before it can reach an adapter.
+_SCALAR_FIELDS = ("name", "description")
+_BOOL_FIELDS = ("alwaysApply", "disable-model-invocation")
+_STR_TUPLE_FIELDS = ("globs", "paths")
+
+
+class FrontmatterStatus(str, Enum):
+    """Outcome of scanning a capability file's metadata block."""
+
+    ABSENT = "absent"
+    OK = "ok"
+    TRUNCATED = "truncated"  # metadata region larger than the scan window
+    MALFORMED = "malformed"
 
 
 class RootInstructionError(Exception):
@@ -99,85 +125,199 @@ def _strip_bom(text: str) -> str:
     return text
 
 
-def _strip_html_comments(text: str) -> str:
-    return _HTML_COMMENT_RE.sub("", text).strip()
+def _strip_html_comments(text: str) -> tuple[str, bool]:
+    """Remove complete comments; report whether an unterminated one remains.
+
+    An unterminated ``<!--`` means the comment runs past the scan window, so
+    everything we can see is comment body rather than metadata.
+    """
+    stripped = _HTML_COMMENT_RE.sub("", text)
+    return stripped.strip(), "<!--" in stripped
 
 
-def _read_description_scan(path: Path) -> str:
+def _read_metadata_window(path: Path) -> str:
+    """Read at most ``MAX_FRONTMATTER_SCAN_CHARS`` from the file handle.
+
+    Bounded at the handle rather than by slicing a full read, so an oversized
+    capability file never costs more than the window.
+    """
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            return handle.read(MAX_FRONTMATTER_SCAN_CHARS)
     except OSError:
         return ""
-    raw = _strip_bom(raw)
-    raw = _strip_html_comments(raw)
-    return raw[:MAX_DESCRIPTION_SCAN_CHARS]
 
 
-def parse_frontmatter_fields(path: Path) -> dict[str, str]:
-    """Parse YAML frontmatter name/description when present (bounded scan)."""
-    text = _read_description_scan(path)
+def _normalize_scalar(value: object) -> str:
+    """Collapse a YAML scalar to a capped single-line string.
+
+    Containers never reach ``str()``: a YAML alias graph is cheap to load but
+    astronomically expensive to walk or render, so it is rejected by shape.
+    """
+    if value is None or isinstance(value, (dict, list, tuple, set, bool)):
+        return ""
+    return " ".join(str(value).split())[:MAX_FIELD_CHARS]
+
+
+def _normalize_bool(value: object) -> Optional[bool]:
+    """Accept only real booleans; truthiness is not an activation signal."""
+    return value if value is True or value is False else None
+
+
+def _normalize_str_tuple(value: object) -> tuple[str, ...]:
+    """Validate a scope field as a shallow string or list of strings.
+
+    Deliberately non-recursive. Slicing and ``isinstance`` are safe against the
+    self-referential lists that YAML aliases can produce, whereas any structural
+    walk of such a value would not terminate in useful time.
+    """
+    if isinstance(value, str):
+        items: list[object] = [value]
+    elif isinstance(value, list):
+        items = value[:MAX_SCOPE_ITEMS]
+    else:
+        return ()
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        cleaned = " ".join(item.split())[:MAX_FIELD_CHARS]
+        if cleaned:
+            out.append(cleaned)
+    return tuple(out)
+
+
+def _whitelist_metadata(loaded: Mapping) -> dict[str, object]:
+    """Keep only known keys, normalized to scalars or immutable string tuples."""
+    meta: dict[str, object] = {}
+    for key in _SCALAR_FIELDS:
+        value = _normalize_scalar(loaded.get(key))
+        if value:
+            meta[key] = value
+    for key in _BOOL_FIELDS:
+        value = _normalize_bool(loaded.get(key))
+        if value is not None:
+            meta[key] = value
+    for key in _STR_TUPLE_FIELDS:
+        patterns = _normalize_str_tuple(loaded.get(key))
+        if patterns:
+            meta[key] = patterns
+    return meta
+
+
+def _load_frontmatter(text: str) -> tuple[dict, "FrontmatterStatus"]:
     if not text.startswith("---"):
-        return {}
+        return {}, FrontmatterStatus.ABSENT
     match = _FRONTMATTER_RE.match(text)
     if not match:
-        return {}
+        # Opening delimiter with no closing one inside the window: the metadata
+        # region is bigger than the scan, so the lines we can see are YAML keys
+        # rather than prose. Reporting ABSENT here would surface "---".
+        return {}, FrontmatterStatus.TRUNCATED
     try:
         loaded = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
-        # A malformed skill file degrades its catalog entry; it never breaks discovery.
-        return {}
+    except (yaml.YAMLError, RecursionError):
+        # RecursionError is a RuntimeError, not a YAMLError, and deeply nested
+        # sequences reach it well inside the scan window. One bad file degrades
+        # its own catalog entry; it never aborts discovery for the workspace.
+        return {}, FrontmatterStatus.MALFORMED
     if not isinstance(loaded, dict):
-        return {}
-
-    fields: dict[str, str] = {}
-    for key in ("name", "description"):
-        value = loaded.get(key)
-        if value is None or isinstance(value, (dict, list, bool)):
-            continue
-        text_value = " ".join(str(value).split())
-        if text_value:
-            fields[key] = text_value[:200]
-    return fields
+        return {}, FrontmatterStatus.MALFORMED
+    return loaded, FrontmatterStatus.OK
 
 
-def first_description(path: Path) -> str:
-    """Extract catalog metadata: frontmatter, first substantive heading, or line."""
-    text = _read_description_scan(path)
-    if not text:
-        return ""
+def _fallback_name(path: Path) -> str:
+    if path.name == "SKILL.md":
+        return path.parent.name
+    return path.stem
 
-    fm = parse_frontmatter_fields(path)
-    if fm.get("description"):
-        return fm["description"]
 
-    lines = text.splitlines()
-    fm_end = 0
+def _prose_description(text: str) -> str:
+    """First substantive heading or line after any frontmatter block."""
+    remainder = text
     if text.startswith("---"):
         match = _FRONTMATTER_RE.match(text)
         if match:
-            # match.end() sits on the closing delimiter, so skip past that line too.
-            fm_end = text[: match.end()].count("\n") + 1
-
-    for line in lines[fm_end:]:
+            remainder = text[match.end():]
+    for line in remainder[:MAX_DESCRIPTION_SCAN_CHARS].splitlines():
         stripped = line.strip()
         if not stripped:
             continue
         if stripped.startswith("#"):
             heading = stripped.lstrip("#").strip()
             if heading:
-                return heading[:200]
+                return heading[:MAX_FIELD_CHARS]
             continue
-        return stripped[:200]
+        return stripped[:MAX_FIELD_CHARS]
     return ""
 
 
+@dataclass(frozen=True)
+class PrimitiveScan:
+    """Validated metadata for one capability file, from a single bounded read.
+
+    Reports facts only. Mapping vendor fields onto a loading policy is the
+    adapter's job, so nothing here encodes Cursor or Claude semantics.
+    """
+
+    name: str
+    description: str
+    metadata: Mapping[str, object]
+    status: FrontmatterStatus
+
+
+def scan_primitive(path: Path) -> PrimitiveScan:
+    """Read a capability file's metadata once, within the scan window."""
+    raw = _read_metadata_window(path)
+    if not raw:
+        return PrimitiveScan(
+            name=_fallback_name(path),
+            description="",
+            metadata=MappingProxyType({}),
+            status=FrontmatterStatus.ABSENT,
+        )
+
+    text, unterminated_comment = _strip_html_comments(_strip_bom(raw))
+    if unterminated_comment:
+        return PrimitiveScan(
+            name=_fallback_name(path),
+            description="",
+            metadata=MappingProxyType({}),
+            status=FrontmatterStatus.TRUNCATED,
+        )
+
+    loaded, status = _load_frontmatter(text)
+    metadata = _whitelist_metadata(loaded) if status is FrontmatterStatus.OK else {}
+
+    description = str(metadata.get("description", ""))
+    if not description and status is not FrontmatterStatus.TRUNCATED:
+        description = _prose_description(text)
+
+    return PrimitiveScan(
+        name=str(metadata.get("name") or _fallback_name(path)),
+        description=description,
+        metadata=MappingProxyType(metadata),
+        status=status,
+    )
+
+
+def parse_frontmatter_fields(path: Path) -> dict[str, str]:
+    """Frontmatter name/description as strings, without the prose fallback."""
+    scan = scan_primitive(path)
+    return {
+        key: value
+        for key, value in scan.metadata.items()
+        if key in _SCALAR_FIELDS and isinstance(value, str)
+    }
+
+
+def first_description(path: Path) -> str:
+    """Catalog description: frontmatter, else first heading or line."""
+    return scan_primitive(path).description
+
+
 def primitive_name_from_path(path: Path) -> str:
-    fm = parse_frontmatter_fields(path)
-    if fm.get("name"):
-        return fm["name"]
-    if path.name == "SKILL.md":
-        return path.parent.name
-    return path.stem
+    return scan_primitive(path).name
 
 
 def rel(path: Path, workspace: Path) -> str:
@@ -257,10 +397,11 @@ class HarnessAdapter:
                 if norm_path in seen_paths:
                     continue
                 seen_paths.add(norm_path)
+                scan = scan_primitive(md)
                 ref = PrimitiveRef(
-                    name=primitive_name_from_path(md),
+                    name=scan.name,
                     path=norm_path,
-                    description=first_description(md),
+                    description=scan.description,
                     kind=kind,
                 )
                 bucket = {
