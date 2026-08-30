@@ -11,19 +11,17 @@ markdown that looks like a skill/agent for lazy loading.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 from app.services.harness.base import (
+    DiscoveryContext,
     HarnessAdapter,
     HarnessManifest,
     LoadingPolicy,
-    PrimitiveRef,
-    first_description,
-    normalize_catalog_path,
+    PrimitiveFacts,
     read_root_instructions,
     read_text_capped,
-    rel,
 )
+from app.services.harness.safe_io import UnsafePathError, WorkspacePath
 
 
 class GenericAdapter(HarnessAdapter):
@@ -36,13 +34,20 @@ class GenericAdapter(HarnessAdapter):
             return 15
         return 5
 
-    def _find_agents_md(self, workspace: Path) -> Path | None:
-        root = workspace / "AGENTS.md"
-        if root.exists():
+    def _find_agents_md(self, ctx: DiscoveryContext) -> WorkspacePath | None:
+        root = WorkspacePath.parse("AGENTS.md")
+        if ctx.reader.exists(root):
             return root
         # AGENTS.md inside a dotted config dir (e.g. .cursor/AGENTS.md).
-        for dotted in sorted(workspace.glob(".*/AGENTS.md")):
-            return dotted
+        for entry in ctx.reader.scandir(WorkspacePath()):
+            if not entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                continue
+            try:
+                candidate = WorkspacePath((entry.name,)).child("AGENTS.md")
+            except UnsafePathError:
+                continue
+            if ctx.reader.exists(candidate):
+                return candidate
         return None
 
     def collect(self, workspace: Path, *, detected: bool, confidence: int) -> HarnessManifest:
@@ -51,35 +56,37 @@ class GenericAdapter(HarnessAdapter):
             detected=detected,
             confidence=confidence,
         )
+        ctx = self._begin(workspace, manifest)
+        try:
+            return self._collect(ctx, manifest)
+        finally:
+            ctx.reader.close()
 
-        agents_md_path = self._find_agents_md(workspace)
-        agents_md = read_root_instructions(agents_md_path) if agents_md_path else ""
+    def _collect(self, ctx: DiscoveryContext, manifest: HarnessManifest) -> HarnessManifest:
+        agents_md_wp = self._find_agents_md(ctx)
+        agents_md = read_root_instructions(ctx.reader, agents_md_wp) if agents_md_wp else ""
 
         readme = ""
         for name in ("README.md", "readme.md", "README", "README.MD"):
-            candidate = workspace / name
-            if candidate.exists():
-                readme = read_text_capped(candidate)
+            candidate = WorkspacePath.parse(name)
+            if ctx.reader.exists(candidate):
+                readme = read_text_capped(ctx.reader, candidate)
                 break
 
         # Index primitives via shared discovery (flat + dotted paths).
-        capped: set[str] = set()
-        self._discover_primitives(workspace, manifest, capped)
-        if agents_md_path is not None:
-            self._append_primitive(
-                manifest,
+        self._discover_primitives(ctx)
+        if agents_md_wp is not None:
+            ctx.consider(
                 "rule",
-                PrimitiveRef(
-                    name=rel(agents_md_path, workspace),
-                    path=normalize_catalog_path(agents_md_path, workspace),
+                agents_md_wp,
+                lambda scan: PrimitiveFacts(
+                    name=agents_md_wp.posix,
                     description="",
-                    kind="rule",
                     policy=LoadingPolicy.EAGER,
                     source="root-instructions",
                 ),
-                capped,
             )
-        self._discover_scoped_instructions(workspace, manifest, capped)
+        self._discover_scoped_instructions(ctx)
 
         manifest.eager_context = self._assemble_eager(
             [("Project Agents (AGENTS.md)", agents_md)],

@@ -18,6 +18,8 @@ from app.services.harness.base import (
     HarnessManifest,
     PrimitiveRef,
     RootInstructionError,
+    RootInstructionTooLarge,
+    RootInstructionUnreadable,
 )
 from app.services.harness.registry import (
     collect_manifest,
@@ -33,6 +35,8 @@ __all__ = [
     "HarnessManifest",
     "PrimitiveRef",
     "RootInstructionError",
+    "RootInstructionTooLarge",
+    "RootInstructionUnreadable",
     "detect_adapter",
     "get_adapter",
     "collect_manifest",

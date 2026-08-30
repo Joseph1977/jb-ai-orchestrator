@@ -30,7 +30,6 @@ from fastapi.responses import JSONResponse
 from app.controllers.agent_controller import get_tool_hub
 from app.db.session import get_session
 from app.models.bindings import (
-    ROOT_INSTRUCTIONS_TOO_LARGE,
     SESSION_CLOSED,
     SESSION_CLOSING,
 )
@@ -450,7 +449,7 @@ def _root_instruction_error_response(exc: RootInstructionError) -> JSONResponse:
         content={
             "success": False,
             "error": str(exc),
-            "errorCode": ROOT_INSTRUCTIONS_TOO_LARGE,
+            "errorCode": exc.code,
         },
     )
 
@@ -561,7 +560,7 @@ async def initiate(request: InitiateOrchestratorInput):
                 success=False,
                 orchestratorGuid=execution_id,
                 error=str(exc),
-                errorCode=ROOT_INSTRUCTIONS_TOO_LARGE,
+                errorCode=exc.code,
             ).model_dump(mode="json"),
         )
     except Exception as exc:
