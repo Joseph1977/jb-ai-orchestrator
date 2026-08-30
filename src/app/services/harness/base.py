@@ -564,8 +564,6 @@ def iter_workspace_files(
                     frontier.append((True, child))
             elif entry.kind is WorkspaceEntryKind.FILE:
                 frontier.append((False, child))
-            elif entry.kind is WorkspaceEntryKind.SYMLINK:
-                logger.warning("Skipping symlink %s", child)
         stack.extend(reversed(frontier))
 
 
@@ -686,6 +684,20 @@ class DiscoveryContext:
             for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
             for ref in bucket
         }
+
+    def __enter__(self) -> "DiscoveryContext":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        try:
+            count = self.reader.skipped_symlink_count
+            if count:
+                self.manifest.notes.append(
+                    f"{count} unique symlinked workspace paths skipped during "
+                    "discovery; symlinks are unsupported."
+                )
+        finally:
+            self.reader.close()
 
     def is_capped(self, kind: str) -> bool:
         """True once this kind has *confirmed* overflow, not merely filled."""

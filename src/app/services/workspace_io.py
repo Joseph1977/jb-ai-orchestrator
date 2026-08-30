@@ -28,6 +28,7 @@ falling back to path-based opens.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from contextlib import contextmanager
@@ -168,6 +169,7 @@ class WorkspaceReader:
             )
         self.workspace = workspace
         self._anchor: Optional[int] = os.open(str(workspace), _ANCHOR_FLAGS)
+        self._skipped_symlink_paths: set[str] = set()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -185,6 +187,10 @@ class WorkspaceReader:
         self.close()
 
     @property
+    def skipped_symlink_count(self) -> int:
+        return len(self._skipped_symlink_paths)
+
+    @property
     def _anchor_fd(self) -> int:
         if self._anchor is None:
             raise UnsafePathError("Reader is closed")
@@ -195,15 +201,46 @@ class WorkspaceReader:
     def _open_dir(self, wp: WorkspacePath) -> int:
         """Descriptor for ``wp``, refusing a symlink at any component."""
         fd = os.dup(self._anchor_fd)
+        parent = WorkspacePath()
         try:
             for part in wp.parts:
-                nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                try:
+                    nxt = os.open(part, _DIR_FLAGS, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        try:
+                            info = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                        except OSError:
+                            pass
+                        else:
+                            if stat.S_ISLNK(info.st_mode):
+                                self._record_symlink(parent, part)
+                    raise
                 os.close(fd)
                 fd = nxt
+                parent = parent.child(part)
             return fd
         except BaseException:
             os.close(fd)
             raise
+
+    def _record_symlink(self, parent: WorkspacePath, name: str) -> None:
+        try:
+            path = parent.child(name).posix
+        except UnsafePathError as exc:
+            logger.warning("Skipping entry with unsafe name: %s", exc)
+            return
+        if path in self._skipped_symlink_paths:
+            return
+        self._skipped_symlink_paths.add(path)
+        logger.warning("Skipping symlink %s", path)
+
+    @staticmethod
+    def _log_scan_error(message: str, *args, exc: OSError) -> None:
+        if exc.errno == errno.ENOENT:
+            logger.debug(message, *args, exc)
+        else:
+            logger.warning(message, *args, exc)
 
     def scandir(self, wp: WorkspacePath) -> List[WorkspaceEntry]:
         """Entries of ``wp`` sorted by name; unreadable or unsafe yields none.
@@ -224,6 +261,7 @@ class WorkspaceReader:
                     try:
                         if entry.is_symlink():
                             kind = WorkspaceEntryKind.SYMLINK
+                            self._record_symlink(wp, entry.name)
                         elif entry.is_dir(follow_symlinks=False):
                             kind = WorkspaceEntryKind.DIRECTORY
                         elif entry.is_file(follow_symlinks=False):
@@ -232,23 +270,27 @@ class WorkspaceReader:
                             kind = WorkspaceEntryKind.OTHER
                         entries.append(WorkspaceEntry(entry.name, kind))
                     except OSError as exc:
-                        logger.warning(
+                        self._log_scan_error(
                             "Skipping unreadable entry %s/%s: %s",
                             wp,
                             entry.name,
-                            exc,
+                            exc=exc,
                         )
             return sorted(entries, key=lambda entry: entry.name)
         except OSError as exc:
             if entries:
-                logger.warning(
+                self._log_scan_error(
                     "Directory scan ended early for %s; preserving %d entries: %s",
                     wp,
                     len(entries),
-                    exc,
+                    exc=exc,
                 )
             else:
-                logger.warning("Skipping unreadable directory %s: %s", wp, exc)
+                self._log_scan_error(
+                    "Skipping unreadable directory %s: %s",
+                    wp,
+                    exc=exc,
+                )
             return sorted(entries, key=lambda entry: entry.name)
         finally:
             if fd is not None:
@@ -283,7 +325,12 @@ class WorkspaceReader:
         try:
             if _before_leaf_open is not None:
                 _before_leaf_open(wp)
-            fd = os.open(wp.name, _FILE_FLAGS, dir_fd=dir_fd)
+            try:
+                fd = os.open(wp.name, _FILE_FLAGS, dir_fd=dir_fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    self._record_symlink(wp.parent, wp.name)
+                raise
         finally:
             os.close(dir_fd)
         handle: Optional[TextIO] = None

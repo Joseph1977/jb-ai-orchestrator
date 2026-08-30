@@ -7,6 +7,7 @@ Instructions for anyone working in this repository, human or agent.
 | You are editing… | Also read… |
 |---|---|
 | `src/app/services/harness/**` | `docs/ORCHESTRATOR.md` §3 — adapter selection, eager caps, progressive disclosure |
+| `src/app/services/workspace_io.py` | `docs/ORCHESTRATOR.md` §3 — workspace containment and discovery traversal |
 | `src/app/services/context_compaction.py` | `docs/ORCHESTRATOR.md` §8 — offload, summarization, compaction, the `preCompact` hook |
 | Lifecycle, resume, close, persistence | `docs/ORCHESTRATOR.md` §10, §12, §13 |
 | `src/app/controllers/**`, public API | `readme.md` — the caller-facing contract |
@@ -18,10 +19,11 @@ behaviour; `readme.md` is the source of truth for the caller-facing API.
 
 ## Contributing
 
-- Branch from `master`, and open a pull request against it. Do not commit
-  directly to `master`.
-- Pull the latest `master` into your branch and resolve conflicts locally
+- Branch from `origin/on-going-dev`, and open a pull request against
+  `on-going-dev`. Do not commit directly to `on-going-dev` or `master`.
+- Pull the latest `on-going-dev` into your branch and resolve conflicts locally
   before opening or updating a pull request.
+- Update `master` only through a pull request from `on-going-dev`.
 - Do not merge your own pull request.
 - Never commit real credentials. Application settings live in
   `src/.env/{ENV}/.env` and secrets there are placeholders of the form

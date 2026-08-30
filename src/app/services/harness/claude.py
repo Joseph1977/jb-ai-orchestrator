@@ -59,11 +59,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             detected=detected,
             confidence=confidence,
         )
-        ctx = self._begin(workspace, manifest)
-        try:
+        with self._begin(workspace, manifest) as ctx:
             return self._collect(ctx, manifest, workspace)
-        finally:
-            ctx.reader.close()
 
     def _collect(
         self,

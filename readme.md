@@ -611,7 +611,9 @@ Hook configuration keeps Cursor-first precedence, followed by Claude
 `hooks.json` and `settings.json`. Files are opened within the workspace without
 following symlinks and are limited to 64,000 characters. Unsafe, malformed,
 excessively nested, or oversized hook configuration is ignored and no hooks
-from it execute; discovery reports the reason in manifest notes.
+from it execute; discovery reports the reason in manifest notes. Primitive
+discovery also refuses symlinks and reports one manifest note with the number of
+unique symlinked workspace paths skipped during that collection.
 
 Full orchestrator and harness knobs are documented in
 [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) §11, and every key above appears in

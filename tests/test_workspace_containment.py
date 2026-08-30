@@ -188,10 +188,49 @@ def test_scandir_preserves_entries_before_mid_iteration_failure(
     assert [entry.name for entry in entries] == ["first.md"]
 
 
+def test_missing_optional_directory_does_not_warn(tmp_path, monkeypatch):
+    debug_calls = []
+    warning_calls = []
+    monkeypatch.setattr(
+        workspace_io.logger,
+        "debug",
+        lambda *args: debug_calls.append(args),
+    )
+    monkeypatch.setattr(
+        workspace_io.logger,
+        "warning",
+        lambda *args: warning_calls.append(args),
+    )
+
+    with WorkspaceReader(tmp_path) as reader:
+        assert reader.scandir(wp("missing")) == []
+
+    assert debug_calls
+    assert warning_calls == []
+
+
+@pytest.mark.parametrize(
+    "error_number",
+    [errno.EACCES, errno.ESTALE, errno.EIO, errno.ELOOP, errno.ENOTDIR, errno.EMFILE],
+)
+def test_non_missing_directory_errors_warn(
+    tmp_path, monkeypatch, caplog, error_number
+):
+    with WorkspaceReader(tmp_path) as reader:
+        def fail(_wp):
+            raise OSError(error_number, os.strerror(error_number))
+
+        monkeypatch.setattr(reader, "_open_dir", fail)
+        with caplog.at_level("WARNING"):
+            assert reader.scandir(wp("problem")) == []
+
+    assert "Skipping unreadable directory problem" in caplog.text
+
+
 # --- symlink containment, per component ---------------------------------------
 
 
-def test_symlinked_discovery_root_is_not_traversed(tmp_path):
+def test_symlinked_discovery_root_is_not_traversed(tmp_path, caplog):
     """A symlinked root is the case a child-only check misses entirely."""
     outside = tmp_path.parent / "outside-root"
     write(outside / "secret.md", "LEAKED")
@@ -200,9 +239,12 @@ def test_symlinked_discovery_root_is_not_traversed(tmp_path):
     (workspace / ".claude").mkdir()
     os.symlink(outside, workspace / ".claude" / "rules")
 
-    with reader_for(workspace) as reader:
+    with reader_for(workspace) as reader, caplog.at_level("WARNING"):
         assert reader.scandir(wp(".claude/rules")) == []
         assert reader.read_capped(wp(".claude/rules/secret.md"), 100) is None
+        assert reader.skipped_symlink_count == 1
+
+    assert caplog.text.count("Skipping symlink .claude/rules") == 1
 
 
 def test_symlinked_parent_component_is_rejected(tmp_path):
@@ -265,6 +307,83 @@ def test_symlink_skipped_by_walker_is_logged(tmp_path, caplog):
 
     assert found == ["target.md"]
     assert "Skipping symlink alias.md" in caplog.text
+
+
+def test_symlink_warning_is_deduplicated_per_reader(tmp_path, caplog):
+    write(tmp_path / "target.md", "content")
+    os.symlink(tmp_path / "target.md", tmp_path / "alias.md")
+
+    with WorkspaceReader(tmp_path) as reader, caplog.at_level("WARNING"):
+        list(iter_workspace_files(reader, WorkspacePath()))
+        list(iter_workspace_files(reader, WorkspacePath()))
+        assert reader.skipped_symlink_count == 1
+
+    assert caplog.text.count("Skipping symlink alias.md") == 1
+
+
+def test_manifest_reports_unique_symlink_count_once(tmp_path):
+    write(tmp_path / "README.md", "# Project")
+    write(tmp_path / "target.md", "content")
+    os.symlink(tmp_path / "target.md", tmp_path / "first.md")
+    os.symlink(tmp_path / "target.md", tmp_path / "second.md")
+
+    manifest = collect_manifest(str(tmp_path))
+    notes = [note for note in manifest.notes if "symlinked workspace paths" in note]
+
+    assert notes == [
+        "2 unique symlinked workspace paths skipped during discovery; "
+        "symlinks are unsupported."
+    ]
+
+
+def test_manifest_has_no_symlink_note_when_none_are_seen(tmp_path):
+    write(tmp_path / "README.md", "# Project")
+
+    manifest = collect_manifest(str(tmp_path))
+
+    assert not any("symlinked workspace paths" in note for note in manifest.notes)
+
+
+def test_symlink_diagnostics_are_isolated_between_collections(tmp_path, caplog):
+    write(tmp_path / "README.md", "# Project")
+    write(tmp_path / "target.md", "content")
+    os.symlink(tmp_path / "target.md", tmp_path / "alias.md")
+
+    with caplog.at_level("WARNING"):
+        first = collect_manifest(str(tmp_path))
+        second = collect_manifest(str(tmp_path))
+
+    assert caplog.text.count("Skipping symlink alias.md") == 2
+    for manifest in (first, second):
+        assert sum("symlinked workspace paths" in note for note in manifest.notes) == 1
+
+
+def test_context_flushes_diagnostics_and_closes_reader_when_adapter_raises(
+    tmp_path, monkeypatch
+):
+    from app.services.harness.generic import GenericAdapter
+
+    write(tmp_path / "target.md", "content")
+    os.symlink(tmp_path / "target.md", tmp_path / "alias.md")
+    captured = {}
+
+    def fail(_adapter, ctx, manifest):
+        captured["manifest"] = manifest
+        captured["reader"] = ctx.reader
+        list(iter_workspace_files(ctx.reader, WorkspacePath()))
+        raise RuntimeError("collect failed")
+
+    monkeypatch.setattr(GenericAdapter, "_collect", fail)
+
+    with pytest.raises(RuntimeError, match="collect failed"):
+        GenericAdapter().collect(tmp_path, detected=False, confidence=5)
+
+    assert any(
+        "1 unique symlinked workspace paths" in note
+        for note in captured["manifest"].notes
+    )
+    with pytest.raises(UnsafePathError):
+        captured["reader"].scandir(WorkspacePath())
 
 
 def test_leaf_swapped_to_a_symlink_after_traversal_is_refused(tmp_path):
