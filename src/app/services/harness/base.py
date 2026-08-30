@@ -9,10 +9,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from types import MappingProxyType
-from typing import List, Mapping, Optional
+from typing import Iterator, List, Mapping, Optional
+import os
 import re
 
 import yaml
+
+from app.utils.logger import logger
 
 # Caps to keep eagerly-injected context from blowing the token budget.
 MAX_EAGER_FILE_CHARS = 6000
@@ -33,6 +36,41 @@ MAX_SCOPE_ITEMS = 64
 
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
+
+# Directories never worth descending into when looking for capability files.
+# Pruned during the walk, not filtered afterwards: Path.glob("**/...") would
+# already have traversed node_modules by the time we could discard the results.
+PRUNED_DIR_NAMES = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        ".idea",
+        ".mypy_cache",
+        ".next",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "site-packages",
+        "target",
+        "venv",
+        ".venv",
+        "vendor",
+    }
+)
+
+# Declarative capability roots. A "<root>/skills" directory anywhere in the
+# tree is a skills root, walked recursively so category folders and monorepo
+# packages are both covered.
+SKILL_ROOT_DIRS = (".agents", ".claude", ".codex", ".cursor")
+
+# Safety ceiling against runaway discovery in an unfamiliar workspace. This is
+# not the token control -- the rendered-catalog budget in the registry is.
+MAX_PRIMITIVES_PER_KIND = 200
 
 # Whitelist of frontmatter keys the scanner will retain, by normalized shape.
 # Anything outside this list is discarded before it can reach an adapter.
@@ -351,6 +389,40 @@ def normalize_catalog_path(path: Path, workspace: Path) -> str:
     return rel(path, workspace).replace("\\", "/")
 
 
+def walk_pruned(root: Path) -> Iterator[tuple[Path, list[str]]]:
+    """Walk ``root`` top-down, pruning heavy directories before descending.
+
+    Yields ``(directory, filenames)`` with both directory and file order
+    sorted, so discovery is deterministic across platforms.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d not in PRUNED_DIR_NAMES)
+        yield Path(dirpath), sorted(filenames)
+
+
+def _under_skills_root(directory: Path, workspace: Path) -> bool:
+    """True when ``directory`` sits inside a ``<root>/skills`` tree."""
+    try:
+        parts = directory.relative_to(workspace).parts
+    except ValueError:
+        return False
+    return any(
+        parts[i] in SKILL_ROOT_DIRS and parts[i + 1] == "skills"
+        for i in range(len(parts) - 1)
+    )
+
+
+def iter_skill_files(workspace: Path) -> Iterator[Path]:
+    """Every SKILL.md under any capability root, at any depth.
+
+    Covers category folders (``.cursor/skills/shipping/land-it/SKILL.md``) and
+    monorepo packages (``apps/web/.cursor/skills/deploy/SKILL.md``) alike.
+    """
+    for directory, filenames in walk_pruned(workspace):
+        if "SKILL.md" in filenames and _under_skills_root(directory, workspace):
+            yield directory / "SKILL.md"
+
+
 class HarnessAdapter:
     """Base class for harness adapters."""
 
@@ -386,16 +458,18 @@ class HarnessAdapter:
         workspace: Path,
         manifest: HarnessManifest,
     ) -> None:
-        """Discover flat and dotted skills/commands/rules/agents paths."""
+        """Discover skills/commands/rules/agents across all capability roots."""
         patterns = [
-            (".cursor/skills/*/SKILL.md", "skill"),
-            (".cursor/skills/*.md", "skill"),
-            (".claude/skills/*/SKILL.md", "skill"),
+            (".agents/skills/*.md", "skill"),
             (".claude/skills/*.md", "skill"),
+            (".codex/skills/*.md", "skill"),
+            (".cursor/skills/*.md", "skill"),
             (".cursor/commands/*.md", "command"),
             (".claude/commands/*.md", "command"),
             (".cursor/agents/*.md", "agent"),
             (".claude/agents/*.md", "agent"),
+            (".claude/rules/**/*.md", "rule"),
+            (".cursor/rules/**/*.mdc", "rule"),
             ("skills/**/*.md", "skill"),
             ("agents/**/*.md", "agent"),
             ("commands/**/*.md", "command"),
@@ -408,25 +482,57 @@ class HarnessAdapter:
             for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
             for ref in bucket
         }
-        for pattern, kind in patterns:
-            for md in sorted(workspace.glob(pattern)):
-                if not md.is_file():
-                    continue
-                norm_path = normalize_catalog_path(md, workspace)
-                if norm_path in seen_paths:
-                    continue
-                seen_paths.add(norm_path)
-                scan = scan_primitive(md)
-                ref = PrimitiveRef(
+        buckets = {
+            "skill": manifest.skills,
+            "command": manifest.commands,
+            "agent": manifest.agents,
+            "rule": manifest.rules,
+        }
+        capped: set[str] = set()
+
+        def add(md: Path, kind: str) -> None:
+            if not md.is_file():
+                return
+            norm_path = normalize_catalog_path(md, workspace)
+            if norm_path in seen_paths:
+                return
+            bucket = buckets[kind]
+            if len(bucket) >= MAX_PRIMITIVES_PER_KIND:
+                if kind not in capped:
+                    capped.add(kind)
+                    logger.warning(
+                        "Discovery ceiling reached for %ss (%d); further %ss ignored",
+                        kind,
+                        MAX_PRIMITIVES_PER_KIND,
+                        kind,
+                    )
+                    manifest.notes.append(
+                        f"Discovery ceiling reached: more than {MAX_PRIMITIVES_PER_KIND} "
+                        f"{kind}s found; the rest were ignored"
+                    )
+                return
+            seen_paths.add(norm_path)
+            scan = scan_primitive(md)
+            # Cross-vendor opt-out: the skill is invocable but must not be
+            # auto-selected, so it is withheld from the model-facing catalog.
+            policy = (
+                LoadingPolicy.EXPLICIT_ONLY
+                if scan.metadata.get("disable-model-invocation") is True
+                else LoadingPolicy.MODEL_DISCOVERABLE
+            )
+            bucket.append(
+                PrimitiveRef(
                     name=scan.name,
                     path=norm_path,
                     description=scan.description,
                     kind=kind,
+                    policy=policy,
+                    source="discovery",
                 )
-                bucket = {
-                    "skill": manifest.skills,
-                    "command": manifest.commands,
-                    "agent": manifest.agents,
-                    "rule": manifest.rules,
-                }[kind]
-                bucket.append(ref)
+            )
+
+        for skill_md in iter_skill_files(workspace):
+            add(skill_md, "skill")
+        for pattern, kind in patterns:
+            for md in sorted(workspace.glob(pattern)):
+                add(md, kind)
