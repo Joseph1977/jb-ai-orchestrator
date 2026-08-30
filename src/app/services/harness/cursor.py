@@ -11,12 +11,34 @@ from typing import List
 from app.services.harness.base import (
     HarnessAdapter,
     HarnessManifest,
+    LoadingPolicy,
     PrimitiveRef,
+    PrimitiveScan,
     first_description,
     read_root_instructions,
     read_text_capped,
     rel,
+    scan_primitive,
 )
+
+
+def _rule_policy(scan: PrimitiveScan) -> tuple[LoadingPolicy, tuple[str, ...]]:
+    """Map Cursor's frontmatter onto a generic loading policy.
+
+    Cursor derives four activation modes from ``alwaysApply``, ``globs`` and
+    ``description``; only the first is unconditional. Injecting every rule
+    turned agent-requested and manual rules into always-on ones, which is how
+    contradictory instructions ended up in the same prompt.
+    """
+    metadata = scan.metadata
+    if metadata.get("alwaysApply") is True:
+        return LoadingPolicy.EAGER, ()
+    globs = metadata.get("globs") or ()
+    if globs:
+        return LoadingPolicy.SCOPED, tuple(globs)
+    if metadata.get("description"):
+        return LoadingPolicy.MODEL_DISCOVERABLE, ()
+    return LoadingPolicy.EXPLICIT_ONLY, ()
 
 
 class CursorAdapter(HarnessAdapter):
@@ -42,22 +64,44 @@ class CursorAdapter(HarnessAdapter):
         )
         cursor_dir = workspace / ".cursor"
 
-        # Rules: .cursor/rules/*.mdc (+ legacy .cursorrules). Injected eagerly.
+        # Rules: .cursor/rules/*.mdc. Only alwaysApply rules load eagerly; the
+        # rest are catalogued so the model can pull them when they apply.
+        # Plain .md here is intentionally skipped -- Cursor ignores it too,
+        # since without frontmatter there is no activation to honour.
         rules_sections: List[str] = []
         rules_dir = cursor_dir / "rules"
         if rules_dir.is_dir():
             for rule_file in sorted(rules_dir.rglob("*.mdc")):
+                scan = scan_primitive(rule_file)
+                policy, scope = _rule_policy(scan)
                 manifest.rules.append(
                     PrimitiveRef(
                         name=rule_file.stem,
                         path=rel(rule_file, workspace),
-                        description=first_description(rule_file),
+                        description=scan.description,
                         kind="rule",
+                        policy=policy,
+                        scope=scope,
+                        source="cursor-rules",
                     )
                 )
-                rules_sections.append(read_text_capped(rule_file))
+                if policy is LoadingPolicy.EAGER:
+                    rules_sections.append(read_text_capped(rule_file))
+
+        # Legacy .cursorrules predates frontmatter, so it has no activation to
+        # read and stays unconditional. Kept for backward compatibility only.
         legacy = workspace / ".cursorrules"
         if legacy.exists():
+            manifest.rules.append(
+                PrimitiveRef(
+                    name=".cursorrules",
+                    path=rel(legacy, workspace),
+                    description=first_description(legacy),
+                    kind="rule",
+                    policy=LoadingPolicy.EAGER,
+                    source="legacy-cursorrules",
+                )
+            )
             rules_sections.append(read_text_capped(legacy))
 
         # Agents: .cursor/agents/*.md
