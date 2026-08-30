@@ -27,7 +27,11 @@ def test_detect_generic_fallback(tmp_path):
 
 def test_collect_cursor_manifest(dotdirs, tmp_path):
     (tmp_path / ".cursor" / "rules").mkdir(parents=True)
+    # A rule with no frontmatter is Manual in Cursor: catalogued, never injected.
     (tmp_path / ".cursor" / "rules" / "sec.mdc").write_text("Security rule body")
+    (tmp_path / ".cursor" / "rules" / "always.mdc").write_text(
+        "---\nalwaysApply: true\n---\nAlways rule body"
+    )
     (tmp_path / ".cursor" / "skills").mkdir(parents=True)
     (tmp_path / ".cursor" / "skills" / "review.md").write_text("Review skill\nDoes review")
     (tmp_path / "AGENTS.md").write_text("# Agents\nProject guidance here")
@@ -38,7 +42,8 @@ def test_collect_cursor_manifest(dotdirs, tmp_path):
     assert any(r.name == "sec" for r in manifest.rules)
     assert any(s.name == "review" for s in manifest.skills)
     assert "Project guidance here" in manifest.eager_context
-    assert "Security rule body" in manifest.eager_context
+    assert "Always rule body" in manifest.eager_context
+    assert "Security rule body" not in manifest.eager_context
 
 
 def test_explicit_type_overrides_detection(dotdirs, tmp_path):

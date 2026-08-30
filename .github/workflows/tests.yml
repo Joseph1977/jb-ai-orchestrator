@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - on-going-dev
+      - master
+
+# A newer push to the same branch makes an in-flight run redundant.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # The Dockerfile and readme both define 3.11 as the supported
+          # runtime; latest patch, no matrix until other versions are claimed.
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            src/requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        # Several tests shell out to git; conftest supplies the identity via
+        # GIT_AUTHOR_*/GIT_COMMITTER_* so no global git config is needed.
+        run: pytest -q
