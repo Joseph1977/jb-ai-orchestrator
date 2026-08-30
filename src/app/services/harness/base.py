@@ -242,7 +242,13 @@ class HarnessAdapter:
             ("commands/**/*.md", "command"),
             ("rules/**/*.md", "rule"),
         ]
-        seen_paths: set[str] = set()
+        # Adapters may already have catalogued some of these paths explicitly;
+        # seed from the manifest so discovery never lists a primitive twice.
+        seen_paths: set[str] = {
+            ref.path.replace("\\", "/")
+            for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
+            for ref in bucket
+        }
         for pattern, kind in patterns:
             for md in sorted(workspace.glob(pattern)):
                 if not md.is_file():
