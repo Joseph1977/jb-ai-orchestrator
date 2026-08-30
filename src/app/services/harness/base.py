@@ -724,16 +724,16 @@ class HarnessAdapter:
             for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
             for ref in bucket
         }
+        capped = set() if capped is None else capped
         for path in iter_scoped_instructions(workspace):
             norm_path = normalize_catalog_path(path, workspace)
             if norm_path in seen_paths:
                 continue
-            if len(manifest.rules) >= MAX_PRIMITIVES_PER_KIND:
-                break
-            seen_paths.add(norm_path)
             directory = str(Path(norm_path).parent).replace("\\", "/")
             scan = scan_primitive(path)
-            manifest.rules.append(
+            added = self._append_primitive(
+                manifest,
+                "rule",
                 PrimitiveRef(
                     name=norm_path,
                     path=norm_path,
@@ -742,8 +742,15 @@ class HarnessAdapter:
                     policy=LoadingPolicy.SCOPED,
                     scope=(f"{directory}/**",),
                     source="scoped-instructions",
-                )
+                ),
+                capped,
             )
+            if not added:
+                # The rule bucket is full. Stop walking, but never silently:
+                # a scoped instruction that vanishes without a note looks
+                # identical to one that was never written.
+                break
+            seen_paths.add(norm_path)
 
     def _discover_primitives(
         self,

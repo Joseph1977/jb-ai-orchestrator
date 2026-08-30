@@ -107,3 +107,25 @@ def test_catalog_paths_use_forward_slashes(tmp_path):
     for bucket in (manifest.skills, manifest.commands, manifest.agents, manifest.rules):
         for ref in bucket:
             assert "\\" not in ref.path
+
+
+def test_scoped_instructions_report_when_the_rule_bucket_is_full(tmp_path):
+    """A scoped instruction that vanishes silently is indistinguishable from
+    one that was never written."""
+    from app.services.harness.base import MAX_PRIMITIVES_PER_KIND
+
+    rules = tmp_path / ".cursor" / "rules"
+    rules.mkdir(parents=True)
+    for i in range(MAX_PRIMITIVES_PER_KIND + 5):
+        (rules / f"rule{i:04d}.mdc").write_text(
+            "---\ndescription: d\n---\nBody\n", encoding="utf-8"
+        )
+
+    nested = tmp_path / "packages" / "api"
+    nested.mkdir(parents=True)
+    (nested / "AGENTS.md").write_text("# Nested\n", encoding="utf-8")
+
+    manifest = collect_manifest(str(tmp_path))
+
+    assert len(manifest.rules) <= MAX_PRIMITIVES_PER_KIND
+    assert any("Discovery ceiling reached" in n for n in manifest.notes)
