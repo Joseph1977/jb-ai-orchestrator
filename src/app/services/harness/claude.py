@@ -7,15 +7,33 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from typing import List
+
 from app.services.harness.base import (
     HarnessAdapter,
     HarnessManifest,
+    LoadingPolicy,
     PrimitiveRef,
+    PrimitiveScan,
     first_description,
     read_root_instructions,
     read_text_capped,
     rel,
+    scan_primitive,
 )
+
+
+def _rule_policy(scan: PrimitiveScan) -> tuple[LoadingPolicy, tuple[str, ...]]:
+    """Map Claude rule frontmatter onto a generic loading policy.
+
+    Claude loads `.claude/rules/` recursively: a rule carrying `paths` applies
+    only when a matching file is touched, and one without it is unconditional,
+    at the same priority as `.claude/CLAUDE.md`.
+    """
+    paths = scan.metadata.get("paths") or ()
+    if paths:
+        return LoadingPolicy.SCOPED, tuple(paths)
+    return LoadingPolicy.EAGER, ()
 
 
 class ClaudeCodeAdapter(HarnessAdapter):
@@ -85,6 +103,30 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     )
                 )
 
+        # Rules: .claude/rules/**/*.md, discovered recursively. Unscoped rules
+        # load up front; path-scoped ones are catalogued with their patterns.
+        rules_sections: List[str] = []
+        rules_dir = claude_dir / "rules"
+        if rules_dir.is_dir():
+            for rule_file in sorted(rules_dir.rglob("*.md")):
+                if not rule_file.is_file():
+                    continue
+                scan = scan_primitive(rule_file)
+                policy, scope = _rule_policy(scan)
+                manifest.rules.append(
+                    PrimitiveRef(
+                        name=scan.name,
+                        path=rel(rule_file, workspace),
+                        description=scan.description,
+                        kind="rule",
+                        policy=policy,
+                        scope=scope,
+                        source="claude-rules",
+                    )
+                )
+                if policy is LoadingPolicy.EAGER:
+                    rules_sections.append(read_text_capped(rule_file))
+
         if (claude_dir / "settings.json").exists() or (claude_dir / "hooks.json").exists():
             from app.services.hooks import load_hooks_for_workspace
 
@@ -108,6 +150,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             [
                 ("Claude Instructions (CLAUDE.md)", claude_md),
                 ("Project Agents (AGENTS.md)", agents_md),
+                ("Claude Rules", "\n\n---\n\n".join(rules_sections)),
             ]
         )
         return manifest
