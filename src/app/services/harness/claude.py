@@ -18,6 +18,7 @@ from app.services.harness.base import (
     normalize_catalog_path,
     read_root_instructions,
     rel,
+    iter_pruned_files,
     scan_primitive,
     skill_policy,
 )
@@ -54,6 +55,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
             confidence=confidence,
         )
         claude_dir = workspace / ".claude"
+        capped: set[str] = set()
 
         # Agents: .claude/agents/*.md. Model-selectable, so the invocation
         # opt-out applies here as it does to skills.
@@ -61,7 +63,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         if agents_dir.is_dir():
             for agent_file in sorted(agents_dir.glob("*.md")):
                 scan = scan_primitive(agent_file)
-                manifest.agents.append(
+                self._append_primitive(
+                    manifest,
+                    "agent",
                     PrimitiveRef(
                         name=agent_file.stem,
                         path=normalize_catalog_path(agent_file, workspace),
@@ -69,7 +73,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
                         kind="agent",
                         policy=skill_policy(scan),
                         source="claude-agents",
-                    )
+                    ),
+                    capped,
                 )
 
         # Commands: .claude/commands/*.md. Invoked by name, so they stay
@@ -78,7 +83,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         if commands_dir.is_dir():
             for cmd_file in sorted(commands_dir.glob("*.md")):
                 scan = scan_primitive(cmd_file)
-                manifest.commands.append(
+                self._append_primitive(
+                    manifest,
+                    "command",
                     PrimitiveRef(
                         name=cmd_file.stem,
                         path=normalize_catalog_path(cmd_file, workspace),
@@ -86,7 +93,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
                         kind="command",
                         policy=LoadingPolicy.MODEL_DISCOVERABLE,
                         source="claude-commands",
-                    )
+                    ),
+                    capped,
                 )
 
         # Skills: .claude/skills/*/SKILL.md or *.md. Adapter entries win during
@@ -96,7 +104,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         if skills_dir.is_dir():
             for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
                 scan = scan_primitive(skill_md)
-                manifest.skills.append(
+                self._append_primitive(
+                    manifest,
+                    "skill",
                     PrimitiveRef(
                         name=skill_md.parent.name,
                         path=normalize_catalog_path(skill_md, workspace),
@@ -104,11 +114,14 @@ class ClaudeCodeAdapter(HarnessAdapter):
                         kind="skill",
                         policy=skill_policy(scan),
                         source="claude-skills",
-                    )
+                    ),
+                    capped,
                 )
             for skill_md in sorted(skills_dir.glob("*.md")):
                 scan = scan_primitive(skill_md)
-                manifest.skills.append(
+                self._append_primitive(
+                    manifest,
+                    "skill",
                     PrimitiveRef(
                         name=skill_md.stem,
                         path=normalize_catalog_path(skill_md, workspace),
@@ -116,7 +129,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
                         kind="skill",
                         policy=skill_policy(scan),
                         source="claude-skills",
-                    )
+                    ),
+                    capped,
                 )
 
         # Rules: .claude/rules/**/*.md, discovered recursively. Unscoped rules
@@ -124,12 +138,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
         rules_sections: List[tuple[str, str]] = []
         rules_dir = claude_dir / "rules"
         if rules_dir.is_dir():
-            for rule_file in sorted(rules_dir.rglob("*.md")):
-                if not rule_file.is_file():
-                    continue
+            for rule_file in iter_pruned_files(rules_dir, "*.md", recursive=True):
                 scan = scan_primitive(rule_file)
                 policy, scope = _rule_policy(scan)
-                manifest.rules.append(
+                added = self._append_primitive(
+                    manifest,
+                    "rule",
                     PrimitiveRef(
                         name=scan.name,
                         path=normalize_catalog_path(rule_file, workspace),
@@ -138,9 +152,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
                         policy=policy,
                         scope=scope,
                         source="claude-rules",
-                    )
+                    ),
+                    capped,
                 )
-                if policy is LoadingPolicy.EAGER:
+                if added and policy is LoadingPolicy.EAGER:
                     section = self._eager_rule_section(
                         f"Claude Rule: {scan.name}", rule_file, manifest
                     )
@@ -168,9 +183,11 @@ class ClaudeCodeAdapter(HarnessAdapter):
         claude_md = read_root_instructions(claude_md_path) if claude_md_path.exists() else ""
         agents_md = read_root_instructions(workspace / "AGENTS.md") if (workspace / "AGENTS.md").exists() else ""
 
-        self._discover_primitives(workspace, manifest)
+        self._discover_primitives(workspace, manifest, capped)
         if claude_md_path.exists():
-            manifest.rules.append(
+            self._append_primitive(
+                manifest,
+                "rule",
                 PrimitiveRef(
                     name=rel(claude_md_path, workspace),
                     path=normalize_catalog_path(claude_md_path, workspace),
@@ -178,9 +195,10 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     kind="rule",
                     policy=LoadingPolicy.EAGER,
                     source="root-instructions",
-                )
+                ),
+                capped,
             )
-        self._discover_scoped_instructions(workspace, manifest)
+        self._discover_scoped_instructions(workspace, manifest, capped)
 
         manifest.eager_context = self._assemble_eager(
             [

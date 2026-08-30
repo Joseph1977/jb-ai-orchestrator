@@ -63,9 +63,12 @@ class GenericAdapter(HarnessAdapter):
                 break
 
         # Index primitives via shared discovery (flat + dotted paths).
-        self._discover_primitives(workspace, manifest)
+        capped: set[str] = set()
+        self._discover_primitives(workspace, manifest, capped)
         if agents_md_path is not None:
-            manifest.rules.append(
+            self._append_primitive(
+                manifest,
+                "rule",
                 PrimitiveRef(
                     name=rel(agents_md_path, workspace),
                     path=normalize_catalog_path(agents_md_path, workspace),
@@ -73,9 +76,10 @@ class GenericAdapter(HarnessAdapter):
                     kind="rule",
                     policy=LoadingPolicy.EAGER,
                     source="root-instructions",
-                )
+                ),
+                capped,
             )
-        self._discover_scoped_instructions(workspace, manifest)
+        self._discover_scoped_instructions(workspace, manifest, capped)
 
         manifest.eager_context = self._assemble_eager(
             [("Project Agents (AGENTS.md)", agents_md)],

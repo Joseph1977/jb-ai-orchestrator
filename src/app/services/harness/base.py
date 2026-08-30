@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from fnmatch import fnmatch
 from pathlib import Path
 from types import MappingProxyType
 from typing import Iterator, List, Mapping, Optional
@@ -100,6 +101,26 @@ SKILL_ROOT_DIRS = (".agents", ".claude", ".codex", ".cursor")
 
 # Instruction files that carry scope by their location in the tree.
 INSTRUCTION_FILE_NAMES = ("AGENTS.md", "CLAUDE.md")
+
+# Where to look, as (subdirectory, filename glob, recursive, kind). Split into
+# a directory and a filename pattern rather than one "**" glob string so the
+# recursive cases can be walked with pruning instead of by Path.glob.
+DISCOVERY_PATTERNS = (
+    (".agents/skills", "*.md", False, "skill"),
+    (".claude/skills", "*.md", False, "skill"),
+    (".codex/skills", "*.md", False, "skill"),
+    (".cursor/skills", "*.md", False, "skill"),
+    (".cursor/commands", "*.md", False, "command"),
+    (".claude/commands", "*.md", False, "command"),
+    (".cursor/agents", "*.md", False, "agent"),
+    (".claude/agents", "*.md", False, "agent"),
+    (".claude/rules", "*.md", True, "rule"),
+    (".cursor/rules", "*.mdc", True, "rule"),
+    ("skills", "*.md", True, "skill"),
+    ("agents", "*.md", True, "agent"),
+    ("commands", "*.md", True, "command"),
+    ("rules", "*.md", True, "rule"),
+)
 
 # Safety ceiling against runaway discovery in an unfamiliar workspace. This is
 # not the token control -- the rendered-catalog budget in the registry is.
@@ -480,6 +501,27 @@ def walk_pruned(root: Path) -> Iterator[tuple[Path, list[str]]]:
         yield Path(dirpath), sorted(filenames)
 
 
+def iter_pruned_files(root: Path, file_glob: str, *, recursive: bool) -> Iterator[Path]:
+    """Files under ``root`` matching ``file_glob``, never entering pruned dirs.
+
+    ``Path.glob("**/...")`` has already walked node_modules by the time its
+    results could be filtered, so recursive discovery goes through the pruning
+    walker instead. Results are sorted so ordering matches the previous
+    ``sorted(workspace.glob(...))`` behaviour exactly.
+    """
+    if not root.is_dir():
+        return
+    if not recursive:
+        yield from sorted(p for p in root.glob(file_glob) if p.is_file())
+        return
+    found: List[Path] = []
+    for directory, filenames in walk_pruned(root):
+        for name in filenames:
+            if fnmatch(name, file_glob):
+                found.append(directory / name)
+    yield from sorted(found)
+
+
 def _under_skills_root(directory: Path, workspace: Path) -> bool:
     """True when ``directory`` sits inside a ``<root>/skills`` tree."""
     try:
@@ -520,10 +562,61 @@ def iter_skill_files(workspace: Path) -> Iterator[Path]:
             yield directory / "SKILL.md"
 
 
+def bucket_for(manifest: HarnessManifest, kind: str) -> List[PrimitiveRef]:
+    """The manifest list that holds primitives of ``kind``."""
+    return {
+        "skill": manifest.skills,
+        "command": manifest.commands,
+        "agent": manifest.agents,
+        "rule": manifest.rules,
+    }[kind]
+
+
 class HarnessAdapter:
     """Base class for harness adapters."""
 
     type_id: str = "generic"
+
+    def _report_ceiling(
+        self,
+        manifest: HarnessManifest,
+        kind: str,
+        capped: set[str],
+    ) -> None:
+        """Announce the per-kind ceiling once, however discovery reached it."""
+        if kind in capped:
+            return
+        capped.add(kind)
+        logger.warning(
+            "Discovery ceiling reached for %ss (%d); further %ss ignored",
+            kind,
+            MAX_PRIMITIVES_PER_KIND,
+            kind,
+        )
+        manifest.notes.append(
+            f"Discovery ceiling reached: more than {MAX_PRIMITIVES_PER_KIND} "
+            f"{kind}s found; the rest were ignored"
+        )
+
+    def _append_primitive(
+        self,
+        manifest: HarnessManifest,
+        kind: str,
+        ref: PrimitiveRef,
+        capped: set[str],
+    ) -> bool:
+        """Append within the ceiling, reporting the first entry it refuses.
+
+        Every path that adds a primitive goes through here. An adapter that
+        appended directly would enumerate without limit, leaving the safety
+        ceiling covering only the part of discovery that happened to use it.
+        """
+        bucket = bucket_for(manifest, kind)
+        if len(bucket) >= MAX_PRIMITIVES_PER_KIND:
+            self._report_ceiling(manifest, kind, capped)
+            return False
+        bucket.append(ref)
+        return True
 
     def detect(self, workspace: Path) -> int:
         """Return a confidence score (0-100) that this adapter fits."""
@@ -618,6 +711,7 @@ class HarnessAdapter:
         self,
         workspace: Path,
         manifest: HarnessManifest,
+        capped: Optional[set[str]] = None,
     ) -> None:
         """Catalog nested AGENTS.md / CLAUDE.md as scoped, lazily-read rules.
 
@@ -655,24 +749,10 @@ class HarnessAdapter:
         self,
         workspace: Path,
         manifest: HarnessManifest,
+        capped: Optional[set[str]] = None,
     ) -> None:
         """Discover skills/commands/rules/agents across all capability roots."""
-        patterns = [
-            (".agents/skills/*.md", "skill"),
-            (".claude/skills/*.md", "skill"),
-            (".codex/skills/*.md", "skill"),
-            (".cursor/skills/*.md", "skill"),
-            (".cursor/commands/*.md", "command"),
-            (".claude/commands/*.md", "command"),
-            (".cursor/agents/*.md", "agent"),
-            (".claude/agents/*.md", "agent"),
-            (".claude/rules/**/*.md", "rule"),
-            (".cursor/rules/**/*.mdc", "rule"),
-            ("skills/**/*.md", "skill"),
-            ("agents/**/*.md", "agent"),
-            ("commands/**/*.md", "command"),
-            ("rules/**/*.md", "rule"),
-        ]
+        capped = set() if capped is None else capped
         # Adapters may already have catalogued some of these paths explicitly;
         # seed from the manifest so discovery never lists a primitive twice.
         seen_paths: set[str] = {
@@ -680,13 +760,6 @@ class HarnessAdapter:
             for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
             for ref in bucket
         }
-        buckets = {
-            "skill": manifest.skills,
-            "command": manifest.commands,
-            "agent": manifest.agents,
-            "rule": manifest.rules,
-        }
-        capped: set[str] = set()
 
         def add(md: Path, kind: str) -> None:
             if not md.is_file():
@@ -694,29 +767,15 @@ class HarnessAdapter:
             norm_path = normalize_catalog_path(md, workspace)
             if norm_path in seen_paths:
                 return
-            bucket = buckets[kind]
-            if len(bucket) >= MAX_PRIMITIVES_PER_KIND:
-                if kind not in capped:
-                    capped.add(kind)
-                    logger.warning(
-                        "Discovery ceiling reached for %ss (%d); further %ss ignored",
-                        kind,
-                        MAX_PRIMITIVES_PER_KIND,
-                        kind,
-                    )
-                    manifest.notes.append(
-                        f"Discovery ceiling reached: more than {MAX_PRIMITIVES_PER_KIND} "
-                        f"{kind}s found; the rest were ignored"
-                    )
-                return
-            seen_paths.add(norm_path)
             scan = scan_primitive(md)
             policy = (
                 LoadingPolicy.MODEL_DISCOVERABLE
                 if kind == "command"
                 else skill_policy(scan)
             )
-            bucket.append(
+            added = self._append_primitive(
+                manifest,
+                kind,
                 PrimitiveRef(
                     name=scan.name,
                     path=norm_path,
@@ -724,11 +783,14 @@ class HarnessAdapter:
                     kind=kind,
                     policy=policy,
                     source="discovery",
-                )
+                ),
+                capped,
             )
+            if added:
+                seen_paths.add(norm_path)
 
         for skill_md in iter_skill_files(workspace):
             add(skill_md, "skill")
-        for pattern, kind in patterns:
-            for md in sorted(workspace.glob(pattern)):
+        for subdir, file_glob, recursive, kind in DISCOVERY_PATTERNS:
+            for md in iter_pruned_files(workspace / subdir, file_glob, recursive=recursive):
                 add(md, kind)
