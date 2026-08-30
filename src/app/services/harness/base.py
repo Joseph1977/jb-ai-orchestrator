@@ -50,6 +50,20 @@ class FrontmatterStatus(str, Enum):
     MALFORMED = "malformed"
 
 
+class LoadingPolicy(str, Enum):
+    """How a primitive reaches the model.
+
+    Vendor-neutral on purpose. Adapters translate their own conventions
+    (Cursor's ``alwaysApply``/``globs``, Claude's ``paths``) into these, so no
+    harness-specific vocabulary leaks into the core or the renderer.
+    """
+
+    EAGER = "eager"  # injected up front; excluded from the catalog
+    SCOPED = "scoped"  # lazy, announced with the paths it applies to
+    MODEL_DISCOVERABLE = "model-discoverable"  # lazy, model may select it
+    EXPLICIT_ONLY = "explicit-only"  # lazy, only on explicit invocation
+
+
 class RootInstructionError(Exception):
     """Raised when a root instruction file exceeds the allowed size."""
 
@@ -66,6 +80,11 @@ class PrimitiveRef:
     path: str  # workspace-relative path
     description: str = ""
     kind: str = "skill"  # skill | agent | rule | command | doc
+    # Internal routing metadata. Deliberately absent from ``summary()`` so the
+    # caller-facing schema is unchanged.
+    policy: LoadingPolicy = LoadingPolicy.MODEL_DISCOVERABLE
+    scope: tuple[str, ...] = ()  # paths/globs this primitive applies to
+    source: str = ""  # provenance, e.g. "cursor-rules", "legacy-cursorrules"
 
 
 @dataclass
