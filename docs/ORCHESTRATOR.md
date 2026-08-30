@@ -377,7 +377,10 @@ For each primitive, the manifest stores only:
 - `name` — frontmatter `name`, the parent directory for `SKILL.md`, or filename;
 - `path` — normalized relative path, used for deduplication;
 - `description` — frontmatter `description`, otherwise the first heading or
-  substantive line from a bounded 4,096-character scan;
+  substantive line from a bounded 4,096-character scan. Frontmatter is parsed
+  with `yaml.safe_load`, so block scalars (`>`, `|`, and their chomping
+  variants) resolve to their text; a file whose frontmatter does not parse
+  falls back to the heading scan rather than failing discovery;
 - `kind` — `skill`, `agent`, `command`, or `rule`.
 
 The rendered catalog is headed **Available capabilities (NOT loaded yet)** and

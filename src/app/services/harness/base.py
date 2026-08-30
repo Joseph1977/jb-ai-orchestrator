@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import List, Optional
 import re
 
+import yaml
+
 # Caps to keep eagerly-injected context from blowing the token budget.
 MAX_EAGER_FILE_CHARS = 6000
 MAX_EAGER_TOTAL_CHARS = 24000
@@ -119,15 +121,22 @@ def parse_frontmatter_fields(path: Path) -> dict[str, str]:
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}
+    try:
+        loaded = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        # A malformed skill file degrades its catalog entry; it never breaks discovery.
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+
     fields: dict[str, str] = {}
-    for line in match.group(1).splitlines():
-        if ":" not in line:
+    for key in ("name", "description"):
+        value = loaded.get(key)
+        if value is None or isinstance(value, (dict, list, bool)):
             continue
-        key, val = line.split(":", 1)
-        key = key.strip().lower()
-        val = val.strip().strip('"').strip("'")
-        if key in ("name", "description") and val:
-            fields[key] = val[:200]
+        text_value = " ".join(str(value).split())
+        if text_value:
+            fields[key] = text_value[:200]
     return fields
 
 
@@ -146,7 +155,8 @@ def first_description(path: Path) -> str:
     if text.startswith("---"):
         match = _FRONTMATTER_RE.match(text)
         if match:
-            fm_end = text[: match.end()].count("\n")
+            # match.end() sits on the closing delimiter, so skip past that line too.
+            fm_end = text[: match.end()].count("\n") + 1
 
     for line in lines[fm_end:]:
         stripped = line.strip()
