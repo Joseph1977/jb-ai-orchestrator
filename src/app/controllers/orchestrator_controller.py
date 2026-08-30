@@ -29,7 +29,11 @@ from fastapi.responses import JSONResponse
 
 from app.controllers.agent_controller import get_tool_hub
 from app.db.session import get_session
-from app.models.bindings import SESSION_CLOSED, SESSION_CLOSING
+from app.models.bindings import (
+    ROOT_INSTRUCTIONS_TOO_LARGE,
+    SESSION_CLOSED,
+    SESSION_CLOSING,
+)
 from app.models.execution_models import ExecutionStatus, LLMStateStatus
 from app.models.requests import (
     ExecuteOrchestratorInput,
@@ -59,7 +63,11 @@ from app.services.binding_runtime import (
     segment_output_backend,
 )
 from app.services.execution_state_service import execution_state_service
-from app.services.harness import collect_manifest, render_system_prompt
+from app.services.harness import (
+    RootInstructionError,
+    collect_manifest,
+    render_system_prompt,
+)
 from app.services.local_tool_provider import LocalToolContext
 from app.services.run_lifecycle import (
     RUN_STATUS_COMPLETED,
@@ -164,8 +172,18 @@ def _build_execute_system_prompt(
             manifest,
             base=config.get("systemContext"),
         )
+    except RootInstructionError:
+        # Root instructions over the eager budget are a configuration error the
+        # caller has to see. Falling back here would run the segment against
+        # stale eager context, quietly dropping the instructions the workspace
+        # author relies on -- the opposite of failing explicitly.
+        raise
     except Exception:
-        pass
+        logger.warning(
+            "Harness discovery failed for %s; falling back to stored context",
+            workspace_path,
+            exc_info=True,
+        )
     if not harness:
         parts: list[str] = []
         if config.get("systemContext"):
@@ -425,6 +443,18 @@ def _storage_error_response(exc: StorageError) -> JSONResponse:
     )
 
 
+def _root_instruction_error_response(exc: RootInstructionError) -> JSONResponse:
+    """Surface an over-budget root playbook as a workspace configuration error."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "success": False,
+            "error": str(exc),
+            "errorCode": ROOT_INSTRUCTIONS_TOO_LARGE,
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -618,6 +648,10 @@ async def execute(request: ExecuteOrchestratorInput):
         except StorageError as exc:
             await _finalize(execution_id, {"success": False, "error": exc.message})
             return _storage_error_response(exc)
+        except RootInstructionError as exc:
+            logger.error("Root instructions exceed the eager budget: %s", exc)
+            await _finalize(execution_id, {"success": False, "error": str(exc)})
+            return _root_instruction_error_response(exc)
 
         model = request.model or segment_config.get("model") or "gpt-3.5-turbo"
         max_calls = (
