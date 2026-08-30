@@ -16,6 +16,7 @@ from app.services.harness.base import (
     PrimitiveRef,
     PrimitiveScan,
     first_description,
+    normalize_catalog_path,
     read_root_instructions,
     read_text_capped,
     rel,
@@ -62,7 +63,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 manifest.agents.append(
                     PrimitiveRef(
                         name=agent_file.stem,
-                        path=rel(agent_file, workspace),
+                        path=normalize_catalog_path(agent_file, workspace),
                         description=first_description(agent_file),
                         kind="agent",
                     )
@@ -75,7 +76,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 manifest.commands.append(
                     PrimitiveRef(
                         name=cmd_file.stem,
-                        path=rel(cmd_file, workspace),
+                        path=normalize_catalog_path(cmd_file, workspace),
                         description=first_description(cmd_file),
                         kind="command",
                     )
@@ -88,7 +89,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 manifest.skills.append(
                     PrimitiveRef(
                         name=skill_md.parent.name,
-                        path=rel(skill_md, workspace),
+                        path=normalize_catalog_path(skill_md, workspace),
                         description=first_description(skill_md),
                         kind="skill",
                     )
@@ -97,7 +98,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 manifest.skills.append(
                     PrimitiveRef(
                         name=skill_md.stem,
-                        path=rel(skill_md, workspace),
+                        path=normalize_catalog_path(skill_md, workspace),
                         description=first_description(skill_md),
                         kind="skill",
                     )
@@ -116,7 +117,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
                 manifest.rules.append(
                     PrimitiveRef(
                         name=scan.name,
-                        path=rel(rule_file, workspace),
+                        path=normalize_catalog_path(rule_file, workspace),
                         description=scan.description,
                         kind="rule",
                         policy=policy,
@@ -141,10 +142,26 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     "Detected .claude settings/hooks (no runnable command hooks found)"
                 )
 
-        claude_md = read_root_instructions(workspace / "CLAUDE.md") if (workspace / "CLAUDE.md").exists() else ""
+        # Claude treats ./CLAUDE.md and ./.claude/CLAUDE.md as project scope.
+        claude_md_path = workspace / "CLAUDE.md"
+        if not claude_md_path.exists():
+            claude_md_path = claude_dir / "CLAUDE.md"
+        claude_md = read_root_instructions(claude_md_path) if claude_md_path.exists() else ""
         agents_md = read_root_instructions(workspace / "AGENTS.md") if (workspace / "AGENTS.md").exists() else ""
 
         self._discover_primitives(workspace, manifest)
+        if claude_md_path.exists():
+            manifest.rules.append(
+                PrimitiveRef(
+                    name=rel(claude_md_path, workspace),
+                    path=normalize_catalog_path(claude_md_path, workspace),
+                    description="",
+                    kind="rule",
+                    policy=LoadingPolicy.EAGER,
+                    source="root-instructions",
+                )
+            )
+        self._discover_scoped_instructions(workspace, manifest)
 
         manifest.eager_context = self._assemble_eager(
             [

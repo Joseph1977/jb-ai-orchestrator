@@ -68,6 +68,9 @@ PRUNED_DIR_NAMES = frozenset(
 # packages are both covered.
 SKILL_ROOT_DIRS = (".agents", ".claude", ".codex", ".cursor")
 
+# Instruction files that carry scope by their location in the tree.
+INSTRUCTION_FILE_NAMES = ("AGENTS.md", "CLAUDE.md")
+
 # Safety ceiling against runaway discovery in an unfamiliar workspace. This is
 # not the token control -- the rendered-catalog budget in the registry is.
 MAX_PRIMITIVES_PER_KIND = 200
@@ -412,6 +415,23 @@ def _under_skills_root(directory: Path, workspace: Path) -> bool:
     )
 
 
+def iter_scoped_instructions(workspace: Path) -> Iterator[Path]:
+    """Instruction files below the workspace root.
+
+    Both harnesses support scoped instructions: Claude loads a nested CLAUDE.md
+    when it touches that subtree, and .claude/CLAUDE.md is a project-level
+    location in its own right. A stateless service cannot observe "when it
+    touches", so these are catalogued for on-demand reading instead of injected
+    -- which is the honest equivalent of lazy loading.
+    """
+    for directory, filenames in walk_pruned(workspace):
+        if directory == workspace:
+            continue  # root files are eager and handled by the adapter
+        for name in INSTRUCTION_FILE_NAMES:
+            if name in filenames:
+                yield directory / name
+
+
 def iter_skill_files(workspace: Path) -> Iterator[Path]:
     """Every SKILL.md under any capability root, at any depth.
 
@@ -452,6 +472,43 @@ class HarnessAdapter:
             out.append(block)
             used += len(block)
         return "\n\n".join(out)
+
+    def _discover_scoped_instructions(
+        self,
+        workspace: Path,
+        manifest: HarnessManifest,
+    ) -> None:
+        """Catalog nested AGENTS.md / CLAUDE.md as scoped, lazily-read rules.
+
+        They live in the rules bucket rather than a bucket of their own: they
+        are scoped instructions, the policy field already carries the meaning a
+        separate bucket would have, and the API summary schema stays stable.
+        """
+        seen_paths: set[str] = {
+            ref.path.replace("\\", "/")
+            for bucket in (manifest.skills, manifest.agents, manifest.commands, manifest.rules)
+            for ref in bucket
+        }
+        for path in iter_scoped_instructions(workspace):
+            norm_path = normalize_catalog_path(path, workspace)
+            if norm_path in seen_paths:
+                continue
+            if len(manifest.rules) >= MAX_PRIMITIVES_PER_KIND:
+                break
+            seen_paths.add(norm_path)
+            directory = str(Path(norm_path).parent).replace("\\", "/")
+            scan = scan_primitive(path)
+            manifest.rules.append(
+                PrimitiveRef(
+                    name=norm_path,
+                    path=norm_path,
+                    description=scan.description,
+                    kind="rule",
+                    policy=LoadingPolicy.SCOPED,
+                    scope=(f"{directory}/**",),
+                    source="scoped-instructions",
+                )
+            )
 
     def _discover_primitives(
         self,

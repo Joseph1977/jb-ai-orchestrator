@@ -16,8 +16,10 @@ from typing import List
 from app.services.harness.base import (
     HarnessAdapter,
     HarnessManifest,
+    LoadingPolicy,
     PrimitiveRef,
     first_description,
+    normalize_catalog_path,
     read_root_instructions,
     read_text_capped,
     rel,
@@ -62,6 +64,18 @@ class GenericAdapter(HarnessAdapter):
 
         # Index primitives via shared discovery (flat + dotted paths).
         self._discover_primitives(workspace, manifest)
+        if agents_md_path is not None:
+            manifest.rules.append(
+                PrimitiveRef(
+                    name=rel(agents_md_path, workspace),
+                    path=normalize_catalog_path(agents_md_path, workspace),
+                    description="",
+                    kind="rule",
+                    policy=LoadingPolicy.EAGER,
+                    source="root-instructions",
+                )
+            )
+        self._discover_scoped_instructions(workspace, manifest)
 
         manifest.eager_context = self._assemble_eager(
             [

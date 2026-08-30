@@ -17,6 +17,7 @@ from app.services.harness.base import (
     first_description,
     read_root_instructions,
     read_text_capped,
+    normalize_catalog_path,
     rel,
     scan_primitive,
 )
@@ -77,7 +78,7 @@ class CursorAdapter(HarnessAdapter):
                 manifest.rules.append(
                     PrimitiveRef(
                         name=rule_file.stem,
-                        path=rel(rule_file, workspace),
+                        path=normalize_catalog_path(rule_file, workspace),
                         description=scan.description,
                         kind="rule",
                         policy=policy,
@@ -95,7 +96,7 @@ class CursorAdapter(HarnessAdapter):
             manifest.rules.append(
                 PrimitiveRef(
                     name=".cursorrules",
-                    path=rel(legacy, workspace),
+                    path=normalize_catalog_path(legacy, workspace),
                     description=first_description(legacy),
                     kind="rule",
                     policy=LoadingPolicy.EAGER,
@@ -111,7 +112,7 @@ class CursorAdapter(HarnessAdapter):
                 manifest.agents.append(
                     PrimitiveRef(
                         name=agent_file.stem,
-                        path=rel(agent_file, workspace),
+                        path=normalize_catalog_path(agent_file, workspace),
                         description=first_description(agent_file),
                         kind="agent",
                     )
@@ -138,6 +139,18 @@ class CursorAdapter(HarnessAdapter):
         if not agents_md_path.exists() and (cursor_dir / "AGENTS.md").exists():
             agents_md_path = cursor_dir / "AGENTS.md"
         agents_md = read_root_instructions(agents_md_path) if agents_md_path.exists() else ""
+        if agents_md_path.exists():
+            manifest.rules.append(
+                PrimitiveRef(
+                    name=rel(agents_md_path, workspace),
+                    path=normalize_catalog_path(agents_md_path, workspace),
+                    description="",
+                    kind="rule",
+                    policy=LoadingPolicy.EAGER,
+                    source="root-instructions",
+                )
+            )
+        self._discover_scoped_instructions(workspace, manifest)
 
         manifest.eager_context = self._assemble_eager(
             [
