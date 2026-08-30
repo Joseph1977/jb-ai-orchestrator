@@ -511,6 +511,12 @@ name and URL. See
 | `General_LogFolder` | `./Logs` | Log directory |
 | `Logging_LogLevel_Default` | `Information` | Log level |
 
+### Harness
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HARNESS_EAGER_BUDGET_CHARS` | `24000` | Total characters of eagerly-injected context. Root `AGENTS.md`/`CLAUDE.md` are one mandatory allocation of this budget and fail explicitly when they exceed it, rather than being silently truncated; raise this instead of splitting a large playbook. Optional rules take what remains, whole or not at all. A non-numeric or non-positive value is logged and ignored. |
+
 ### Lifecycle
 
 | Variable | Default | Purpose |
