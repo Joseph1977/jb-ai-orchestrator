@@ -3,7 +3,7 @@
 
 """Catalog metadata parsed from YAML frontmatter."""
 
-from tests.harness_helpers import first_description, parse_frontmatter_fields
+from harness_helpers import first_description, parse_frontmatter_fields
 from app.services.harness.registry import collect_manifest, render_system_prompt
 
 

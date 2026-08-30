@@ -12,7 +12,7 @@ from app.services.harness.base import (
     MAX_FRONTMATTER_SCAN_CHARS,
     FrontmatterStatus,
 )
-from tests.harness_helpers import (
+from harness_helpers import (
     first_description,
     parse_frontmatter_fields,
     scan_path as scan_primitive,

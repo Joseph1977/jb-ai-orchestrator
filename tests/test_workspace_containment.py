@@ -29,7 +29,7 @@ from app.services.harness.safe_io import (
     WorkspacePath,
     WorkspaceReader,
 )
-from tests.harness_helpers import reader_for, wp
+from harness_helpers import reader_for, wp
 
 
 def write(path, text="body"):

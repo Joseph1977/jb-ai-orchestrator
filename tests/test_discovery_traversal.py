@@ -28,7 +28,7 @@ from app.services.harness.base import (
 )
 from app.services.harness.generic import GenericAdapter
 from app.services.harness.safe_io import WorkspacePath, WorkspaceReader
-from tests.harness_helpers import pruned_files, reader_for, workspace_files, wp
+from harness_helpers import pruned_files, reader_for, workspace_files, wp
 
 
 def write(path, text="body"):

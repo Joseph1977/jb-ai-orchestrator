@@ -22,7 +22,7 @@ from app.services.harness.base import (
     RootInstructionTooLarge,
     RootInstructionUnreadable,
 )
-from tests.harness_helpers import (
+from harness_helpers import (
     read_capped,
     read_eager_rule,
     read_root_instructions,

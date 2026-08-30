@@ -9,7 +9,7 @@ from app.services.harness.base import (
     MAX_PRIMITIVES_PER_KIND,
     LoadingPolicy,
 )
-from tests.harness_helpers import skill_files, workspace_files
+from harness_helpers import skill_files, workspace_files
 from app.services.harness.registry import collect_manifest
 
 

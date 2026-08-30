@@ -10,7 +10,7 @@ without limit.
 """
 
 from app.services.harness.base import MAX_PRIMITIVES_PER_KIND
-from tests.harness_helpers import pruned_files
+from harness_helpers import pruned_files
 from app.services.harness.registry import collect_manifest
 
 

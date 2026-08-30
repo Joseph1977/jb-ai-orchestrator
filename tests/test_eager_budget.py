@@ -5,7 +5,7 @@
 
 import pytest
 
-from tests.harness_helpers import read_root_instructions
+from harness_helpers import read_root_instructions
 
 from app.services.harness.base import (
     DEFAULT_EAGER_TOTAL_CHARS,
