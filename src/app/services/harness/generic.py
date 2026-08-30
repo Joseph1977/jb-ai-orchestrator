@@ -78,10 +78,9 @@ class GenericAdapter(HarnessAdapter):
         self._discover_scoped_instructions(workspace, manifest)
 
         manifest.eager_context = self._assemble_eager(
-            [
-                ("Project Agents (AGENTS.md)", agents_md),
-                ("README", readme),
-            ]
+            [("Project Agents (AGENTS.md)", agents_md)],
+            [("README", readme)],
+            manifest=manifest,
         )
         if not agents_md and not readme:
             manifest.notes.append(

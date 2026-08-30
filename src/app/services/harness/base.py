@@ -17,11 +17,41 @@ import yaml
 
 from app.utils.logger import logger
 
+DEFAULT_EAGER_TOTAL_CHARS = 24000
+EAGER_BUDGET_ENV_VAR = "HARNESS_EAGER_BUDGET_CHARS"
+
+
+def eager_budget_from_env(default: int = DEFAULT_EAGER_TOTAL_CHARS) -> int:
+    """Read the configured eager budget, falling back on unusable values.
+
+    A bad value must not stop the service booting, so it is reported and
+    ignored rather than raised at import time.
+    """
+    raw = os.getenv(EAGER_BUDGET_ENV_VAR)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric %s=%r", EAGER_BUDGET_ENV_VAR, raw)
+        return default
+    if value <= 0:
+        logger.warning("Ignoring non-positive %s=%r", EAGER_BUDGET_ENV_VAR, raw)
+        return default
+    return value
+
+
 # Caps to keep eagerly-injected context from blowing the token budget.
 MAX_EAGER_FILE_CHARS = 6000
-MAX_EAGER_TOTAL_CHARS = 24000
-# Root playbook files (AGENTS.md / CLAUDE.md) must load in full or fail explicitly.
-MAX_ROOT_INSTRUCTION_CHARS = 512_000
+# Total eager budget. Operators can raise it rather than being forced to split
+# a large playbook; root instructions are measured against this same number.
+MAX_EAGER_TOTAL_CHARS = eager_budget_from_env()
+# Root playbook files (AGENTS.md / CLAUDE.md) must load in full or fail
+# explicitly. This is the eager budget, not a separate larger limit: accepting
+# a file up to 512,000 chars and then silently clipping it at 24,000 was a
+# contradiction, and "load it fully" is not viable for a 400,000-char file
+# either -- that is a ~100,000-token system prompt.
+MAX_ROOT_INSTRUCTION_CHARS = MAX_EAGER_TOTAL_CHARS
 
 # Two independent bounds. The metadata window is what we read from the file
 # handle; the description bound applies to the prose region after frontmatter.
@@ -456,22 +486,58 @@ class HarnessAdapter:
         """Build the manifest of eager context + lazy primitives."""
         raise NotImplementedError
 
-    def _assemble_eager(self, sections: List[tuple[str, str]]) -> str:
-        """Join titled sections respecting the total cap."""
-        out: List[str] = []
+    def _assemble_eager(
+        self,
+        mandatory: List[tuple[str, str]],
+        optional: List[tuple[str, str]] = (),
+        *,
+        budget: int = None,
+        manifest: Optional[HarnessManifest] = None,
+    ) -> str:
+        """Assemble eager context: root instructions first, rules if they fit.
+
+        Root instructions are one mandatory allocation. They load whole or the
+        collection fails; truncating a playbook silently is how a rule the user
+        relies on disappears without trace.
+
+        Optional entries then take what is left, each included whole or dropped
+        whole. Half a rule is worse than no rule, because the model cannot tell
+        that the second half is missing.
+        """
+        budget = MAX_EAGER_TOTAL_CHARS if budget is None else budget
+        blocks: List[str] = []
         used = 0
-        for title, body in sections:
+        for title, body in mandatory:
             if not body:
                 continue
             block = f"## {title}\n\n{body}".strip()
-            if used + len(block) > MAX_EAGER_TOTAL_CHARS:
-                remaining = MAX_EAGER_TOTAL_CHARS - used
-                if remaining > 200:
-                    out.append(block[:remaining] + "\n\n... [truncated]")
-                break
-            out.append(block)
-            used += len(block)
-        return "\n\n".join(out)
+            blocks.append(block)
+            used += len(block) + 2
+
+        if used > budget:
+            raise RootInstructionError(
+                f"Root instructions total {used} chars, over the eager budget of "
+                f"{budget}. Split them, or raise HARNESS_EAGER_BUDGET_CHARS; "
+                "refusing to truncate them silently."
+            )
+
+        omitted: List[str] = []
+        for title, body in optional:
+            if not body:
+                continue
+            block = f"## {title}\n\n{body}".strip()
+            if used + len(block) + 2 > budget:
+                omitted.append(title)
+                continue
+            blocks.append(block)
+            used += len(block) + 2
+
+        if omitted:
+            detail = ", ".join(omitted)
+            logger.warning("Eager budget reached; omitted %s", detail)
+            if manifest is not None:
+                manifest.notes.append(f"Eager budget reached; omitted {detail}")
+        return "\n\n".join(blocks)
 
     def _discover_scoped_instructions(
         self,

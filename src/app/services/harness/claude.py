@@ -106,7 +106,7 @@ class ClaudeCodeAdapter(HarnessAdapter):
 
         # Rules: .claude/rules/**/*.md, discovered recursively. Unscoped rules
         # load up front; path-scoped ones are catalogued with their patterns.
-        rules_sections: List[str] = []
+        rules_sections: List[tuple[str, str]] = []
         rules_dir = claude_dir / "rules"
         if rules_dir.is_dir():
             for rule_file in sorted(rules_dir.rglob("*.md")):
@@ -126,7 +126,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     )
                 )
                 if policy is LoadingPolicy.EAGER:
-                    rules_sections.append(read_text_capped(rule_file))
+                    rules_sections.append(
+                        (f"Claude Rule: {scan.name}", read_text_capped(rule_file))
+                    )
 
         if (claude_dir / "settings.json").exists() or (claude_dir / "hooks.json").exists():
             from app.services.hooks import load_hooks_for_workspace
@@ -167,7 +169,8 @@ class ClaudeCodeAdapter(HarnessAdapter):
             [
                 ("Claude Instructions (CLAUDE.md)", claude_md),
                 ("Project Agents (AGENTS.md)", agents_md),
-                ("Claude Rules", "\n\n---\n\n".join(rules_sections)),
-            ]
+            ],
+            rules_sections,
+            manifest=manifest,
         )
         return manifest

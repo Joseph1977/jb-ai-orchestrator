@@ -69,7 +69,7 @@ class CursorAdapter(HarnessAdapter):
         # rest are catalogued so the model can pull them when they apply.
         # Plain .md here is intentionally skipped -- Cursor ignores it too,
         # since without frontmatter there is no activation to honour.
-        rules_sections: List[str] = []
+        rules_sections: List[tuple[str, str]] = []
         rules_dir = cursor_dir / "rules"
         if rules_dir.is_dir():
             for rule_file in sorted(rules_dir.rglob("*.mdc")):
@@ -87,7 +87,9 @@ class CursorAdapter(HarnessAdapter):
                     )
                 )
                 if policy is LoadingPolicy.EAGER:
-                    rules_sections.append(read_text_capped(rule_file))
+                    rules_sections.append(
+                        (f"Cursor Rule: {rule_file.stem}", read_text_capped(rule_file))
+                    )
 
         # Legacy .cursorrules predates frontmatter, so it has no activation to
         # read and stays unconditional. Kept for backward compatibility only.
@@ -103,7 +105,7 @@ class CursorAdapter(HarnessAdapter):
                     source="legacy-cursorrules",
                 )
             )
-            rules_sections.append(read_text_capped(legacy))
+            rules_sections.append(("Cursor Rules (legacy .cursorrules)", read_text_capped(legacy)))
 
         # Agents: .cursor/agents/*.md
         agents_dir = cursor_dir / "agents"
@@ -153,9 +155,8 @@ class CursorAdapter(HarnessAdapter):
         self._discover_scoped_instructions(workspace, manifest)
 
         manifest.eager_context = self._assemble_eager(
-            [
-                ("Project Agents (AGENTS.md)", agents_md),
-                ("Cursor Rules", "\n\n---\n\n".join(rules_sections)),
-            ]
+            [("Project Agents (AGENTS.md)", agents_md)],
+            rules_sections,
+            manifest=manifest,
         )
         return manifest
