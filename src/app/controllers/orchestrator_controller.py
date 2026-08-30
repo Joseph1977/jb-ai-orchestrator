@@ -545,6 +545,25 @@ async def initiate(request: InitiateOrchestratorInput):
                 success=False, orchestratorGuid=execution_id, error=exc.message, errorCode=exc.code
             ).model_dump(mode="json"),
         )
+    except RootInstructionError as exc:
+        # Same workspace configuration error execute reports, so it carries the
+        # same code here rather than falling through to the generic handler and
+        # arriving without one.
+        logger.error("Root instructions exceed the eager budget: %s", exc)
+        async with get_session() as session:
+            await execution_state_service.update_execution(
+                session, execution_id, status=ExecutionStatus.FAILED, error_message=str(exc)
+            )
+        workspace_manager.cleanup(execution_id)
+        return JSONResponse(
+            status_code=400,
+            content=InitiateOrchestratorResponse(
+                success=False,
+                orchestratorGuid=execution_id,
+                error=str(exc),
+                errorCode=ROOT_INSTRUCTIONS_TOO_LARGE,
+            ).model_dump(mode="json"),
+        )
     except Exception as exc:
         logger.error("Failed to initiate orchestrator %s: %s", execution_id, exc)
         async with get_session() as session:

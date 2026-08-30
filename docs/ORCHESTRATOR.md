@@ -277,7 +277,8 @@ Failed execute/resume results may include a stable `errorCode`. Provider
 failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
 response bodies are never returned. A workspace whose root instructions exceed
 the eager budget fails execute with `ROOT_INSTRUCTIONS_TOO_LARGE` rather than
-running against stale eager context.
+running against stale eager context. `initiate` reports the same code for the
+same condition, so a caller sees one error whichever call first reaches it.
 
 ### `POST /v1/orchestrator/resume`
 
@@ -364,11 +365,27 @@ nested AGENTS.md             nested CLAUDE.md
 
 A `<root>/skills` directory is recognized **anywhere** in the tree, so category
 folders (`.cursor/skills/shipping/land-it/SKILL.md`) and monorepo packages
-(`apps/web/.cursor/skills/deploy-web/SKILL.md`) are both discovered. The walk is
-top-down with `node_modules`, `.git`, `.venv`, `dist`, `build` and similar
-pruned *before* descent, and directory and file order sorted, so discovery is
-bounded and deterministic. At most 200 primitives per kind are kept as a safety
-ceiling; exceeding it is noted on the manifest and logged.
+(`apps/web/.cursor/skills/deploy-web/SKILL.md`) are both discovered.
+
+**Ordering contract.** Discovery visits files in **lexicographic order by path
+component**, comparing `a/c.md` before `a.md` because the component `a` sorts
+before `a.md`. This is the order Python's `sorted()` produces over the matching
+paths; it is stable across platforms and is what the per-kind ceiling keeps when
+it truncates.
+
+The walk is depth-first over each directory's name-sorted entries, descending as
+each directory is met, which yields that order while holding only the entries
+along the current path — O(depth × directory width), independent of how many
+files the tree contains. `node_modules`, `.git`, `.venv`, `dist`, `build` and
+similar are pruned *before* descent. Symlinked directories are never descended,
+and a symlinked file is read only when its target resolves inside the workspace.
+A directory or entry that cannot be read is logged and skipped rather than
+failing discovery.
+
+At most 200 primitives per kind are kept as a safety ceiling. Reaching it stops
+that kind's traversal, so a capped kind costs no further reads, and the omission
+is noted on the manifest and logged. A workspace holding exactly 200 of a kind
+reports no omission.
 
 ### Loading policy
 
