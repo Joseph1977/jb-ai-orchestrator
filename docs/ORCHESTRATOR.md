@@ -275,7 +275,9 @@ Returns either a completed result, or when input is required:
 
 Failed execute/resume results may include a stable `errorCode`. Provider
 failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
-response bodies are never returned.
+response bodies are never returned. A workspace whose root instructions exceed
+the eager budget fails execute with `ROOT_INSTRUCTIONS_TOO_LARGE` rather than
+running against stale eager context.
 
 ### `POST /v1/orchestrator/resume`
 
@@ -400,7 +402,12 @@ frontmatter there is no activation to honour.
 - Optional eager rules take what remains and are included **whole or not at
   all**; omissions are noted on the manifest and logged. A half-injected rule is
   worse than an absent one, because the model cannot tell the rest is missing.
-- Other eager files are capped at 6,000 characters each.
+- Other eager files are capped at 6,000 characters each. Content a clip does not
+  invalidate, such as a README, is truncated with a marker; rule bodies never
+  are.
+- Every eager and root-instruction read is bounded **at the file handle**, at
+  most `cap + 1` characters. Reading a file in full and slicing afterwards is
+  not a cap: the file is already resident by the time the check runs.
 - Section order is meaningful and follows the adapter table above.
 - Hook files and Claude settings may be noted during discovery. Enabled hooks are
   executed later at their matching lifecycle events; discovery itself does not run
