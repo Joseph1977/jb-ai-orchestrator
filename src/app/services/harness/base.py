@@ -156,6 +156,19 @@ class LoadingPolicy(str, Enum):
     EXPLICIT_ONLY = "explicit-only"  # lazy, only on explicit invocation
 
 
+class AddOutcome(str, Enum):
+    """Why a discovery candidate did or did not become a catalog entry.
+
+    A boolean would conflate "already catalogued" with "no room left", and a
+    duplicate encountered while a bucket is full would then stop traversal as
+    though the workspace had overflowed.
+    """
+
+    ADDED = "added"
+    DUPLICATE = "duplicate"  # already catalogued; keep going
+    CEILING = "ceiling"  # bucket full and this candidate is genuine overflow
+
+
 class RootInstructionError(Exception):
     """Raised when a root instruction file exceeds the allowed size."""
 
@@ -496,36 +509,113 @@ def normalize_catalog_path(path: Path, workspace: Path) -> str:
     return rel(path, workspace).replace("\\", "/")
 
 
-def walk_pruned(root: Path) -> Iterator[tuple[Path, list[str]]]:
-    """Walk ``root`` top-down, pruning heavy directories before descending.
+def _sorted_entries(directory: Path) -> List[os.DirEntry]:
+    """Entries of ``directory`` by name; an unreadable directory yields none.
 
-    Yields ``(directory, filenames)`` with both directory and file order
-    sorted, so discovery is deterministic across platforms.
+    Best effort on purpose: one subtree we lack permission to read must not
+    abort discovery for the whole workspace.
     """
-    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in PRUNED_DIR_NAMES)
-        yield Path(dirpath), sorted(filenames)
+    try:
+        with os.scandir(directory) as scan:
+            return sorted(scan, key=lambda entry: entry.name)
+    except OSError as exc:
+        logger.warning("Skipping unreadable directory %s: %s", directory, exc)
+        return []
 
 
-def iter_pruned_files(root: Path, file_glob: str, *, recursive: bool) -> Iterator[Path]:
-    """Files under ``root`` matching ``file_glob``, never entering pruned dirs.
+def _resolves_inside(path: Path, boundary: Path) -> bool:
+    """True when ``path`` resolves to somewhere under ``boundary``."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved == boundary or boundary in resolved.parents
 
-    ``Path.glob("**/...")`` has already walked node_modules by the time its
-    results could be filtered, so recursive discovery goes through the pruning
-    walker instead. Results are sorted so ordering matches the previous
-    ``sorted(workspace.glob(...))`` behaviour exactly.
+
+def iter_workspace_files(
+    root: Path,
+    workspace: Path,
+    *,
+    recursive: bool = True,
+) -> Iterator[Path]:
+    """Files under ``root`` in lexicographic path-component order.
+
+    Depth-first over each directory's entries sorted by name, descending as
+    each directory is met. That is exactly lexicographic order over path
+    components, so output matches ``sorted()`` over the same paths while
+    holding only the entry lists along the current frontier -- O(depth x
+    directory width) rather than one entry per match in the tree.
+
+    An explicit stack rather than recursion: the filesystem accepts far deeper
+    trees than the interpreter's recursion limit (2,045 levels against 1,000 on
+    Linux), and a recursive walker would abort discovery on one.
+
+    Symlinked directories are never descended, and a symlinked file is yielded
+    only when its target resolves inside the workspace, so discovery cannot be
+    walked out of the sandbox by a crafted link.
     """
     if not root.is_dir():
         return
-    if not recursive:
-        yield from sorted(p for p in root.glob(file_glob) if p.is_file())
-        return
-    found: List[Path] = []
-    for directory, filenames in walk_pruned(root):
-        for name in filenames:
-            if fnmatch(name, file_glob):
-                found.append(directory / name)
-    yield from sorted(found)
+    try:
+        boundary = workspace.resolve()
+    except OSError:
+        boundary = workspace
+
+    # Entries are pushed reversed so they pop in sorted order, and files are
+    # queued alongside directories so a subtree is exhausted at the exact point
+    # its name sorts -- which is what makes this match sorted() output.
+    stack: List[tuple[bool, Path]] = [(True, root)]
+    while stack:
+        is_dir, current = stack.pop()
+        if not is_dir:
+            yield current
+            continue
+        frontier: List[tuple[bool, Path]] = []
+        for entry in _sorted_entries(current):
+            path = Path(entry.path)
+            try:
+                if entry.is_symlink():
+                    if entry.is_dir():
+                        logger.warning(
+                            "Not descending symlinked directory %s", path
+                        )
+                        continue
+                    if entry.is_file():
+                        if _resolves_inside(path, boundary):
+                            frontier.append((False, path))
+                        else:
+                            logger.warning(
+                                "Skipping symlink %s: target escapes the workspace",
+                                path,
+                            )
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if recursive and entry.name not in PRUNED_DIR_NAMES:
+                        frontier.append((True, path))
+                    continue
+                if entry.is_file(follow_symlinks=False):
+                    frontier.append((False, path))
+            except OSError as exc:
+                logger.warning("Skipping unreadable entry %s: %s", path, exc)
+        stack.extend(reversed(frontier))
+
+
+def iter_pruned_files(
+    root: Path,
+    file_glob: str,
+    *,
+    recursive: bool,
+    workspace: Optional[Path] = None,
+) -> Iterator[Path]:
+    """Files under ``root`` matching ``file_glob``, never entering pruned dirs.
+
+    ``Path.glob("**/...")`` has already walked node_modules by the time its
+    results could be filtered, so discovery goes through the bounded walker.
+    """
+    boundary = root if workspace is None else workspace
+    for path in iter_workspace_files(root, boundary, recursive=recursive):
+        if fnmatch(path.name, file_glob):
+            yield path
 
 
 def _under_skills_root(directory: Path, workspace: Path) -> bool:
@@ -549,12 +639,9 @@ def iter_scoped_instructions(workspace: Path) -> Iterator[Path]:
     touches", so these are catalogued for on-demand reading instead of injected
     -- which is the honest equivalent of lazy loading.
     """
-    for directory, filenames in walk_pruned(workspace):
-        if directory == workspace:
-            continue  # root files are eager and handled by the adapter
-        for name in INSTRUCTION_FILE_NAMES:
-            if name in filenames:
-                yield directory / name
+    for path in iter_workspace_files(workspace, workspace):
+        if path.name in INSTRUCTION_FILE_NAMES and path.parent != workspace:
+            yield path  # root files are eager and handled by the adapter
 
 
 def iter_skill_files(workspace: Path) -> Iterator[Path]:
@@ -563,9 +650,9 @@ def iter_skill_files(workspace: Path) -> Iterator[Path]:
     Covers category folders (``.cursor/skills/shipping/land-it/SKILL.md``) and
     monorepo packages (``apps/web/.cursor/skills/deploy/SKILL.md``) alike.
     """
-    for directory, filenames in walk_pruned(workspace):
-        if "SKILL.md" in filenames and _under_skills_root(directory, workspace):
-            yield directory / "SKILL.md"
+    for path in iter_workspace_files(workspace, workspace):
+        if path.name == "SKILL.md" and _under_skills_root(path.parent, workspace):
+            yield path
 
 
 def bucket_for(manifest: HarnessManifest, kind: str) -> List[PrimitiveRef]:
@@ -604,25 +691,27 @@ class HarnessAdapter:
             f"{kind}s found; the rest were ignored"
         )
 
+    def _kind_is_full(self, manifest: HarnessManifest, kind: str) -> bool:
+        return len(bucket_for(manifest, kind)) >= MAX_PRIMITIVES_PER_KIND
+
     def _append_primitive(
         self,
         manifest: HarnessManifest,
         kind: str,
         ref: PrimitiveRef,
         capped: set[str],
-    ) -> bool:
+    ) -> AddOutcome:
         """Append within the ceiling, reporting the first entry it refuses.
 
         Every path that adds a primitive goes through here. An adapter that
         appended directly would enumerate without limit, leaving the safety
         ceiling covering only the part of discovery that happened to use it.
         """
-        bucket = bucket_for(manifest, kind)
-        if len(bucket) >= MAX_PRIMITIVES_PER_KIND:
+        if self._kind_is_full(manifest, kind):
             self._report_ceiling(manifest, kind, capped)
-            return False
-        bucket.append(ref)
-        return True
+            return AddOutcome.CEILING
+        bucket_for(manifest, kind).append(ref)
+        return AddOutcome.ADDED
 
     def detect(self, workspace: Path) -> int:
         """Return a confidence score (0-100) that this adapter fits."""
@@ -735,9 +824,15 @@ class HarnessAdapter:
             norm_path = normalize_catalog_path(path, workspace)
             if norm_path in seen_paths:
                 continue
+            if self._kind_is_full(manifest, "rule"):
+                # Genuine overflow, so report it and stop -- but never
+                # silently: a scoped instruction that vanishes without a note
+                # looks identical to one that was never written.
+                self._report_ceiling(manifest, "rule", capped)
+                break
             directory = str(Path(norm_path).parent).replace("\\", "/")
             scan = scan_primitive(path)
-            added = self._append_primitive(
+            self._append_primitive(
                 manifest,
                 "rule",
                 PrimitiveRef(
@@ -751,11 +846,6 @@ class HarnessAdapter:
                 ),
                 capped,
             )
-            if not added:
-                # The rule bucket is full. Stop walking, but never silently:
-                # a scoped instruction that vanishes without a note looks
-                # identical to one that was never written.
-                break
             seen_paths.add(norm_path)
 
     def _discover_primitives(
@@ -774,19 +864,27 @@ class HarnessAdapter:
             for ref in bucket
         }
 
-        def add(md: Path, kind: str) -> None:
-            if not md.is_file():
-                return
+        def add(md: Path, kind: str) -> AddOutcome:
+            """Classify and catalog one candidate.
+
+            Order matters. The duplicate check precedes the ceiling check so a
+            path already catalogued is never mistaken for overflow, and the
+            ceiling check precedes ``scan_primitive`` so a capped kind costs no
+            metadata reads however many candidates remain.
+            """
             norm_path = normalize_catalog_path(md, workspace)
             if norm_path in seen_paths:
-                return
+                return AddOutcome.DUPLICATE
+            if self._kind_is_full(manifest, kind):
+                self._report_ceiling(manifest, kind, capped)
+                return AddOutcome.CEILING
             scan = scan_primitive(md)
             policy = (
                 LoadingPolicy.MODEL_DISCOVERABLE
                 if kind == "command"
                 else skill_policy(scan)
             )
-            added = self._append_primitive(
+            outcome = self._append_primitive(
                 manifest,
                 kind,
                 PrimitiveRef(
@@ -799,11 +897,18 @@ class HarnessAdapter:
                 ),
                 capped,
             )
-            if added:
+            if outcome is AddOutcome.ADDED:
                 seen_paths.add(norm_path)
+            return outcome
 
         for skill_md in iter_skill_files(workspace):
-            add(skill_md, "skill")
+            if add(skill_md, "skill") is AddOutcome.CEILING:
+                break
         for subdir, file_glob, recursive, kind in DISCOVERY_PATTERNS:
-            for md in iter_pruned_files(workspace / subdir, file_glob, recursive=recursive):
-                add(md, kind)
+            if kind in capped:
+                continue  # already overflowed; do not even open the directory
+            for md in iter_pruned_files(
+                workspace / subdir, file_glob, recursive=recursive, workspace=workspace
+            ):
+                if add(md, kind) is AddOutcome.CEILING:
+                    break

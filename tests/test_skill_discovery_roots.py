@@ -9,7 +9,7 @@ from app.services.harness.base import (
     MAX_PRIMITIVES_PER_KIND,
     LoadingPolicy,
     iter_skill_files,
-    walk_pruned,
+    iter_workspace_files,
 )
 from app.services.harness.registry import collect_manifest
 
@@ -79,8 +79,10 @@ def test_walk_prunes_heavy_directories(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "y.md").write_text("y", encoding="utf-8")
 
-    visited = {str(d.relative_to(tmp_path)) for d, _ in walk_pruned(tmp_path)}
-    assert "src" in visited
+    visited = {
+        str(p.relative_to(tmp_path)) for p in iter_workspace_files(tmp_path, tmp_path)
+    }
+    assert "src/y.md" in visited
     assert not any(v.startswith("node_modules") for v in visited)
     assert not any(v.startswith(".git") for v in visited)
 

@@ -12,6 +12,7 @@ from typing import List
 from app.services.harness.base import (
     HarnessAdapter,
     HarnessManifest,
+    PRUNED_DIR_NAMES,
     LoadingPolicy,
     PrimitiveRef,
     PrimitiveScan,
@@ -62,6 +63,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         agents_dir = claude_dir / "agents"
         if agents_dir.is_dir():
             for agent_file in sorted(agents_dir.glob("*.md")):
+                if self._kind_is_full(manifest, "agent"):
+                    self._report_ceiling(manifest, "agent", capped)
+                    break
                 scan = scan_primitive(agent_file)
                 self._append_primitive(
                     manifest,
@@ -82,6 +86,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
         commands_dir = claude_dir / "commands"
         if commands_dir.is_dir():
             for cmd_file in sorted(commands_dir.glob("*.md")):
+                if self._kind_is_full(manifest, "command"):
+                    self._report_ceiling(manifest, "command", capped)
+                    break
                 scan = scan_primitive(cmd_file)
                 self._append_primitive(
                     manifest,
@@ -103,6 +110,13 @@ class ClaudeCodeAdapter(HarnessAdapter):
         skills_dir = claude_dir / "skills"
         if skills_dir.is_dir():
             for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
+                # "*" matches a pruned directory sitting directly under
+                # skills/, which the glob would otherwise walk straight into.
+                if skill_md.parent.name in PRUNED_DIR_NAMES:
+                    continue
+                if self._kind_is_full(manifest, "skill"):
+                    self._report_ceiling(manifest, "skill", capped)
+                    break
                 scan = scan_primitive(skill_md)
                 self._append_primitive(
                     manifest,
@@ -118,6 +132,9 @@ class ClaudeCodeAdapter(HarnessAdapter):
                     capped,
                 )
             for skill_md in sorted(skills_dir.glob("*.md")):
+                if self._kind_is_full(manifest, "skill"):
+                    self._report_ceiling(manifest, "skill", capped)
+                    break
                 scan = scan_primitive(skill_md)
                 self._append_primitive(
                     manifest,
@@ -138,7 +155,12 @@ class ClaudeCodeAdapter(HarnessAdapter):
         rules_sections: List[tuple[str, str]] = []
         rules_dir = claude_dir / "rules"
         if rules_dir.is_dir():
-            for rule_file in iter_pruned_files(rules_dir, "*.md", recursive=True):
+            for rule_file in iter_pruned_files(
+                rules_dir, "*.md", recursive=True, workspace=workspace
+            ):
+                if self._kind_is_full(manifest, "rule"):
+                    self._report_ceiling(manifest, "rule", capped)
+                    break
                 scan = scan_primitive(rule_file)
                 policy, scope = _rule_policy(scan)
                 added = self._append_primitive(

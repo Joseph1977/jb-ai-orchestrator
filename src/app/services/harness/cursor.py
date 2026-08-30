@@ -73,7 +73,12 @@ class CursorAdapter(HarnessAdapter):
         rules_sections: List[tuple[str, str]] = []
         rules_dir = cursor_dir / "rules"
         if rules_dir.is_dir():
-            for rule_file in iter_pruned_files(rules_dir, "*.mdc", recursive=True):
+            for rule_file in iter_pruned_files(
+                rules_dir, "*.mdc", recursive=True, workspace=workspace
+            ):
+                if self._kind_is_full(manifest, "rule"):
+                    self._report_ceiling(manifest, "rule", capped)
+                    break
                 scan = scan_primitive(rule_file)
                 policy, scope = _rule_policy(scan)
                 added = self._append_primitive(
@@ -124,6 +129,9 @@ class CursorAdapter(HarnessAdapter):
         agents_dir = cursor_dir / "agents"
         if agents_dir.is_dir():
             for agent_file in sorted(agents_dir.glob("*.md")):
+                if self._kind_is_full(manifest, "agent"):
+                    self._report_ceiling(manifest, "agent", capped)
+                    break
                 self._append_primitive(
                     manifest,
                     "agent",
