@@ -564,8 +564,6 @@ def iter_workspace_files(
                     frontier.append((True, child))
             elif entry.kind is WorkspaceEntryKind.FILE:
                 frontier.append((False, child))
-            elif entry.kind is WorkspaceEntryKind.SYMLINK:
-                logger.warning("Skipping symlink %s", child)
         stack.extend(reversed(frontier))
 
 
@@ -687,6 +685,22 @@ class DiscoveryContext:
             for ref in bucket
         }
 
+    def __enter__(self) -> "DiscoveryContext":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        try:
+            count = self.reader.skipped_symlink_count
+            if count:
+                path_label = "path" if count == 1 else "paths"
+                self.manifest.notes.append(
+                    f"{count} unique symlinked workspace {path_label} "
+                    "encountered and skipped during "
+                    "discovery; symlinks are unsupported."
+                )
+        finally:
+            self.reader.close()
+
     def is_capped(self, kind: str) -> bool:
         """True once this kind has *confirmed* overflow, not merely filled."""
         return kind in self.capped
@@ -741,7 +755,7 @@ class DiscoveryContext:
             # Unreadable or unsafe. Skipped rather than catalogued with a
             # filename guess: an entry the model cannot read is worse than no
             # entry, because it will try.
-            logger.warning("Skipping unreadable or unsafe %s file %s", kind, norm_path)
+            logger.debug("Skipping unreadable or unsafe %s file %s", kind, norm_path)
             return ConsiderResult(AddOutcome.REJECTED)
 
         facts = facts_for(scan)
