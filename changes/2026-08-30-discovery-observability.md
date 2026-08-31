@@ -1,7 +1,7 @@
 # Discovery observability without warning noise
 
 **Date:** 2026-08-30
-**Branch / PR:** `fix/discovery-observability` (PR pending) → `on-going-dev`
+**Branch / PR:** `fix/discovery-observability` (jb-ai-orchestrator PR #4) → `on-going-dev`
 
 ## What changed
 
