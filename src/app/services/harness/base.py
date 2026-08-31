@@ -692,8 +692,10 @@ class DiscoveryContext:
         try:
             count = self.reader.skipped_symlink_count
             if count:
+                path_label = "path" if count == 1 else "paths"
                 self.manifest.notes.append(
-                    f"{count} unique symlinked workspace paths skipped during "
+                    f"{count} unique symlinked workspace {path_label} "
+                    "encountered and skipped during "
                     "discovery; symlinks are unsupported."
                 )
         finally:
@@ -753,7 +755,7 @@ class DiscoveryContext:
             # Unreadable or unsafe. Skipped rather than catalogued with a
             # filename guess: an entry the model cannot read is worse than no
             # entry, because it will try.
-            logger.warning("Skipping unreadable or unsafe %s file %s", kind, norm_path)
+            logger.debug("Skipping unreadable or unsafe %s file %s", kind, norm_path)
             return ConsiderResult(AddOutcome.REJECTED)
 
         facts = facts_for(scan)

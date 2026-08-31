@@ -64,6 +64,18 @@ class ReaderUnavailableError(Exception):
     """The platform lacks the primitives required to read safely."""
 
 
+class SymlinkRejectedError(OSError):
+    """A workspace open failed because one exact component is a symlink."""
+
+    def __init__(self, original_errno: int, component_path: str) -> None:
+        super().__init__(
+            original_errno,
+            f"Symlink rejected: {component_path}",
+            component_path,
+        )
+        self.component_path = component_path
+
+
 def platform_supports_workspace_io() -> bool:
     return os.open in os.supports_dir_fd and os.scandir in os.supports_fd
 
@@ -214,7 +226,12 @@ class WorkspaceReader:
                             pass
                         else:
                             if stat.S_ISLNK(info.st_mode):
-                                self._record_symlink(parent, part)
+                                path = self._record_symlink(parent, part)
+                                if path is not None:
+                                    raise SymlinkRejectedError(
+                                        exc.errno,
+                                        path,
+                                    ) from exc
                     raise
                 os.close(fd)
                 fd = nxt
@@ -224,20 +241,27 @@ class WorkspaceReader:
             os.close(fd)
             raise
 
-    def _record_symlink(self, parent: WorkspacePath, name: str) -> None:
+    def _record_symlink(
+        self,
+        parent: WorkspacePath,
+        name: str,
+    ) -> Optional[str]:
         try:
             path = parent.child(name).posix
         except UnsafePathError as exc:
             logger.warning("Skipping entry with unsafe name: %s", exc)
-            return
+            return None
         if path in self._skipped_symlink_paths:
-            return
+            return path
         self._skipped_symlink_paths.add(path)
         logger.warning("Skipping symlink %s", path)
+        return path
 
     @staticmethod
-    def _log_scan_error(message: str, *args, exc: OSError) -> None:
-        if exc.errno == errno.ENOENT:
+    def _log_os_error(message: str, *args, exc: OSError) -> None:
+        if isinstance(exc, SymlinkRejectedError):
+            logger.debug(message, *args, exc)
+        elif exc.errno == errno.ENOENT:
             logger.debug(message, *args, exc)
         else:
             logger.warning(message, *args, exc)
@@ -270,7 +294,7 @@ class WorkspaceReader:
                             kind = WorkspaceEntryKind.OTHER
                         entries.append(WorkspaceEntry(entry.name, kind))
                     except OSError as exc:
-                        self._log_scan_error(
+                        self._log_os_error(
                             "Skipping unreadable entry %s/%s: %s",
                             wp,
                             entry.name,
@@ -279,14 +303,14 @@ class WorkspaceReader:
             return sorted(entries, key=lambda entry: entry.name)
         except OSError as exc:
             if entries:
-                self._log_scan_error(
+                self._log_os_error(
                     "Directory scan ended early for %s; preserving %d entries: %s",
                     wp,
                     len(entries),
                     exc=exc,
                 )
             else:
-                self._log_scan_error(
+                self._log_os_error(
                     "Skipping unreadable directory %s: %s",
                     wp,
                     exc=exc,
@@ -329,7 +353,9 @@ class WorkspaceReader:
                 fd = os.open(wp.name, _FILE_FLAGS, dir_fd=dir_fd)
             except OSError as exc:
                 if exc.errno == errno.ELOOP:
-                    self._record_symlink(wp.parent, wp.name)
+                    path = self._record_symlink(wp.parent, wp.name)
+                    if path is not None:
+                        raise SymlinkRejectedError(exc.errno, path) from exc
                 raise
         finally:
             os.close(dir_fd)
@@ -359,7 +385,14 @@ class WorkspaceReader:
         try:
             with self.open_text(wp) as handle:
                 chunk = handle.read(cap + 1)
-        except (OSError, UnsafePathError) as exc:
+        except OSError as exc:
+            self._log_os_error(
+                "Skipping unreadable file %s: %s",
+                wp,
+                exc=exc,
+            )
+            return None
+        except UnsafePathError as exc:
             logger.warning("Skipping unreadable file %s: %s", wp, exc)
             return None
         if len(chunk) > cap:
