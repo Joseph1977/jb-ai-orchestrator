@@ -141,17 +141,56 @@ def test_unsafe_hook_config_is_not_loaded_or_executed(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
-def test_unsafe_hook_config_is_reported_by_adapter(tmp_path):
+def test_unsafe_hook_config_is_reported_by_adapter(tmp_path, caplog):
     outside = tmp_path.parent / "outside-hooks.json"
     outside.write_text(json.dumps({"hooks": {"event": [{"command": "true"}]}}))
     cursor = tmp_path / ".cursor"
     cursor.mkdir()
     os.symlink(outside, cursor / "hooks.json")
 
-    manifest = collect_manifest(str(tmp_path))
+    with caplog.at_level("WARNING"):
+        manifest = collect_manifest(str(tmp_path))
 
     assert manifest.orchestration_type == "cursor"
     assert any("unreadable or unsafe" in note for note in manifest.notes)
+    assert caplog.text.count("Skipping symlink .cursor/hooks.json") == 1
+    assert "Hook configuration" not in caplog.text
+
+
+def test_symlinked_claude_hook_file_keeps_security_diagnostic(tmp_path):
+    outside = tmp_path.parent / "outside-claude-hooks.json"
+    outside.write_text(json.dumps({"hooks": {"PreToolUse": []}}))
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    os.symlink(outside, claude / "hooks.json")
+
+    cfg = load_hooks_for_workspace(str(tmp_path))
+    manifest = collect_manifest(str(tmp_path))
+
+    assert any("unreadable or unsafe" in item for item in cfg.diagnostics)
+    assert any("unreadable or unsafe" in note for note in manifest.notes)
+
+
+def test_symlinked_claude_root_has_one_warning_and_no_hook_cascade(
+    tmp_path, caplog
+):
+    outside = tmp_path.parent / "outside-claude-root"
+    outside.mkdir()
+    (outside / "hooks.json").write_text(
+        json.dumps({"hooks": {"PreToolUse": [{"command": "false"}]}})
+    )
+    os.symlink(outside, tmp_path / ".claude")
+
+    with caplog.at_level("WARNING"):
+        manifest = collect_manifest(str(tmp_path))
+
+    assert caplog.text.count("Skipping symlink .claude") == 1
+    assert "Hook configuration" not in caplog.text
+    assert not any("Hook configuration" in note for note in manifest.notes)
+    assert any(
+        "1 unique symlinked workspace path encountered and skipped" in note
+        for note in manifest.notes
+    )
 
 
 def test_fifo_hook_config_is_rejected_without_blocking(tmp_path):

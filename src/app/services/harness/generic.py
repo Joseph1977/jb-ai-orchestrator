@@ -63,11 +63,8 @@ class GenericAdapter(HarnessAdapter):
             detected=detected,
             confidence=confidence,
         )
-        ctx = self._begin(workspace, manifest)
-        try:
+        with self._begin(workspace, manifest) as ctx:
             return self._collect(ctx, manifest)
-        finally:
-            ctx.reader.close()
 
     def _collect(self, ctx: DiscoveryContext, manifest: HarnessManifest) -> HarnessManifest:
         agents_md_wp = self._find_agents_md(ctx)

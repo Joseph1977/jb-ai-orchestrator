@@ -386,7 +386,8 @@ files the tree contains. An explicit stack rather than recursion, so a tree
 deeper than the interpreter's stack limit does not abort discovery.
 `node_modules`, `.git`, `.venv`, `dist`, `build` and similar are pruned *before*
 descent. A directory or entry that cannot be read is logged and skipped rather
-than failing discovery.
+than failing discovery. A missing optional path (`ENOENT`) is normal and logs
+only at debug; every other filesystem error remains a warning.
 
 **Workspace containment.** A workspace is untrusted input, and the walker is not
 the boundary: adapters enumerate their own locations, root instructions are
@@ -408,7 +409,11 @@ Consequences worth knowing:
 
 - **Symlinks are refused, not resolved.** A link is skipped even when its target
   is inside the workspace. Resolving and comparing is the raceable pattern this
-  design removes.
+  design removes. Each normalized path warns once per collection even when
+  several discovery passes encounter it, and the manifest receives one
+  count-only note when any symlinks were encountered and skipped. Failures
+  beneath an already-identified symlink log at debug rather than repeating the
+  same warning.
 - **Only regular files are read.** The leaf is `fstat`-checked, and opened with
   `O_NONBLOCK`, so a FIFO planted in a workspace cannot block discovery before
   it is rejected.
@@ -426,6 +431,11 @@ Consequences worth knowing:
   immutable name/type facts, not `DirEntry` objects tied to a descriptor it has
   already closed. This keeps traversal correct on NFS and other filesystems that
   report `DT_UNKNOWN` and need a live descriptor for `is_file` / `is_dir`.
+
+`DiscoveryContext` owns the reader lifecycle. Adapters enter it with `with`; its
+exit path transfers the unique symlink count to manifest notes and closes the
+reader on both success and failure. New adapters therefore cannot accidentally
+omit diagnostics or leak the workspace descriptor by forgetting manual cleanup.
 
 **Discovery ceiling.** At most 200 primitives per kind are kept as a safety
 ceiling. Every catalog entry, from shared discovery and adapter enumeration
@@ -945,6 +955,11 @@ execution time. Symlinks and non-regular files are refused, input is bounded to
 64,000 characters, and rejected configuration executes no hooks. Collection
 surfaces the rejection in manifest notes; execution-time loading logs it and
 continues with no hooks.
+
+A hook file that is itself a symlink retains an `unreadable or unsafe`
+diagnostic because it directly redirects executable configuration. When an
+ancestor directory is the rejected symlink, the one symlink warning and
+count-only manifest note replace downstream hook-probe warnings.
 
 This containment applies to reading the configuration, not to sandboxing what a
 hook may run: hook commands are arbitrary shell by definition and may name

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.workspace_io import (
     ReaderUnavailableError,
+    SymlinkRejectedError,
     UnsafePathError,
     WorkspacePath,
     WorkspaceReader,
@@ -155,6 +156,17 @@ def _read_candidate(
 ) -> Optional[str]:
     try:
         text, overflowed = reader.read_strict(wp, MAX_HOOK_CONFIG_CHARS)
+    except SymlinkRejectedError as exc:
+        if exc.component_path == wp.posix:
+            diagnostics.append(
+                f"Hook configuration {wp.posix} is unreadable or unsafe; ignored"
+            )
+        logger.debug(
+            "Hook configuration %s rejected through symlink %s; ignored",
+            wp.posix,
+            exc.component_path,
+        )
+        return None
     except FileNotFoundError:
         return None
     except (OSError, UnsafePathError) as exc:
