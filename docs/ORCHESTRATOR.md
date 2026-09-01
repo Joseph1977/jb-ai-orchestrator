@@ -302,7 +302,13 @@ Continue a run that awaited input. Works from **any** instance.
 
 ### `GET /v1/orchestrator/{orchestratorGuid}`
 
-Returns `{ status, result, error, awaitsResponse, stateGuid }`.
+Returns `{ status, result, error, awaitsResponse, stateGuid }`. While the
+execution is `awaiting_response`, it also returns `interrupts` and
+`pendingToolCallIds`, rebuilt from the latest persisted `LLMState` with the same
+canonical serializer used by execute and resume. This lets a stateless caller
+reconstruct Ask-* and hook-permission interactions after a remount. Terminal
+statuses never replay stale interrupts. The payload contains interaction
+metadata, not transient credentials.
 
 ### `POST /v1/orchestrator/{orchestratorGuid}/close`
 

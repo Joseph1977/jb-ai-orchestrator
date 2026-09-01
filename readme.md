@@ -307,7 +307,7 @@ Interactive documentation is served at `/swagger`.
 | `POST` | `/v1/orchestrator/initiate` | Bind a folder to a new session, provision the workspace, detect the orchestration type, return `orchestratorGuid` plus discovered agents and skills. No LLM call. |
 | `POST` | `/v1/orchestrator/execute` | Run a prompt against an initiated session. Returns the result, or `awaitsResponse` plus `stateGuid` when input is needed. |
 | `POST` | `/v1/orchestrator/resume` | Continue an awaiting run with `{ orchestratorGuid, stateGuid, toolCallId, result }`. Pod-agnostic. |
-| `GET` | `/v1/orchestrator/{orchestratorGuid}` | Session and run status |
+| `GET` | `/v1/orchestrator/{orchestratorGuid}` | Session and run status. While awaiting input, also replays canonical `interrupts` and `pendingToolCallIds` from persisted state so authorized callers can rebuild interaction UI. |
 | `POST` | `/v1/orchestrator/{orchestratorGuid}/close` | Close the session. **200** `closed` or **202** `closing`; retry after active runs finish or go stale. Removes service-owned runtime and workspace; never touches in-place caller input or durable output. |
 
 ### AG-UI runtime
