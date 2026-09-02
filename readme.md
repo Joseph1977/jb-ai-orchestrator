@@ -521,7 +521,9 @@ name and URL. See
 | `DATABASE_URL` | — | Required. Async SQLAlchemy URL, e.g. `postgresql+asyncpg://pyagent:pyagent@localhost:5432/pyagent` |
 | `LITELLM_BASE_URL` | `http://localhost:4000` | LiteLLM endpoint |
 | `LITELLM_API_KEY` | `sk-1234` | LiteLLM key |
-| `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | Per-request LiteLLM timeout |
+| `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network timeout for each LiteLLM request |
+| `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute wall-clock deadline for one complete LiteLLM call, including streamed response consumption |
+| `LITELLM_MAX_COMPLETION_TOKENS` | `4096` | Completion-token cap sent on every model request; `0` disables it |
 | `LITELLM_DROP_PARAMS` | `True` | Drop parameters a model does not accept |
 | `MAX_TOOL_CALLS` | `10` | Tool calls per request |
 | `ServiceName` | `jb-ai-orchestrator-service` | Service name |
@@ -543,8 +545,16 @@ name and URL. See
 |---|---|---|
 | `RESUME_CLAIM_TIMEOUT_SEC` | `300` | Age at which a stale in-progress resume claim is restored for retry |
 | `RUN_HEARTBEAT_INTERVAL_SEC` | `5` | Heartbeat interval for active runs; must be ≥ 1 |
-| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs without a newer heartbeat are stale for close reconciliation; must exceed the interval |
+| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs without a newer heartbeat are stale and reconciled before close or a replacement claim; must exceed the interval |
+| `RUN_SEGMENT_DEADLINE_SEC` | `270` | Absolute wall-clock deadline for workspace/binding preparation plus the complete model/tool loop |
+| `RUN_CANCELLATION_WARN_SEC` | `5` | Emit a structured diagnostic if a cancelled worker has not stopped after this many seconds |
 | `CLOSE_WAIT_TIMEOUT_SEC` | `10` | Wait before close returns **202** `closing` instead of **200** `closed` |
+
+The default ordering is model call **240s**, complete segment **270s**, caller
+**300s**, and reverse proxy **310s** or more. A deadline cancels and awaits the
+worker before its `execution_runs` claim becomes terminal. A new claim may
+reconcile a crash-orphaned row only after its heartbeat is stale; a fresh row
+still returns `RUN_CONFLICT`.
 
 ### Workspaces and bindings
 

@@ -260,6 +260,8 @@ async def test_agui_copy_uses_persisted_execution_identity(tmp_path, monkeypatch
     )
 
     assert response.status_code == 200
+    async for _ in response.body_iterator:
+        pass
     create_execution.assert_awaited_once()
     provision.assert_awaited_once()
     assert provision.await_args.args[0] == execution_id
@@ -369,5 +371,7 @@ async def test_agui_relative_path_failure_cleans_tracked_copy(
     )
 
     assert response.status_code == 200
+    async for _ in response.body_iterator:
+        pass
     cleanup.assert_called_once_with(execution_id)
     finalize.assert_awaited_once()

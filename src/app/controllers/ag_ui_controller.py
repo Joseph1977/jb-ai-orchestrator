@@ -7,8 +7,9 @@ import copy
 import json
 import uuid
 from asyncio import QueueEmpty
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Annotated, List, Optional
+from typing import Any, Annotated, Awaitable, Callable, List, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -85,7 +86,13 @@ from app.services.run_lifecycle import (
     thread_key_for,
 )
 from app.services.runtime_paths import cleanup_unreferenced_offloads, ensure_runtime
-from app.services.session_close_service import session_close_service
+from app.services.session_close_service import (
+    CANCEL_REASON_CLOSE,
+    CANCEL_REASON_HEARTBEAT_FAILURE,
+    CANCEL_REASON_SEGMENT_DEADLINE,
+    RunCancelHandle,
+    session_close_service,
+)
 from app.services.storage import StorageError
 from app.services.tool_hub import AGUIRunContext
 from app.utils.logger import logger
@@ -93,6 +100,42 @@ from app.utils.logger import logger
 router = APIRouter(prefix="/api/ag-ui", tags=["AG-UI"])
 
 _RUN_CONFLICT = "RUN_CONFLICT"
+_PUBLIC_RUN_FAILURES = {
+    "TIMEOUT": "Workflow run timed out",
+    "OUTPUT_LIMIT": "Model output limit reached",
+    "RUN_LIFECYCLE_FAILED": "Workflow run tracking failed",
+    "UNAVAILABLE": "Model service is unavailable",
+}
+
+
+def _run_failure_message(result: dict) -> str:
+    code = result.get("error_code") or result.get("errorCode")
+    if code in _PUBLIC_RUN_FAILURES:
+        return f"{code}: {_PUBLIC_RUN_FAILURES[code]}"
+    if code and result.get("error"):
+        return f"{code}: {result.get('error')}"
+    return result.get("error") or "AG-UI run failed"
+
+
+def _prep_failure_result(exc: BindingError | StorageError) -> dict:
+    return {
+        "success": False,
+        "error": exc.message,
+        "error_code": exc.code,
+        "_prep_failed": True,
+    }
+
+
+@dataclass
+class _AguiSegmentPrep:
+    """Workspace metadata and pre-events produced inside the managed worker."""
+
+    pre_events: list[Any] = field(default_factory=list)
+    ready: asyncio.Event = field(default_factory=asyncio.Event)
+    workspace_path: Optional[str] = None
+    in_place: bool = False
+    runtime_path: Optional[str] = None
+    provisioned: bool = False
 
 
 class AGUIRunRequest(BaseModel):
@@ -266,23 +309,16 @@ def _requested_input_differs(
     return False
 
 
-def _invoke_make_task(make_task, cancel_event: Optional[asyncio.Event]):
-    try:
-        return make_task(cancel_event)
-    except TypeError:
-        return make_task()
-
-
-def _close_discarded_claim(cancel_event: Optional[asyncio.Event]) -> bool:
-    if cancel_event is None:
+def _close_discarded_claim(cancel_handle: Optional[RunCancelHandle | asyncio.Event]) -> bool:
+    if cancel_handle is None:
         return False
-    is_set = getattr(cancel_event, "is_set", None)
-    if callable(is_set):
-        result = is_set()
-        if asyncio.iscoroutine(result):
-            return False
-        return bool(result)
-    return False
+    if isinstance(cancel_handle, RunCancelHandle):
+        if cancel_handle.reason == CANCEL_REASON_CLOSE:
+            return True
+        if cancel_handle.reason is None and cancel_handle.event.is_set():
+            return True
+        return False
+    return cancel_handle.is_set()
 
 
 async def _terminalize_failed_execution(
@@ -294,22 +330,6 @@ async def _terminalize_failed_execution(
     if provisioned:
         workspace_manager.cleanup(execution_id)
     await _finalize(execution_id, {"success": False, "error": error})
-
-
-async def _abort_fresh_run_prep(
-    run_pk: uuid.UUID,
-    thread_id: str,
-    execution_id: uuid.UUID,
-    *,
-    provisioned: bool = False,
-    error: str,
-) -> None:
-    await _abort_active_run(run_pk, thread_id, restore_claim=False)
-    await _terminalize_failed_execution(
-        execution_id,
-        provisioned=provisioned,
-        error=error,
-    )
 
 
 def _minimal_execution_config(
@@ -737,9 +757,32 @@ async def _discard_stale_awaiting_and_cleanup_orphans(thread_id: str) -> int:
     return discarded
 
 
+async def _await_segment_prep(
+    segment_prep: Optional[_AguiSegmentPrep],
+    run_task: asyncio.Task,
+) -> None:
+    if segment_prep is None:
+        return
+    prep_waiter = asyncio.create_task(segment_prep.ready.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {run_task, prep_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if prep_waiter in done:
+            return
+        if run_task in done and not segment_prep.ready.is_set():
+            return
+    finally:
+        if not prep_waiter.done():
+            prep_waiter.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await prep_waiter
+
+
 def _stream_run(
     *,
-    make_task,
+    segment_runner: Callable[[asyncio.Event], Awaitable[Any]],
     thread_id: str,
     run_id: str,
     execution_id: uuid.UUID,
@@ -747,6 +790,7 @@ def _stream_run(
     parent_run_id: Optional[str] = None,
     claimed_state_id=None,
     pre_events: Optional[List[Any]] = None,
+    segment_prep: Optional[_AguiSegmentPrep] = None,
     workspace_path: Optional[str] = None,
     in_place: bool = False,
     runtime_path: Optional[str] = None,
@@ -755,7 +799,7 @@ def _stream_run(
         queue = await agui_event_service.subscribe()
         queue_task: Optional[asyncio.Task] = None
         settled = False
-        cancel_event: Optional[asyncio.Event] = None
+        cancel_handle: Optional[RunCancelHandle] = None
         final_run_status = RUN_STATUS_FAILED
 
         async def _cancel_queue_task():
@@ -767,13 +811,13 @@ def _stream_run(
                 queue_task = None
 
         async def _execute_managed():
-            nonlocal cancel_event
+            nonlocal cancel_handle
             ready = asyncio.Event()
             shared: dict[str, asyncio.Event] = {}
 
             async def _runner():
                 await ready.wait()
-                return await _invoke_make_task(make_task, shared["cancel_event"])
+                return await segment_runner(shared["cancel_event"])
 
             task = asyncio.create_task(_runner())
             try:
@@ -782,9 +826,12 @@ def _stream_run(
                     execution_id=execution_id,
                     task=task,
                     thread_id=thread_id,
-                ) as ce:
-                    cancel_event = ce
-                    shared["cancel_event"] = ce
+                ) as handle:
+                    if isinstance(handle, RunCancelHandle):
+                        cancel_handle = handle
+                    else:
+                        cancel_handle = RunCancelHandle(event=handle)
+                    shared["cancel_event"] = cancel_handle.event
                     ready.set()
                     return await task
             finally:
@@ -801,6 +848,11 @@ def _stream_run(
             )
             for event in pre_events or []:
                 yield _serialize_event(event)
+
+            await _await_segment_prep(segment_prep, run_task)
+            if segment_prep is not None and segment_prep.ready.is_set():
+                for event in segment_prep.pre_events:
+                    yield _serialize_event(event)
 
             while True:
                 wait_set = {run_task}
@@ -832,6 +884,31 @@ def _stream_run(
 
             result = await run_task
 
+            bound_workspace = workspace_path
+            bound_inplace = in_place
+            bound_runtime = runtime_path
+            if segment_prep is not None:
+                if segment_prep.workspace_path is not None:
+                    bound_workspace = segment_prep.workspace_path
+                bound_inplace = segment_prep.in_place
+                if segment_prep.runtime_path is not None:
+                    bound_runtime = segment_prep.runtime_path
+
+            if result.get("_prep_failed"):
+                await _finalize(execution_id, result)
+                if claimed_state_id and not _close_discarded_claim(cancel_handle):
+                    if not await _restore_claimed_state(claimed_state_id):
+                        logger.warning(
+                            "Failed to restore claimed state %s after prep failure",
+                            claimed_state_id,
+                        )
+                    await _restore_execution_awaiting(execution_id)
+                settled = True
+                yield _serialize_event(
+                    RunErrorEvent(message=_run_failure_message(result))
+                )
+                return
+
             if result.get("awaits_response"):
                 try:
                     state_id = await _persist_await(
@@ -839,12 +916,12 @@ def _stream_run(
                         result,
                         thread_id,
                         run_id,
-                        workspace_path=workspace_path,
-                        in_place=in_place,
-                        runtime_path=runtime_path,
+                        workspace_path=bound_workspace,
+                        in_place=bound_inplace,
+                        runtime_path=bound_runtime,
                     )
                 except Exception:
-                    if claimed_state_id and not _close_discarded_claim(cancel_event):
+                    if claimed_state_id and not _close_discarded_claim(cancel_handle):
                         restored = await _restore_claimed_state(claimed_state_id)
                         if not restored:
                             logger.warning(
@@ -905,14 +982,16 @@ def _stream_run(
             await _finalize(execution_id, result)
 
             if not result.get("success"):
-                if claimed_state_id and not _close_discarded_claim(cancel_event):
+                if claimed_state_id and not _close_discarded_claim(cancel_handle):
                     if not await _restore_claimed_state(claimed_state_id):
                         logger.warning(
                             "Failed to restore claimed state %s after result failure",
                             claimed_state_id,
                         )
                 settled = True
-                yield _serialize_event(RunErrorEvent(message=result.get("error") or "AG-UI run failed"))
+                yield _serialize_event(
+                    RunErrorEvent(message=_run_failure_message(result))
+                )
                 return
 
             if claimed_state_id:
@@ -938,19 +1017,49 @@ def _stream_run(
                     )
                 )
         except asyncio.CancelledError:
-            if claimed_state_id and not settled and not _close_discarded_claim(cancel_event):
+            if claimed_state_id and not settled and not _close_discarded_claim(cancel_handle):
                 if not await _restore_claimed_state(claimed_state_id):
                     logger.warning(
                         "Failed to restore claimed state %s after stream cancellation",
                         claimed_state_id,
                     )
-            yield _serialize_event(
-                RunErrorEvent(message=f"{SESSION_CLOSING}: Session close is in progress")
-            )
+            if cancel_handle is not None and cancel_handle.reason == CANCEL_REASON_SEGMENT_DEADLINE:
+                await _finalize(
+                    execution_id,
+                    {
+                        "success": False,
+                        "error": "Workflow run timed out",
+                        "error_code": "TIMEOUT",
+                    },
+                )
+                yield _serialize_event(
+                    RunErrorEvent(message="TIMEOUT: Workflow run timed out")
+                )
+            elif (
+                cancel_handle is not None
+                and cancel_handle.reason == CANCEL_REASON_HEARTBEAT_FAILURE
+            ):
+                await _finalize(
+                    execution_id,
+                    {
+                        "success": False,
+                        "error": "Workflow run tracking failed",
+                        "error_code": "RUN_LIFECYCLE_FAILED",
+                    },
+                )
+                yield _serialize_event(
+                    RunErrorEvent(
+                        message="RUN_LIFECYCLE_FAILED: Workflow run tracking failed"
+                    )
+                )
+            else:
+                yield _serialize_event(
+                    RunErrorEvent(message=f"{SESSION_CLOSING}: Session close is in progress")
+                )
             return
         except Exception as exc:
             logger.error(f"AG-UI run failed: {exc}")
-            if claimed_state_id and not settled and not _close_discarded_claim(cancel_event):
+            if claimed_state_id and not settled and not _close_discarded_claim(cancel_handle):
                 if not await _restore_claimed_state(claimed_state_id):
                     logger.warning(
                         "Failed to restore claimed state %s after run exception",
@@ -964,6 +1073,10 @@ def _stream_run(
             yield _serialize_event(RunErrorEvent(message=str(exc)))
         finally:
             await _cancel_queue_task()
+            if not run_task.done():
+                run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await run_task
             await agui_event_service.unsubscribe(queue)
             await _finalize_run_segment(run_pk, thread_id, run_status=final_run_status)
 
@@ -1133,49 +1246,6 @@ async def _handle_tool_response(
             session, execution_id, status=ExecutionStatus.RUNNING
         )
 
-    try:
-        workspace_path = await _ensure_workspace_for_agui_segment(
-            execution_id,
-            execution,
-            stored_config,
-            input_access_token=input_access_token,
-        )
-        resume_state = copy.deepcopy(state_payload)
-        resume_state["messages"] = refresh_segment_run_binding(
-            resume_state.get("messages") or [],
-            stored_config,
-        )
-        local_context = _local_context_from_segment(
-            execution,
-            stored_config,
-            output_access_token=output_access_token,
-            workspace_path=workspace_path,
-        )
-    except BindingError as exc:
-        await _abort_active_run(
-            run_pk,
-            state_thread_id,
-            state_id=state_id,
-            restore_claim=True,
-            restore_execution_awaiting=True,
-            execution_id=execution_id,
-        )
-        return _binding_error_stream(exc)
-    except StorageError as exc:
-        await _abort_active_run(
-            run_pk,
-            state_thread_id,
-            state_id=state_id,
-            restore_claim=True,
-            restore_execution_awaiting=True,
-            execution_id=execution_id,
-        )
-        return _storage_error_stream(exc)
-
-    bound_workspace = local_context.workspace_path if local_context else workspace_path
-    bound_inplace = local_context.in_place if local_context else bool(stored_config.get("inPlace", False))
-    bound_runtime = local_context.runtime_path if local_context else stored_config.get("runtimePath")
-
     resume_payloads = []
     for resp in responses:
         if isinstance(resp, AGUIToolResponsePayload):
@@ -1190,44 +1260,89 @@ async def _handle_tool_response(
     pending_tools = list(state_payload.get("pending_tools") or [])
     if not pending_tools and state_payload.get("pending_tool"):
         pending_tools = [state_payload["pending_tool"]]
-    updated_payload = dict(resume_state)
-    pre_events = []
-    if any(is_hook_permission_pending(pt) for pt in pending_tools):
-        hook_events, updated_payload = await get_tool_hub().prepare_hook_permission_resume_events(
-            state_payload=updated_payload,
-            resume_tool_results=resume_payloads,
-            local_context=local_context,
-            model=updated_payload.get("model", "gpt-3.5-turbo"),
-            lite_llm_timeout=updated_payload.get("lite_llm_request_timeout_in_sec"),
-            agui_context=AGUIRunContext(thread_id=state_thread_id, run_id=state_run_id),
-        )
-        pre_events.extend(hook_events)
 
-    def make_task(cancel_event=None):
-        return get_tool_hub().process_request(
-            request=updated_payload.get("request", ""),
-            model=updated_payload.get("model", "gpt-3.5-turbo"),
-            max_tool_calls=updated_payload.get("max_calls"),
-            requested_tools=updated_payload.get("requested_tools"),
-            resume_state=updated_payload,
-            resume_tool_results=resume_payloads,
-            agui_context=AGUIRunContext(thread_id=state_thread_id, run_id=state_run_id),
-            local_context=local_context,
-            frontend_tools=frontend_tools,
-            cancel_event=cancel_event,
-        )
+    segment_prep = _AguiSegmentPrep()
+    hub = get_tool_hub()
+
+    async def _run_resume_segment(cancel_event: asyncio.Event) -> dict:
+        try:
+            workspace_path = await _ensure_workspace_for_agui_segment(
+                execution_id,
+                execution,
+                stored_config,
+                input_access_token=input_access_token,
+            )
+            resume_state = copy.deepcopy(state_payload)
+            resume_state["messages"] = refresh_segment_run_binding(
+                resume_state.get("messages") or [],
+                stored_config,
+            )
+            local_context = _local_context_from_segment(
+                execution,
+                stored_config,
+                output_access_token=output_access_token,
+                workspace_path=workspace_path,
+            )
+            bound_workspace = (
+                local_context.workspace_path if local_context else workspace_path
+            )
+            bound_inplace = (
+                local_context.in_place
+                if local_context
+                else bool(stored_config.get("inPlace", False))
+            )
+            bound_runtime = (
+                local_context.runtime_path
+                if local_context
+                else stored_config.get("runtimePath")
+            )
+            segment_prep.workspace_path = bound_workspace
+            segment_prep.in_place = bound_inplace
+            segment_prep.runtime_path = bound_runtime
+
+            updated_payload = dict(resume_state)
+            if any(is_hook_permission_pending(pt) for pt in pending_tools):
+                hook_events, updated_payload = await hub.prepare_hook_permission_resume_events(
+                    state_payload=updated_payload,
+                    resume_tool_results=resume_payloads,
+                    local_context=local_context,
+                    model=updated_payload.get("model", "gpt-3.5-turbo"),
+                    lite_llm_timeout=updated_payload.get("lite_llm_request_timeout_in_sec"),
+                    agui_context=AGUIRunContext(thread_id=state_thread_id, run_id=state_run_id),
+                )
+                segment_prep.pre_events.extend(hook_events)
+            segment_prep.ready.set()
+
+            return await hub.process_request(
+                request=updated_payload.get("request", ""),
+                model=updated_payload.get("model", "gpt-3.5-turbo"),
+                max_tool_calls=updated_payload.get("max_calls"),
+                requested_tools=updated_payload.get("requested_tools"),
+                resume_state=updated_payload,
+                resume_tool_results=resume_payloads,
+                agui_context=AGUIRunContext(thread_id=state_thread_id, run_id=state_run_id),
+                local_context=local_context,
+                frontend_tools=frontend_tools,
+                cancel_event=cancel_event,
+            )
+        except BindingError as exc:
+            segment_prep.ready.set()
+            return _prep_failure_result(exc)
+        except StorageError as exc:
+            segment_prep.ready.set()
+            return _prep_failure_result(exc)
+        except asyncio.CancelledError:
+            segment_prep.ready.set()
+            raise
 
     return _stream_run(
-        make_task=make_task,
+        segment_runner=_run_resume_segment,
         thread_id=state_thread_id,
         run_id=state_run_id,
         execution_id=execution_id,
         run_pk=run_pk,
         claimed_state_id=state_id,
-        pre_events=pre_events,
-        workspace_path=bound_workspace,
-        in_place=bound_inplace,
-        runtime_path=bound_runtime,
+        segment_prep=segment_prep,
     )
 
 
@@ -1466,153 +1581,167 @@ async def run_agui_session(payload: AGUIRunRequest):
         )
         return _run_conflict_stream()
 
-    provisioned = False
-    local_context: Optional[LocalToolContext] = None
-    initial_messages: Optional[list] = None
-    harness_manifest_summary: Optional[dict] = None
-    try:
-        execution_stub = SimpleNamespace(
-            id=bound_execution_id,
-            workspace_path=workspace_hint,
-            source=source,
-        )
-        if input_binding is not None:
-            ws = await workspace_manager.provision(
-                bound_execution_id,
-                source,
-                in_place=should_provision_in_place(
+    segment_prep = _AguiSegmentPrep()
+
+    async def _run_fresh_segment(cancel_event: asyncio.Event) -> dict:
+        provisioned = False
+        workspace_hint_local = workspace_hint
+        in_place_hint_local = in_place_hint
+        try:
+            execution_stub = SimpleNamespace(
+                id=bound_execution_id,
+                workspace_path=workspace_hint_local,
+                source=source,
+            )
+            if input_binding is not None:
+                in_place = should_provision_in_place(
                     input_binding, legacy_writable=legacy_writable
-                ),
-                input_access_token=_input_access_token(payload.credentials),
-            )
-            provisioned = not ws.in_place
-            workspace_hint = select_relative_workspace(ws.path, input_binding.relative_path)
-            in_place_hint = ws.in_place
-            async with get_session() as session:
-                await execution_state_service.update_execution(
-                    session,
-                    bound_execution_id,
-                    workspace_path=workspace_hint,
-                    config=execution_config,
                 )
-            execution_stub.workspace_path = workspace_hint
-        elif payload.workspace_path:
-            workspace_hint = await _ensure_workspace_for_agui_segment(
-                bound_execution_id,
-                execution_stub,
-                execution_config,
-                input_access_token=_input_access_token(payload.credentials),
-            )
-            in_place_hint = bool(execution_config.get("inPlace", in_place_hint))
+                if not in_place:
+                    provisioned = True
+                    segment_prep.provisioned = True
+                ws = await workspace_manager.provision(
+                    bound_execution_id,
+                    source,
+                    in_place=in_place,
+                    input_access_token=_input_access_token(payload.credentials),
+                )
+                provisioned = not ws.in_place
+                segment_prep.provisioned = provisioned
+                workspace_hint_local = select_relative_workspace(
+                    ws.path, input_binding.relative_path
+                )
+                in_place_hint_local = ws.in_place
+                async with get_session() as session:
+                    await execution_state_service.update_execution(
+                        session,
+                        bound_execution_id,
+                        workspace_path=workspace_hint_local,
+                        config=execution_config,
+                    )
+                execution_stub.workspace_path = workspace_hint_local
+            elif payload.workspace_path:
+                workspace_hint_local = await _ensure_workspace_for_agui_segment(
+                    bound_execution_id,
+                    execution_stub,
+                    execution_config,
+                    input_access_token=_input_access_token(payload.credentials),
+                )
+                in_place_hint_local = bool(
+                    execution_config.get("inPlace", in_place_hint_local)
+                )
 
-        local_context = _resolve_local_context(
-            workspace_hint,
-            in_place_hint,
-            thread_id=thread_id,
-            mode=(mode or ExecutionMode.WORKFLOW).value,
-            runtime_path=execution_config.get("runtimePath"),
-            output_backend=segment_output_backend(
-                execution_config,
-                output_access_token=_output_access_token(payload.credentials),
-            ),
-        )
-        if local_context is None and workspace_hint:
-            local_context = _local_context_from_segment(
-                execution_stub,
-                execution_config,
-                output_access_token=_output_access_token(payload.credentials),
-                workspace_path=workspace_hint,
-            )
-
-        bound_workspace = local_context.workspace_path if local_context else workspace_hint
-        bound_inplace = local_context.in_place if local_context else in_place_hint
-
-        system_prompt, harness_manifest_summary = _build_fresh_system_prompt(
-            bound_workspace,
-            execution_config,
-        )
-        initial_messages = build_initial_messages(
-            harness_prompt=system_prompt,
-            agui_messages=payload.messages,
-            legacy_request=None,
-            contexts=payload.context,
-            has_frontend_tools=bool(frontend_tools),
-            frontend_tool_names=[tool.get("name", "") for tool in frontend_tools],
-        )
-        await _discard_stale_awaiting_and_cleanup_orphans(thread_id)
-    except BindingError as exc:
-        await _abort_fresh_run_prep(
-            run_pk,
-            thread_id,
-            bound_execution_id,
-            provisioned=provisioned,
-            error=exc.message,
-        )
-        return _binding_error_stream(exc)
-    except StorageError as exc:
-        await _abort_fresh_run_prep(
-            run_pk,
-            thread_id,
-            bound_execution_id,
-            provisioned=provisioned,
-            error=exc.message,
-        )
-        return _storage_error_stream(exc)
-    except Exception:
-        await _abort_fresh_run_prep(
-            run_pk,
-            thread_id,
-            bound_execution_id,
-            provisioned=provisioned,
-            error="Input provisioning failed",
-        )
-
-        async def provision_error_stream():
-            yield _serialize_event(RunErrorEvent(message="Input provisioning failed"))
-
-        return StreamingResponse(provision_error_stream(), media_type="text/event-stream")
-
-    bound_workspace = local_context.workspace_path if local_context else workspace_hint
-    bound_inplace = local_context.in_place if local_context else in_place_hint
-
-    logger.info(
-        "Starting AG-UI run thread_id=%s run_id=%s workspace=%s execution_id=%s",
-        thread_id,
-        run_id,
-        bound_workspace or "(none)",
-        bound_execution_id,
-    )
-
-    def make_task(cancel_event=None):
-        return tool_execution_hub.process_request(
-            request="",
-            initial_messages=initial_messages,
-            model=payload.model or "gpt-3.5-turbo",
-            max_tool_calls=payload.max_tool_calls,
-            requested_tools=None,
-            lite_llm_request_timeout_in_sec=payload.llm_request_timeout_in_sec,
-            include_agui_tools=True,
-            agui_context=AGUIRunContext(
+            local_context = _resolve_local_context(
+                workspace_hint_local,
+                in_place_hint_local,
                 thread_id=thread_id,
-                run_id=run_id,
-                parent_run_id=parent_run_id,
-            ),
-            frontend_tools=frontend_tools,
-            local_context=local_context,
-            harness_manifest=harness_manifest_summary,
-            cancel_event=cancel_event,
-        )
+                mode=(mode or ExecutionMode.WORKFLOW).value,
+                runtime_path=execution_config.get("runtimePath"),
+                output_backend=segment_output_backend(
+                    execution_config,
+                    output_access_token=_output_access_token(payload.credentials),
+                ),
+            )
+            if local_context is None and workspace_hint_local:
+                local_context = _local_context_from_segment(
+                    execution_stub,
+                    execution_config,
+                    output_access_token=_output_access_token(payload.credentials),
+                    workspace_path=workspace_hint_local,
+                )
+
+            bound_workspace = (
+                local_context.workspace_path if local_context else workspace_hint_local
+            )
+            bound_inplace = (
+                local_context.in_place if local_context else in_place_hint_local
+            )
+            segment_prep.workspace_path = bound_workspace
+            segment_prep.in_place = bound_inplace
+            segment_prep.runtime_path = (
+                local_context.runtime_path
+                if local_context
+                else execution_config.get("runtimePath")
+            )
+
+            system_prompt, harness_manifest_summary = _build_fresh_system_prompt(
+                bound_workspace,
+                execution_config,
+            )
+            initial_messages = build_initial_messages(
+                harness_prompt=system_prompt,
+                agui_messages=payload.messages,
+                legacy_request=None,
+                contexts=payload.context,
+                has_frontend_tools=bool(frontend_tools),
+                frontend_tool_names=[tool.get("name", "") for tool in frontend_tools],
+            )
+            await _discard_stale_awaiting_and_cleanup_orphans(thread_id)
+            segment_prep.ready.set()
+
+            logger.info(
+                "Starting AG-UI run thread_id=%s run_id=%s workspace=%s execution_id=%s",
+                thread_id,
+                run_id,
+                bound_workspace or "(none)",
+                bound_execution_id,
+            )
+
+            return await tool_execution_hub.process_request(
+                request="",
+                initial_messages=initial_messages,
+                model=payload.model or "gpt-3.5-turbo",
+                max_tool_calls=payload.max_tool_calls,
+                requested_tools=None,
+                lite_llm_request_timeout_in_sec=payload.llm_request_timeout_in_sec,
+                include_agui_tools=True,
+                agui_context=AGUIRunContext(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    parent_run_id=parent_run_id,
+                ),
+                frontend_tools=frontend_tools,
+                local_context=local_context,
+                harness_manifest=harness_manifest_summary,
+                cancel_event=cancel_event,
+            )
+        except asyncio.CancelledError:
+            segment_prep.provisioned = provisioned or segment_prep.provisioned
+            segment_prep.ready.set()
+            if provisioned or segment_prep.provisioned:
+                workspace_manager.cleanup(bound_execution_id)
+            raise
+        except BindingError as exc:
+            segment_prep.provisioned = provisioned
+            segment_prep.ready.set()
+            if provisioned:
+                workspace_manager.cleanup(bound_execution_id)
+            return _prep_failure_result(exc)
+        except StorageError as exc:
+            segment_prep.provisioned = provisioned
+            segment_prep.ready.set()
+            if provisioned:
+                workspace_manager.cleanup(bound_execution_id)
+            return _prep_failure_result(exc)
+        except Exception:
+            segment_prep.provisioned = provisioned
+            segment_prep.ready.set()
+            if provisioned:
+                workspace_manager.cleanup(bound_execution_id)
+            return {
+                "success": False,
+                "error": "Input provisioning failed",
+                "_prep_failed": True,
+            }
 
     return _stream_run(
-        make_task=make_task,
+        segment_runner=_run_fresh_segment,
         thread_id=thread_id,
         run_id=run_id,
         parent_run_id=parent_run_id,
         execution_id=bound_execution_id,
         run_pk=run_pk,
-        workspace_path=bound_workspace,
-        in_place=bound_inplace,
-        runtime_path=local_context.runtime_path if local_context else execution_config.get("runtimePath"),
+        segment_prep=segment_prep,
     )
 
 

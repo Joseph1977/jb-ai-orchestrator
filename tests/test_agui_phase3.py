@@ -471,7 +471,14 @@ async def test_resume_existing_workspace_skips_input_token():
         patch("app.controllers.ag_ui_controller.execution_state_service.try_claim_state_for_resume", AsyncMock(return_value=True)),
         patch("app.controllers.ag_ui_controller.execution_state_service.update_execution", AsyncMock()),
         patch("app.controllers.ag_ui_controller._ensure_workspace_for_agui_segment", ensure),
+        patch("app.controllers.ag_ui_controller._complete_claimed_state", AsyncMock(return_value=True)),
         patch("app.controllers.ag_ui_controller._finalize", AsyncMock()),
+        patch("app.controllers.ag_ui_controller._finalize_run_segment", AsyncMock()),
+        patch(
+            "app.controllers.ag_ui_controller.agui_event_service.subscribe",
+            AsyncMock(return_value=asyncio.Queue()),
+        ),
+        patch("app.controllers.ag_ui_controller.agui_event_service.unsubscribe", AsyncMock()),
     ])
     for p in patches:
         p.start()
@@ -480,7 +487,8 @@ async def test_resume_existing_workspace_skips_input_token():
             "threadId": "thread-db",
             "state": {"toolCallId": "call_a", "result": {"answer": "a"}},
         })
-        await run_agui_session(payload)
+        resp = await run_agui_session(payload)
+        await _read_sse_events(resp)
     finally:
         for p in patches:
             p.stop()
@@ -508,6 +516,9 @@ async def test_resume_prep_failure_restores_claim_and_finishes_run():
         run_id="run-db",
     )
     abort = AsyncMock()
+    restore_state = AsyncMock(return_value=True)
+    restore_execution = AsyncMock()
+    finalize_segment = AsyncMock()
 
     @asynccontextmanager
     async def fake_get_session():
@@ -523,7 +534,10 @@ async def test_resume_prep_failure_restores_claim_and_finishes_run():
             "app.controllers.ag_ui_controller._ensure_workspace_for_agui_segment",
             AsyncMock(side_effect=BindingError(INPUT_WORKSPACE_MISSING, "missing")),
         ),
-        patch("app.controllers.ag_ui_controller._abort_active_run", abort),
+        patch("app.controllers.ag_ui_controller._restore_claimed_state", restore_state),
+        patch("app.controllers.ag_ui_controller._restore_execution_awaiting", restore_execution),
+        patch("app.controllers.ag_ui_controller._finalize", AsyncMock()),
+        patch("app.controllers.ag_ui_controller._finalize_run_segment", finalize_segment),
     ])
     for p in patches:
         p.start()
@@ -538,11 +552,12 @@ async def test_resume_prep_failure_restores_claim_and_finishes_run():
         for p in patches:
             p.stop()
 
-    abort.assert_awaited_once()
-    assert abort.await_args.kwargs["restore_claim"] is True
-    assert abort.await_args.kwargs["state_id"] == state_id
-    assert events[0]["type"] == "RUN_ERROR"
-    assert INPUT_WORKSPACE_MISSING in events[0]["message"]
+    restore_state.assert_awaited_once()
+    restore_execution.assert_awaited_once()
+    finalize_segment.assert_awaited_once()
+    assert events[0]["type"] == "RUN_STARTED"
+    assert events[-1]["type"] == "RUN_ERROR"
+    assert INPUT_WORKSPACE_MISSING in events[-1]["message"]
 
 
 @pytest.mark.asyncio
@@ -683,11 +698,8 @@ async def test_cancellation_reconciles_without_restoring_close_discarded_hold():
     async def managing_run(**kwargs):
         yield cancel_event
 
-    def make_task():
-        async def _fail():
-            raise asyncio.CancelledError()
-
-        return _fail()
+    async def segment_runner(_cancel_event):
+        raise asyncio.CancelledError()
 
     with patch("app.controllers.ag_ui_controller.agui_event_service.subscribe", AsyncMock(return_value=asyncio.Queue())), \
          patch("app.controllers.ag_ui_controller.agui_event_service.unsubscribe", AsyncMock()), \
@@ -698,7 +710,7 @@ async def test_cancellation_reconciles_without_restoring_close_discarded_hold():
         from app.controllers.ag_ui_controller import _stream_run
 
         resp = _stream_run(
-            make_task=make_task,
+            segment_runner=segment_runner,
             thread_id="thread-cancel",
             run_id="run-cancel",
             execution_id=exec_id,
@@ -930,7 +942,8 @@ async def test_claim_failure_terminalizes_after_claim_session_closed():
 async def test_prep_failure_cleans_provisioned_sandbox_and_finishes_run():
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
-    abort_prep = AsyncMock()
+    finalize = AsyncMock()
+    finalize_segment = AsyncMock()
     cleanup = MagicMock()
 
     @asynccontextmanager
@@ -958,7 +971,8 @@ async def test_prep_failure_cleans_provisioned_sandbox_and_finishes_run():
             "app.controllers.ag_ui_controller._build_fresh_system_prompt",
             side_effect=BindingError("RUN_BINDING_AMBIGUOUS", "ambiguous"),
         ),
-        patch("app.controllers.ag_ui_controller._abort_fresh_run_prep", abort_prep),
+        patch("app.controllers.ag_ui_controller._finalize", finalize),
+        patch("app.controllers.ag_ui_controller._finalize_run_segment", finalize_segment),
         patch("app.controllers.ag_ui_controller.workspace_manager.cleanup", cleanup),
         patch("app.controllers.ag_ui_controller._prepare_thread_claims", AsyncMock(return_value=(0, False))),
         patch("app.controllers.ag_ui_controller.agui_service.refresh_frontend_tools"),
@@ -973,16 +987,16 @@ async def test_prep_failure_cleans_provisioned_sandbox_and_finishes_run():
         resp = await run_agui_session(payload)
         await _read_sse_events(resp)
 
-    abort_prep.assert_awaited_once()
-    assert abort_prep.await_args.kwargs["provisioned"] is True
-    assert abort_prep.await_args.args[0] == run_pk
+    cleanup.assert_called_once_with(exec_id)
+    finalize.assert_awaited_once()
+    finalize_segment.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_prep_failure_inplace_does_not_mark_provisioned_for_cleanup():
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
-    abort_prep = AsyncMock()
+    finalize = AsyncMock()
     cleanup = MagicMock()
 
     @asynccontextmanager
@@ -1013,7 +1027,8 @@ async def test_prep_failure_inplace_does_not_mark_provisioned_for_cleanup():
             "app.controllers.ag_ui_controller._build_fresh_system_prompt",
             side_effect=BindingError("RUN_BINDING_AMBIGUOUS", "ambiguous"),
         ),
-        patch("app.controllers.ag_ui_controller._abort_fresh_run_prep", abort_prep),
+        patch("app.controllers.ag_ui_controller._finalize", finalize),
+        patch("app.controllers.ag_ui_controller._finalize_run_segment", AsyncMock()),
         patch("app.controllers.ag_ui_controller.workspace_manager.cleanup", cleanup),
         patch("app.controllers.ag_ui_controller._prepare_thread_claims", AsyncMock(return_value=(0, False))),
         patch("app.controllers.ag_ui_controller.agui_service.refresh_frontend_tools"),
@@ -1028,8 +1043,7 @@ async def test_prep_failure_inplace_does_not_mark_provisioned_for_cleanup():
         resp = await run_agui_session(payload)
         await _read_sse_events(resp)
 
-    abort_prep.assert_awaited_once()
-    assert abort_prep.await_args.kwargs["provisioned"] is False
+    finalize.assert_awaited_once()
     cleanup.assert_not_called()
 
 
@@ -1130,11 +1144,8 @@ async def test_stream_persist_failure_finishes_run_once():
     async def failing_persist(*_args, **_kwargs):
         raise RuntimeError("persist failed")
 
-    def make_task():
-        async def _fail():
-            return {"success": True, "response": "nope", "tool_calls_info": []}
-
-        return _fail()
+    async def segment_runner(_cancel_event):
+        return {"success": True, "response": "nope", "tool_calls_info": []}
 
     with patch("app.controllers.ag_ui_controller.agui_event_service.subscribe", AsyncMock(return_value=asyncio.Queue())), \
          patch("app.controllers.ag_ui_controller.agui_event_service.unsubscribe", AsyncMock()), \
@@ -1146,7 +1157,7 @@ async def test_stream_persist_failure_finishes_run_once():
         from app.controllers.ag_ui_controller import _stream_run
 
         resp = _stream_run(
-            make_task=make_task,
+            segment_runner=segment_runner,
             thread_id="thread-persist",
             run_id="run-persist",
             execution_id=exec_id,
@@ -1271,6 +1282,9 @@ async def test_resume_prep_failure_restores_execution_awaiting():
         run_id="run-db",
     )
     abort = AsyncMock()
+    restore_state = AsyncMock(return_value=True)
+    restore_execution = AsyncMock()
+    finalize_segment = AsyncMock()
 
     @asynccontextmanager
     async def fake_get_session():
@@ -1286,7 +1300,10 @@ async def test_resume_prep_failure_restores_execution_awaiting():
             "app.controllers.ag_ui_controller._ensure_workspace_for_agui_segment",
             AsyncMock(side_effect=BindingError(INPUT_WORKSPACE_MISSING, "missing")),
         ),
-        patch("app.controllers.ag_ui_controller._abort_active_run", abort),
+        patch("app.controllers.ag_ui_controller._restore_claimed_state", restore_state),
+        patch("app.controllers.ag_ui_controller._restore_execution_awaiting", restore_execution),
+        patch("app.controllers.ag_ui_controller._finalize", AsyncMock()),
+        patch("app.controllers.ag_ui_controller._finalize_run_segment", finalize_segment),
     ])
     for p in patches:
         p.start()
@@ -1301,6 +1318,6 @@ async def test_resume_prep_failure_restores_execution_awaiting():
         for p in patches:
             p.stop()
 
-    abort.assert_awaited_once()
-    assert abort.await_args.kwargs["restore_execution_awaiting"] is True
-    assert abort.await_args.kwargs["execution_id"] == exec_id
+    restore_state.assert_awaited_once()
+    restore_execution.assert_awaited_once()
+    finalize_segment.assert_awaited_once()

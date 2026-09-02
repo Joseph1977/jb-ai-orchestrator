@@ -77,7 +77,13 @@ from app.services.run_lifecycle import (
     thread_key_for,
 )
 from app.services.runtime_paths import ensure_runtime
-from app.services.session_close_service import session_close_service
+from app.services.session_close_service import (
+    CANCEL_REASON_CLOSE,
+    CANCEL_REASON_HEARTBEAT_FAILURE,
+    CANCEL_REASON_SEGMENT_DEADLINE,
+    RunCancelHandle,
+    session_close_service,
+)
 from app.services.storage import StorageError
 from app.services.tool_hub import AGUIRunContext
 from app.utils.logger import logger
@@ -85,6 +91,7 @@ from app.utils.logger import logger
 router = APIRouter(prefix="/orchestrator", tags=["Orchestrator"])
 
 _RUN_CONFLICT = "RUN_CONFLICT"
+_RUN_LIFECYCLE_FAILED = "RUN_LIFECYCLE_FAILED"
 
 
 # ---------------------------------------------------------------------------
@@ -420,13 +427,14 @@ async def _managed_hub_process(
     make_coro: Callable[[asyncio.Event], Awaitable[Any]],
 ) -> Any:
     ready = asyncio.Event()
-    shared: dict[str, asyncio.Event] = {}
+    shared: dict[str, Any] = {}
 
     async def _hub_runner() -> Any:
         await ready.wait()
         return await make_coro(shared["cancel_event"])
 
     task = asyncio.create_task(_hub_runner())
+    cancel_handle: Optional[RunCancelHandle] = None
     try:
         try:
             async with session_close_service.manage_run(
@@ -434,8 +442,12 @@ async def _managed_hub_process(
                 execution_id=execution_id,
                 task=task,
                 thread_id=thread_id,
-            ) as cancel_event:
-                shared["cancel_event"] = cancel_event
+            ) as handle:
+                if isinstance(handle, RunCancelHandle):
+                    cancel_handle = handle
+                else:
+                    cancel_handle = RunCancelHandle(event=handle)
+                shared["cancel_event"] = cancel_handle.event
                 ready.set()
                 return await task
         finally:
@@ -446,7 +458,21 @@ async def _managed_hub_process(
                 except asyncio.CancelledError:
                     pass
     except asyncio.CancelledError:
-        raise
+        if cancel_handle is None or cancel_handle.reason in (None, CANCEL_REASON_CLOSE):
+            raise
+        if cancel_handle.reason == CANCEL_REASON_HEARTBEAT_FAILURE:
+            return {
+                "success": False,
+                "error": "Workflow run tracking failed",
+                "error_code": _RUN_LIFECYCLE_FAILED,
+            }
+        if cancel_handle.reason != CANCEL_REASON_SEGMENT_DEADLINE:
+            raise
+        return {
+            "success": False,
+            "error": "Run timed out",
+            "error_code": "TIMEOUT",
+        }
 
 
 def _segment_config(execution) -> dict:
@@ -669,26 +695,62 @@ async def execute(request: ExecuteOrchestratorInput):
 
     run_status = RUN_STATUS_FAILED
     output_token = _output_access_token(request.credentials)
+    model = request.model or segment_config.get("model") or "gpt-3.5-turbo"
+    max_calls = (
+        request.maxToolCalls
+        if request.maxToolCalls is not None
+        else segment_config.get("maxToolCalls")
+    )
+    include_agui = bool(request.frontendTools)
+    agui_context = (
+        AGUIRunContext(thread_id=request.threadId, run_id=run_id)
+        if request.threadId
+        else None
+    )
+
+    async def _run_execute_segment(cancel_event: asyncio.Event) -> dict:
+        workspace_path = await _ensure_workspace_for_segment(
+            execution_id,
+            execution,
+            segment_config,
+            input_access_token=_input_access_token(request.credentials),
+        )
+        system_prompt = _build_execute_system_prompt(
+            segment_config,
+            workspace_path=workspace_path,
+            orchestration_type=orchestration_type,
+            frontend_tools=request.frontendTools,
+        )
+        local_ctx = _local_context(
+            execution,
+            segment_config,
+            output_access_token=output_token,
+            workspace_path=workspace_path,
+        )
+        hub = get_tool_hub()
+        return await hub.process_request(
+            request=request.prompt,
+            model=model,
+            max_tool_calls=max_calls,
+            requested_tools=request.tools,
+            include_agui_tools=include_agui,
+            agui_context=agui_context,
+            local_context=local_ctx,
+            system_prompt=system_prompt,
+            frontend_tools=request.frontendTools,
+            cancel_event=cancel_event,
+        )
+
     try:
         try:
-            workspace_path = await _ensure_workspace_for_segment(
-                execution_id,
-                execution,
-                segment_config,
-                input_access_token=_input_access_token(request.credentials),
+            result = await _managed_hub_process(
+                run_pk=run_pk,
+                execution_id=execution_id,
+                thread_id=request.threadId,
+                make_coro=_run_execute_segment,
             )
-            system_prompt = _build_execute_system_prompt(
-                segment_config,
-                workspace_path=workspace_path,
-                orchestration_type=orchestration_type,
-                frontend_tools=request.frontendTools,
-            )
-            local_ctx = _local_context(
-                execution,
-                segment_config,
-                output_access_token=output_token,
-                workspace_path=workspace_path,
-            )
+        except asyncio.CancelledError:
+            return _session_closed_response(SESSION_CLOSING)
         except BindingError as exc:
             await _finalize(execution_id, {"success": False, "error": exc.message})
             return _binding_error_response(exc)
@@ -699,48 +761,15 @@ async def execute(request: ExecuteOrchestratorInput):
             logger.error("Root instructions exceed the eager budget: %s", exc)
             await _finalize(execution_id, {"success": False, "error": str(exc)})
             return _root_instruction_error_response(exc)
-
-        model = request.model or segment_config.get("model") or "gpt-3.5-turbo"
-        max_calls = (
-            request.maxToolCalls
-            if request.maxToolCalls is not None
-            else segment_config.get("maxToolCalls")
-        )
-        include_agui = bool(request.frontendTools)
-        agui_context = (
-            AGUIRunContext(thread_id=request.threadId, run_id=run_id)
-            if request.threadId
-            else None
-        )
-
-        hub = get_tool_hub()
-        try:
-            result = await _managed_hub_process(
-                run_pk=run_pk,
-                execution_id=execution_id,
-                thread_id=request.threadId,
-                make_coro=lambda cancel_event: hub.process_request(
-                    request=request.prompt,
-                    model=model,
-                    max_tool_calls=max_calls,
-                    requested_tools=request.tools,
-                    include_agui_tools=include_agui,
-                    agui_context=agui_context,
-                    local_context=local_ctx,
-                    system_prompt=system_prompt,
-                    frontend_tools=request.frontendTools,
-                    cancel_event=cancel_event,
-                ),
-            )
-        except asyncio.CancelledError:
-            return _session_closed_response(SESSION_CLOSING)
-        except StorageError as exc:
-            await _finalize(execution_id, {"success": False, "error": exc.message})
-            return _storage_error_response(exc)
         except Exception as exc:
             logger.error("Orchestrator execute %s failed: %s", execution_id, exc)
             await _finalize(execution_id, {"success": False, "error": str(exc)})
             raise HTTPException(status_code=500, detail=f"Execute failed: {str(exc)}")
+
+        if not result.get("success") and result.get("error_code") == "TIMEOUT":
+            run_status = RUN_STATUS_FAILED
+            status = await _finalize(execution_id, result)
+            return JSONResponse(content=_run_response(execution_id, status, result))
 
         if result.get("awaits_response"):
             try:
@@ -847,10 +876,7 @@ async def resume(request: OrchestratorResumeInput):
             return _session_closed_response(exc.code)
         if active_run is None:
             await execution_state_service.restore_claimed_state(session, state_id)
-            raise HTTPException(
-                status_code=409,
-                detail="Another run is active for this session",
-            )
+            return JSONResponse(status_code=409, content=_run_conflict_payload())
         run_pk = active_run.id
         await execution_state_service.update_execution(
             session, execution_id, status=ExecutionStatus.RUNNING
@@ -860,54 +886,52 @@ async def resume(request: OrchestratorResumeInput):
     restore_claim = False
     execution_terminal_failed = False
     output_token = _output_access_token(request.credentials)
-    try:
-        try:
-            workspace_path = await _ensure_workspace_for_segment(
-                execution_id,
-                execution,
-                segment_config,
-                input_access_token=_input_access_token(request.credentials),
-            )
-            resume_state = copy.deepcopy(state_payload)
-            resume_state["messages"] = _refresh_resume_messages(resume_state, segment_config)
-            local_ctx = _local_context(
-                execution,
-                segment_config,
-                output_access_token=output_token,
-                workspace_path=workspace_path,
-            )
-        except BindingError as exc:
-            restore_claim = True
-            return _binding_error_response(exc)
-        except StorageError as exc:
-            restore_claim = True
-            return _storage_error_response(exc)
 
+    async def _run_resume_segment(cancel_event: asyncio.Event) -> dict:
+        workspace_path = await _ensure_workspace_for_segment(
+            execution_id,
+            execution,
+            segment_config,
+            input_access_token=_input_access_token(request.credentials),
+        )
+        resume_state = copy.deepcopy(state_payload)
+        resume_state["messages"] = _refresh_resume_messages(
+            resume_state, segment_config
+        )
+        local_ctx = _local_context(
+            execution,
+            segment_config,
+            output_access_token=output_token,
+            workspace_path=workspace_path,
+        )
         hub = get_tool_hub()
+        return await hub.process_request(
+            request=resume_state.get("request", ""),
+            model=resume_state.get("model", "gpt-3.5-turbo"),
+            max_tool_calls=resume_state.get("max_calls"),
+            requested_tools=resume_state.get("requested_tools"),
+            resume_state=resume_state,
+            resume_tool_results=[tool_result],
+            local_context=local_ctx,
+            cancel_event=cancel_event,
+        )
+
+    try:
         try:
             result = await _managed_hub_process(
                 run_pk=run_pk,
                 execution_id=execution_id,
                 thread_id=state_thread_id,
-                make_coro=lambda cancel_event: hub.process_request(
-                    request=resume_state.get("request", ""),
-                    model=resume_state.get("model", "gpt-3.5-turbo"),
-                    max_tool_calls=resume_state.get("max_calls"),
-                    requested_tools=resume_state.get("requested_tools"),
-                    resume_state=resume_state,
-                    resume_tool_results=[tool_result],
-                    local_context=local_ctx,
-                    cancel_event=cancel_event,
-                ),
+                make_coro=_run_resume_segment,
             )
         except asyncio.CancelledError:
             return _session_closed_response(SESSION_CLOSING)
-        except StorageError as exc:
-            restore_claim = True
-            return _storage_error_response(exc)
         except BindingError as exc:
             restore_claim = True
             return _binding_error_response(exc)
+        except StorageError as exc:
+            restore_claim = True
+            return _storage_error_response(exc)
         except Exception as exc:
             restore_claim = True
             execution_terminal_failed = True

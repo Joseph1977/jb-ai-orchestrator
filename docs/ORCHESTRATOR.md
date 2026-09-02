@@ -921,6 +921,9 @@ instance can retry.
 | `SUBAGENT_MAX_TOOL_CALLS` | `8` | Max tool calls inside one subagent run. |
 | `SUBAGENT_MAX_DEPTH` | `2` | Max nesting depth for `task_local`. |
 | `LLM_STREAMING_ENABLED` | `true` | Stream tokens to AG-UI when a UI channel is present. |
+| `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network guard for each LiteLLM request. It is not the total stream lifetime. |
+| `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute deadline for one LiteLLM call, including full SSE consumption. |
+| `LITELLM_MAX_COMPLETION_TOKENS` | `4096` | Completion-token cap sent to LiteLLM; `0` disables it. A `length` finish reason fails with `OUTPUT_LIMIT`. |
 | `HOOKS_ENABLED` | `true` | Run project hooks from `.cursor/hooks.json` / Claude hook files. |
 | `HOOKS_FAIL_CLOSED` | `false` | If a hook script errors/times out, block the action when `true`. |
 | `HOOKS_TIMEOUT_SEC` | `30` | Default per-hook subprocess timeout. |
@@ -931,7 +934,9 @@ instance can retry.
 | `WORKSPACE_ALLOWED_ROOTS` | _(empty)_ | Absolute roots permitted for `inPlace` / AG-UI `workspacePath` (e.g. `/app/sessions`). |
 | `RESUME_CLAIM_TIMEOUT_SEC` | `300` | Restore stale in-progress resume claims to awaiting state so another instance can retry. |
 | `RUN_HEARTBEAT_INTERVAL_SEC` | `5` | Interval for `ExecutionRun` heartbeat updates while a segment is active. Clamped to ≥1. |
-| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs with no heartbeat newer than this are stale for close reconciliation. Clamped to > interval. |
+| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs with no heartbeat newer than this are stale for close or claim reconciliation. Clamped to > interval. |
+| `RUN_SEGMENT_DEADLINE_SEC` | `270` | Absolute deadline for the entire model/tool segment. Clamped to ≥1. |
+| `RUN_CANCELLATION_WARN_SEC` | `5` | Structured diagnostic threshold for a worker that is slow to stop after cancellation. Clamped to ≥1. |
 | `CLOSE_WAIT_TIMEOUT_SEC` | `10` | Max wait after marking close before returning **202** `closing`. Clamped to ≥1. Retry close or call reconcile after **202**. |
 | `SHELL_COMMAND_DENYLIST` | _(empty)_ | Comma-separated regexes; matching `execute_local` commands are blocked. |
 | `SHELL_COMMAND_ALLOWLIST` | _(empty)_ | If set, command must match at least one regex. |
@@ -1051,11 +1056,27 @@ At the start of each executable segment (`execute`, fresh AG-UI run, or
 | `RunRegistry` | Pod-local task cancellation optimization only; not required for correctness. |
 | DB | Source of truth for close, resume, and concurrency. |
 
-Concurrent segments for the same execution or thread are rejected (**409**).
-Close marks active runs `closing`, discards holds, and heartbeats detect stale
-runs (`heartbeat_at` older than `RUN_HEARTBEAT_STALE_SEC`) for reconciliation.
-Stale active runs finish as `failed` with `session_closed`; parent
-`ExecutionStatus.COMPLETED` is preserved.
+Concurrent segments for the same execution or thread are rejected (**409**) with
+`RUN_CONFLICT`. Before that conflict check, the claim transaction conditionally
+terminalizes crash-orphaned rows whose heartbeat is older than
+`RUN_HEARTBEAT_STALE_SEC`; fresh rows continue to block. The stale predicate is
+rechecked in the terminal update, so a concurrent fresh heartbeat wins rather
+than being overwritten.
+
+Each model call has an absolute `LITELLM_MODEL_DEADLINE_SEC` in addition to the
+HTTP idle timeout, and every request carries
+`LITELLM_MAX_COMPLETION_TOKENS`. The larger `RUN_SEGMENT_DEADLINE_SEC` covers
+workspace/binding preparation and the complete model/tool loop. On expiry,
+close, or heartbeat-loop failure, the owner cancels and awaits the worker
+before terminalizing the run row. It never releases a claim while provisioning,
+tool calls, file writes, or model work remain live.
+Model and segment expiry return `TIMEOUT`; truncated model output returns
+`OUTPUT_LIMIT`. Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than
+being mislabeled as a timeout.
+
+The default deployment ordering is model **240s**, segment **270s**, caller
+**300s**, and reverse proxy **310s** or more. This leaves time for worker
+cancellation and DB finalization before the caller closes its connection.
 
 `RUN_HEARTBEAT_STALE_SEC` must exceed `RUN_HEARTBEAT_INTERVAL_SEC` (enforced at
 load). After a **202** `closing` response, retry the close endpoint or wait for

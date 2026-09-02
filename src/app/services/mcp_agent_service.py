@@ -25,6 +25,8 @@ class LLMUpstreamError(Exception):
 
 
 def _llm_upstream_error(status_code: int) -> LLMUpstreamError:
+    if status_code in {408, 504}:
+        return LLMUpstreamError("TIMEOUT", "Model request timed out")
     if status_code == 402:
         return LLMUpstreamError("QUOTA", "Model service quota exceeded")
     if status_code == 429:
@@ -34,7 +36,23 @@ def _llm_upstream_error(status_code: int) -> LLMUpstreamError:
     return LLMUpstreamError("UNAVAILABLE", "Model service is unavailable")
 
 
+def _check_output_limit(result: dict) -> None:
+    """Reject truncated model output before callers route tool calls."""
+    choices = result.get("choices") or []
+    if not choices:
+        return
+    finish_reason = choices[0].get("finish_reason")
+    if finish_reason == "length":
+        raise LLMUpstreamError("OUTPUT_LIMIT", "Model output limit reached")
+
+
 def _safe_litellm_exception(exc: Exception) -> Exception:
+    if isinstance(exc, LLMUpstreamError):
+        return exc
+    if isinstance(exc, asyncio.TimeoutError):
+        return LLMUpstreamError("TIMEOUT", "Model request timed out")
+    if isinstance(exc, httpx.TimeoutException):
+        return LLMUpstreamError("TIMEOUT", "Model request timed out")
     if isinstance(exc, httpx.HTTPError):
         return LLMUpstreamError("UNAVAILABLE", "Model service is unavailable")
     return RuntimeError("Model request failed")
@@ -74,15 +92,31 @@ class MCPAgentService:
         litellm_api_key: str = None,
         litellm_request_timeout_in_sec: int = None,
         litellm_drop_params: bool = None,
+        litellm_model_deadline_sec: int = None,
+        litellm_max_completion_tokens: int = None,
     ):
         # Initialize MCP servers
-        self.mcp_server_configs = mcp_server_configs or Config.MCP_SERVER_URLS
+        if mcp_server_configs is not None:
+            self.mcp_server_configs = mcp_server_configs
+        else:
+            self.mcp_server_configs = Config.MCP_SERVER_URLS or []
 
         # LiteLLM configuration
         self.litellm_base_url = litellm_base_url or Config.LITELLM_BASE_URL
         self.litellm_api_key = litellm_api_key or Config.LITELLM_API_KEY
         self.litellm_request_timeout_in_sec = litellm_request_timeout_in_sec or Config.LITELLM_REQUEST_TIMEOUT_IN_SEC
         self.litellm_drop_params = litellm_drop_params or Config.LITELLM_DROP_PARAMS
+        self.litellm_model_deadline_sec = (
+            litellm_model_deadline_sec
+            if litellm_model_deadline_sec is not None
+            else Config.LITELLM_MODEL_DEADLINE_SEC
+        )
+        configured_max_tokens = (
+            litellm_max_completion_tokens
+            if litellm_max_completion_tokens is not None
+            else Config.LITELLM_MAX_COMPLETION_TOKENS
+        )
+        self.litellm_max_completion_tokens = configured_max_tokens
 
         # Generate server mapping: name -> config
         self.server_mapping = {}  # server_name -> config
@@ -372,13 +406,73 @@ class MCPAgentService:
         *,
         stream: bool = False,
         on_content_delta=None,
+        max_completion_tokens: Optional[int] = None,
+        model_deadline_sec: Optional[int] = None,
     ) -> dict:
         """Call LiteLLM chat completions.
 
         When ``stream=True``, reads SSE chunks, optionally invokes
         ``on_content_delta(text_chunk)`` for each content token, and returns a
         reconstructed OpenAI-style completion dict (message + usage).
+
+        An absolute asyncio deadline bounds the full call (including stream
+        consumption). The httpx timeout remains a per-read idle/network guard.
         """
+        deadline = (
+            model_deadline_sec
+            if model_deadline_sec is not None
+            else self.litellm_model_deadline_sec
+        )
+        try:
+            if deadline and deadline > 0:
+                result = await asyncio.wait_for(
+                    self._call_litellm_inner(
+                        messages=messages,
+                        model=model,
+                        tools=tools,
+                        lite_llm_request_timeout_in_sec=lite_llm_request_timeout_in_sec,
+                        stream=stream,
+                        on_content_delta=on_content_delta,
+                        max_completion_tokens=max_completion_tokens,
+                    ),
+                    timeout=deadline,
+                )
+            else:
+                result = await self._call_litellm_inner(
+                    messages=messages,
+                    model=model,
+                    tools=tools,
+                    lite_llm_request_timeout_in_sec=lite_llm_request_timeout_in_sec,
+                    stream=stream,
+                    on_content_delta=on_content_delta,
+                    max_completion_tokens=max_completion_tokens,
+                )
+            _check_output_limit(result)
+            return result
+        except LLMUpstreamError as exc:
+            logger.error("Failed to call LiteLLM: code=%s", exc.code)
+            raise
+        except asyncio.TimeoutError as exc:
+            logger.error("LiteLLM call exceeded absolute deadline (%ss)", deadline)
+            raise LLMUpstreamError("TIMEOUT", "Model request timed out") from exc
+        except Exception as exc:
+            logger.error(
+                "Failed to call LiteLLM: type=%s",
+                type(exc).__name__,
+            )
+            raise _safe_litellm_exception(exc) from exc
+
+    async def _call_litellm_inner(
+        self,
+        *,
+        messages: List[dict],
+        model: str,
+        tools: List[dict],
+        lite_llm_request_timeout_in_sec: int,
+        stream: bool,
+        on_content_delta,
+        max_completion_tokens: Optional[int],
+    ) -> dict:
         try:
             messages, duplicate_tool_call_ids = dedupe_litellm_tool_results(messages)
             if duplicate_tool_call_ids:
@@ -405,6 +499,14 @@ class MCPAgentService:
                 data["tools"] = tools
                 data["tool_choice"] = "auto"
 
+            token_cap = (
+                max_completion_tokens
+                if max_completion_tokens is not None
+                else self.litellm_max_completion_tokens
+            )
+            if token_cap and token_cap > 0:
+                data["max_tokens"] = token_cap
+
             logger.info(
                 "Calling LiteLLM at %s with model %s (stream=%s)",
                 url,
@@ -413,7 +515,7 @@ class MCPAgentService:
             )
             logger.debug("Request data: %s", json.dumps(data, indent=2))
 
-            timeout = lite_llm_request_timeout_in_sec
+            timeout = lite_llm_request_timeout_in_sec or self.litellm_request_timeout_in_sec
             async with httpx.AsyncClient() as client:
                 if not stream:
                     response = await client.post(
@@ -446,14 +548,9 @@ class MCPAgentService:
                         raise error
                     return await self._consume_chat_stream(response, on_content_delta)
 
-        except LLMUpstreamError as exc:
-            logger.error("Failed to call LiteLLM: code=%s", exc.code)
+        except LLMUpstreamError:
             raise
         except Exception as exc:
-            logger.error(
-                "Failed to call LiteLLM: type=%s",
-                type(exc).__name__,
-            )
             raise _safe_litellm_exception(exc) from exc
 
     @staticmethod
@@ -506,8 +603,10 @@ class MCPAgentService:
             if not line.startswith("data:"):
                 continue
             payload = line[5:].strip()
-            if not payload or payload == "[DONE]":
+            if not payload:
                 continue
+            if payload == "[DONE]":
+                break
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
@@ -548,6 +647,12 @@ class MCPAgentService:
                     current["function"]["name"] += fn["name"]
                 if fn.get("arguments"):
                     current["function"]["arguments"] += fn["arguments"]
+
+        if finish_reason is None:
+            raise LLMUpstreamError(
+                "UNAVAILABLE",
+                "Model stream ended without a completion reason",
+            )
 
         message: dict = {"role": role, "content": "".join(content_parts) or None}
         if tool_calls:
