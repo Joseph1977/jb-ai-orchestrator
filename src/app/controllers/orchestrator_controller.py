@@ -61,6 +61,7 @@ from app.services.binding_runtime import (
     refresh_segment_run_binding,
     segment_output_backend,
 )
+from app.services.agui_messages import build_authoritative_system_content
 from app.services.execution_state_service import execution_state_service
 from app.services.harness import (
     RootInstructionError,
@@ -158,11 +159,21 @@ def _session_closed_response(error_code: str) -> JSONResponse:
     )
 
 
+def _frontend_tool_names(frontend_tools: Optional[list[dict]]) -> list[str]:
+    names: list[str] = []
+    for tool in frontend_tools or []:
+        name = str((tool or {}).get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def _build_execute_system_prompt(
     config: dict,
     *,
     workspace_path: str,
     orchestration_type: Optional[str],
+    frontend_tools: Optional[list[dict]] = None,
 ) -> str:
     harness: Optional[str] = None
     try:
@@ -195,7 +206,17 @@ def _build_execute_system_prompt(
         config,
     )
     content = refreshed[0].get("content")
-    return content if isinstance(content, str) else str(content or "")
+    prompt = content if isinstance(content, str) else str(content or "")
+    # The tool schemas alone leave the model free to answer a question in prose.
+    # Name the registered interaction tools in the authoritative prompt, the
+    # same way the AG-UI relay does, so both channels state the same contract.
+    # Binding placeholders are resolved first: the catalog carries none.
+    composed = build_authoritative_system_content(
+        harness_prompt=prompt,
+        has_frontend_tools=bool(frontend_tools),
+        frontend_tool_names=_frontend_tool_names(frontend_tools),
+    )
+    return composed or prompt
 
 
 def _refresh_resume_messages(
@@ -232,9 +253,24 @@ def _local_context(
     )
 
 
-def _run_response(execution_id: uuid.UUID, status: ExecutionStatus, result: dict, state_id=None) -> dict:
+def _pending_interrupt_payload(state_payload: Optional[dict]) -> tuple[list[dict], list[str]]:
     from app.services.agui_interrupt import build_interrupts_from_pending
 
+    pending_tools = (state_payload or {}).get("pending_tools") or []
+    if not pending_tools and (state_payload or {}).get("pending_tool"):
+        pending_tools = [(state_payload or {})["pending_tool"]]
+    interrupts = build_interrupts_from_pending(pending_tools)
+    return (
+        [item.model_dump(by_alias=True, exclude_none=True) for item in interrupts],
+        [
+            str(item.get("tool_call_id"))
+            for item in pending_tools
+            if item.get("tool_call_id")
+        ],
+    )
+
+
+def _run_response(execution_id: uuid.UUID, status: ExecutionStatus, result: dict, state_id=None) -> dict:
     payload = {
         "success": result.get("success", False),
         "response": result.get("response"),
@@ -256,18 +292,10 @@ def _run_response(execution_id: uuid.UUID, status: ExecutionStatus, result: dict
         payload["awaitsResponse"] = True
         if state_id:
             payload["stateGuid"] = str(state_id)
-        pending_tools = result.get("pending_tools") or []
-        if not pending_tools and result.get("pending_tool"):
-            pending_tools = [result["pending_tool"]]
-        if pending_tools:
-            interrupts = build_interrupts_from_pending(pending_tools)
-            payload["interrupts"] = [
-                i.model_dump(by_alias=True, exclude_none=True)
-                for i in interrupts
-            ]
-            payload["pendingToolCallIds"] = [
-                pt.get("tool_call_id") for pt in pending_tools if pt.get("tool_call_id")
-            ]
+        interrupts, pending_ids = _pending_interrupt_payload(result)
+        if interrupts:
+            payload["interrupts"] = interrupts
+            payload["pendingToolCallIds"] = pending_ids
     return payload
 
 
@@ -653,6 +681,7 @@ async def execute(request: ExecuteOrchestratorInput):
                 segment_config,
                 workspace_path=workspace_path,
                 orchestration_type=orchestration_type,
+                frontend_tools=request.frontendTools,
             )
             local_ctx = _local_context(
                 execution,
@@ -980,8 +1009,11 @@ async def get_orchestrator_status(orchestrator_guid: UUID):
 
     awaits_response = execution.status == ExecutionStatus.AWAITING_RESPONSE
     state_id = None
+    interrupts: list[dict] = []
+    pending_ids: list[str] = []
     if awaits_response and latest_state and latest_state.status == LLMStateStatus.AWAITING_RESPONSE:
         state_id = latest_state.id
+        interrupts, pending_ids = _pending_interrupt_payload(latest_state.state_payload)
 
     return ExecutionStatusResponse(
         executionGuid=orchestrator_guid,
@@ -990,6 +1022,8 @@ async def get_orchestrator_status(orchestrator_guid: UUID):
         error=execution.error_message,
         awaitsResponse=awaits_response,
         stateGuid=state_id,
+        interrupts=interrupts or None,
+        pendingToolCallIds=pending_ids or None,
         closeRequestedAt=execution.close_requested_at,
         closedAt=execution.closed_at,
     )

@@ -302,7 +302,13 @@ Continue a run that awaited input. Works from **any** instance.
 
 ### `GET /v1/orchestrator/{orchestratorGuid}`
 
-Returns `{ status, result, error, awaitsResponse, stateGuid }`.
+Returns `{ status, result, error, awaitsResponse, stateGuid }`. While the
+execution is `awaiting_response`, it also returns `interrupts` and
+`pendingToolCallIds`, rebuilt from the latest persisted `LLMState` with the same
+canonical serializer used by execute and resume. This lets a stateless caller
+reconstruct Ask-* and hook-permission interactions after a remount. Terminal
+statuses never replay stale interrupts. The payload contains interaction
+metadata, not transient credentials.
 
 ### `POST /v1/orchestrator/{orchestratorGuid}/close`
 
@@ -586,6 +592,15 @@ structured tool-call IDs. Client system messages are folded into the single
 authoritative system message instead of being duplicated. A fresh AG-UI run
 without `workspacePath` has no harness section, but can still receive client
 context and frontend guidance.
+
+`execute` composes the same interaction section from `frontendTools`: the
+rendered harness prompt (with its run-binding block already resolved), then the
+frontend interaction guidance and the deduplicated tool names. Both channels
+therefore state the same contract. Passing the tool schemas alone left the
+model free to answer a structured question in prose, which broke workflow steps
+that require a matching interaction tool. The catalog raises adherence; it does
+not force a tool call, so a caller that depends on one still has to handle
+plain text.
 
 Resumed runs do not rebuild this prompt. The persisted message list is the
 authoritative snapshot for the interrupted run, which prevents instruction or

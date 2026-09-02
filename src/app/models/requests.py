@@ -82,6 +82,8 @@ class ExecutionStatusResponse(BaseModel):
     error: Optional[str] = None
     awaitsResponse: bool = False
     stateGuid: Optional[UUID] = None
+    interrupts: Optional[List[Dict[str, Any]]] = None
+    pendingToolCallIds: Optional[List[str]] = None
     closeRequestedAt: Optional[datetime] = None
     closedAt: Optional[datetime] = None
 

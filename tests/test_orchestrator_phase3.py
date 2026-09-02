@@ -21,6 +21,7 @@ from app.controllers.orchestrator_controller import (
     _close_error_code,
     close_orchestrator,
     execute,
+    get_orchestrator_status,
     initiate,
     resume,
     _finish_active_run,
@@ -42,6 +43,106 @@ from app.services.storage import StorageError
 
 def _fake_run(run_pk=None):
     return SimpleNamespace(id=run_pk or uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_status_replays_persisted_pending_interrupts():
+    execution_id = uuid.uuid4()
+    state_id = uuid.uuid4()
+    execution = SimpleNamespace(
+        status=ExecutionStatus.AWAITING_RESPONSE,
+        result=None,
+        error_message=None,
+        close_requested_at=None,
+        closed_at=None,
+    )
+    state = SimpleNamespace(
+        id=state_id,
+        status=LLMStateStatus.AWAITING_RESPONSE,
+        state_payload={
+            "pending_tools": [
+                {
+                    "tool_call_id": "call_choice",
+                    "function_name": "Ask-Choice",
+                    "arguments": {
+                        "question": "Choose",
+                        "options": ["A", "B"],
+                    },
+                    "source": "AGUI",
+                }
+            ]
+        },
+    )
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
+         patch(
+             "app.controllers.orchestrator_controller.execution_state_service.get_execution",
+             AsyncMock(return_value=execution),
+         ), \
+         patch(
+             "app.controllers.orchestrator_controller.execution_state_service.get_latest_state_for_execution",
+             AsyncMock(return_value=state),
+         ):
+        response = await get_orchestrator_status(execution_id)
+
+    assert response.stateGuid == state_id
+    assert response.pendingToolCallIds == ["call_choice"]
+    assert response.interrupts == [
+        {
+            "id": "call_choice",
+            "reason": "tool_awaiting_response",
+            "message": "Awaiting response for tool 'Ask-Choice'",
+            "toolCallId": "call_choice",
+            "metadata": {
+                "source": "AGUI",
+                "functionName": "Ask-Choice",
+                "arguments": {
+                    "question": "Choose",
+                    "options": ["A", "B"],
+                },
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_omits_stale_interrupts_when_execution_is_not_awaiting():
+    execution_id = uuid.uuid4()
+    execution = SimpleNamespace(
+        status=ExecutionStatus.COMPLETED,
+        result={"response": "done"},
+        error_message=None,
+        close_requested_at=None,
+        closed_at=None,
+    )
+    state = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=LLMStateStatus.AWAITING_RESPONSE,
+        state_payload={"pending_tools": [{"tool_call_id": "stale"}]},
+    )
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
+         patch(
+             "app.controllers.orchestrator_controller.execution_state_service.get_execution",
+             AsyncMock(return_value=execution),
+         ), \
+         patch(
+             "app.controllers.orchestrator_controller.execution_state_service.get_latest_state_for_execution",
+             AsyncMock(return_value=state),
+         ):
+        response = await get_orchestrator_status(execution_id)
+
+    assert response.stateGuid is None
+    assert response.interrupts is None
+    assert response.pendingToolCallIds is None
 
 
 @asynccontextmanager
