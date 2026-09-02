@@ -593,6 +593,15 @@ authoritative system message instead of being duplicated. A fresh AG-UI run
 without `workspacePath` has no harness section, but can still receive client
 context and frontend guidance.
 
+`execute` composes the same interaction section from `frontendTools`: the
+rendered harness prompt (with its run-binding block already resolved), then the
+frontend interaction guidance and the deduplicated tool names. Both channels
+therefore state the same contract. Passing the tool schemas alone left the
+model free to answer a structured question in prose, which broke workflow steps
+that require a matching interaction tool. The catalog raises adherence; it does
+not force a tool call, so a caller that depends on one still has to handle
+plain text.
+
 Resumed runs do not rebuild this prompt. The persisted message list is the
 authoritative snapshot for the interrupted run, which prevents instruction or
 catalog changes midway through a pause/resume cycle.

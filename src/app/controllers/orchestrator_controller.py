@@ -61,6 +61,7 @@ from app.services.binding_runtime import (
     refresh_segment_run_binding,
     segment_output_backend,
 )
+from app.services.agui_messages import build_authoritative_system_content
 from app.services.execution_state_service import execution_state_service
 from app.services.harness import (
     RootInstructionError,
@@ -158,11 +159,21 @@ def _session_closed_response(error_code: str) -> JSONResponse:
     )
 
 
+def _frontend_tool_names(frontend_tools: Optional[list[dict]]) -> list[str]:
+    names: list[str] = []
+    for tool in frontend_tools or []:
+        name = str((tool or {}).get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
 def _build_execute_system_prompt(
     config: dict,
     *,
     workspace_path: str,
     orchestration_type: Optional[str],
+    frontend_tools: Optional[list[dict]] = None,
 ) -> str:
     harness: Optional[str] = None
     try:
@@ -195,7 +206,17 @@ def _build_execute_system_prompt(
         config,
     )
     content = refreshed[0].get("content")
-    return content if isinstance(content, str) else str(content or "")
+    prompt = content if isinstance(content, str) else str(content or "")
+    # The tool schemas alone leave the model free to answer a question in prose.
+    # Name the registered interaction tools in the authoritative prompt, the
+    # same way the AG-UI relay does, so both channels state the same contract.
+    # Binding placeholders are resolved first: the catalog carries none.
+    composed = build_authoritative_system_content(
+        harness_prompt=prompt,
+        has_frontend_tools=bool(frontend_tools),
+        frontend_tool_names=_frontend_tool_names(frontend_tools),
+    )
+    return composed or prompt
 
 
 def _refresh_resume_messages(
@@ -660,6 +681,7 @@ async def execute(request: ExecuteOrchestratorInput):
                 segment_config,
                 workspace_path=workspace_path,
                 orchestration_type=orchestration_type,
+                frontend_tools=request.frontendTools,
             )
             local_ctx = _local_context(
                 execution,
