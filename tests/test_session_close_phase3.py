@@ -381,6 +381,8 @@ def close_settings():
         heartbeat_interval_sec=1,
         heartbeat_stale_sec=60,
         close_wait_timeout_sec=0,
+        segment_deadline_sec=270,
+        cancellation_warn_sec=5,
     )
 
 

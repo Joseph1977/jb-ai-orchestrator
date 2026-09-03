@@ -22,6 +22,7 @@ from app.controllers.orchestrator_controller import resume
 from app.models.execution_models import ExecutionStatus, LLMStateStatus
 from app.models.requests import OrchestratorResumeInput
 from app.services.execution_state_service import ExecutionStateService
+from app.services.session_close_service import RunCancelHandle
 
 
 def test_recover_stale_pending_claims_service():
@@ -389,7 +390,7 @@ async def test_orchestrator_stale_pending_recovered_before_resume():
 
     @asynccontextmanager
     async def noop_manage_run(**_kwargs):
-        yield AsyncMock()
+            yield RunCancelHandle()
 
     with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
          patch("app.controllers.orchestrator_controller.get_tool_hub", return_value=hub), \

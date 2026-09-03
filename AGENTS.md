@@ -2,6 +2,36 @@
 
 Instructions for anyone working in this repository, human or agent.
 
+## What this service is
+
+The orchestrator is a generic execution engine. It must run any workflow,
+authored by any tool, against any provider. Everything it enforces must be
+justified by one question: **does its absence let one run damage the system or
+interfere with another run?**
+
+**The engine owns:** bounded execution and cancellation; releasing a run claim
+only after its worker has actually stopped; recovering crash-orphaned claims;
+workspace containment; isolation between conversations and users; and
+returning each durable object to its real executable state after a failed
+segment.
+
+**The engine does not own:** how much a workflow asks a model to write, how an
+answer should be phrased, which workflow-specific tool a step ought to call, or
+other product policy. A workflow that wants those behaviours states them in its
+own rules and instructions.
+
+Two consequences are contracts:
+
+- No new global default may shape model behaviour. Infrastructure limits may
+  be enforced globally. A behavioural or operator limit must be off by default;
+  caller-owned limits arrive per request with a segment-config fallback, as
+  `maxToolCalls` does.
+- A failed segment never closes or permanently disables its session.
+  `ExecutionRun` records the failed attempt, while the enclosing execution,
+  pending interaction, or thread returns to the executable state it actually
+  had. Closed and closing sessions remain non-runnable by explicit lifecycle
+  action.
+
 ## Where you are working
 
 | You are editing… | Also read… |

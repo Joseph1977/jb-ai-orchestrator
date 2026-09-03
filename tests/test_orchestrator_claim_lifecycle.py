@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from app.controllers.orchestrator_controller import resume
 from app.models.execution_models import ExecutionStatus, LLMStateStatus
 from app.models.requests import OrchestratorResumeInput
+from app.services.session_close_service import RunCancelHandle
 
 
 @pytest.mark.asyncio
@@ -52,7 +53,7 @@ async def test_orchestrator_resume_hub_exception_restores_awaiting():
 
     @asynccontextmanager
     async def noop_manage_run(**_kwargs):
-        yield AsyncMock()
+        yield RunCancelHandle()
 
     with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
          patch("app.controllers.orchestrator_controller.get_tool_hub", return_value=hub), \

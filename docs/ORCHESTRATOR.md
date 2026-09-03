@@ -921,6 +921,9 @@ instance can retry.
 | `SUBAGENT_MAX_TOOL_CALLS` | `8` | Max tool calls inside one subagent run. |
 | `SUBAGENT_MAX_DEPTH` | `2` | Max nesting depth for `task_local`. |
 | `LLM_STREAMING_ENABLED` | `true` | Stream tokens to AG-UI when a UI channel is present. |
+| `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network guard for each LiteLLM request. It is not the total stream lifetime. |
+| `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute deadline for one LiteLLM call, including full SSE consumption. |
+| `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard sent to LiteLLM when positive. It is not workflow policy or workflow-configurable. Enabling it accepts that legitimate output may be cut off. A provider `length` finish reason always fails safely with `OUTPUT_LIMIT`. |
 | `HOOKS_ENABLED` | `true` | Run project hooks from `.cursor/hooks.json` / Claude hook files. |
 | `HOOKS_FAIL_CLOSED` | `false` | If a hook script errors/times out, block the action when `true`. |
 | `HOOKS_TIMEOUT_SEC` | `30` | Default per-hook subprocess timeout. |
@@ -931,7 +934,9 @@ instance can retry.
 | `WORKSPACE_ALLOWED_ROOTS` | _(empty)_ | Absolute roots permitted for `inPlace` / AG-UI `workspacePath` (e.g. `/app/sessions`). |
 | `RESUME_CLAIM_TIMEOUT_SEC` | `300` | Restore stale in-progress resume claims to awaiting state so another instance can retry. |
 | `RUN_HEARTBEAT_INTERVAL_SEC` | `5` | Interval for `ExecutionRun` heartbeat updates while a segment is active. Clamped to ≥1. |
-| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs with no heartbeat newer than this are stale for close reconciliation. Clamped to > interval. |
+| `RUN_HEARTBEAT_STALE_SEC` | `300` | Runs with no heartbeat newer than this are stale for close or claim reconciliation. Clamped to > interval. |
+| `RUN_SEGMENT_DEADLINE_SEC` | `270` | Absolute deadline for the entire model/tool segment. Clamped to ≥1. |
+| `RUN_CANCELLATION_WARN_SEC` | `5` | Structured diagnostic threshold for a worker that is slow to stop after cancellation. Clamped to ≥1. |
 | `CLOSE_WAIT_TIMEOUT_SEC` | `10` | Max wait after marking close before returning **202** `closing`. Clamped to ≥1. Retry close or call reconcile after **202**. |
 | `SHELL_COMMAND_DENYLIST` | _(empty)_ | Comma-separated regexes; matching `execute_local` commands are blocked. |
 | `SHELL_COMMAND_ALLOWLIST` | _(empty)_ | If set, command must match at least one regex. |
@@ -1043,6 +1048,16 @@ At the start of each executable segment (`execute`, fresh AG-UI run, or
 
 ### Stateless multi-pod lifecycle
 
+The orchestrator is a generic execution engine. It owns safeguards whose
+absence could let one run damage the system or interfere with another:
+bounded execution and cancellation, workspace containment, isolation,
+crash-orphan recovery, and returning durable session objects to an executable
+state after failure. It does not own output length, answer style, workflow tool
+choice, or other model-behaviour policy. Such policy belongs in the workflow or
+in an explicit caller-owned segment option and is off by default. The optional
+completion-token setting is an operator resource guard, not a product or
+workflow default.
+
 | Component | Role |
 | --- | --- |
 | `thread_sessions` | Full `thread_id` + SHA-256 `thread_key` (same digest as runtime path). |
@@ -1051,11 +1066,81 @@ At the start of each executable segment (`execute`, fresh AG-UI run, or
 | `RunRegistry` | Pod-local task cancellation optimization only; not required for correctness. |
 | DB | Source of truth for close, resume, and concurrency. |
 
-Concurrent segments for the same execution or thread are rejected (**409**).
-Close marks active runs `closing`, discards holds, and heartbeats detect stale
-runs (`heartbeat_at` older than `RUN_HEARTBEAT_STALE_SEC`) for reconciliation.
-Stale active runs finish as `failed` with `session_closed`; parent
-`ExecutionStatus.COMPLETED` is preserved.
+Concurrent segments for the same execution or thread are rejected (**409**) with
+`RUN_CONFLICT`. Before that conflict check, the claim transaction conditionally
+terminalizes crash-orphaned rows whose heartbeat is older than
+`RUN_HEARTBEAT_STALE_SEC`; fresh rows continue to block. The stale predicate is
+rechecked in the terminal update, so a concurrent fresh heartbeat wins rather
+than being overwritten.
+
+Each model call has an absolute `LITELLM_MODEL_DEADLINE_SEC` in addition to the
+HTTP idle timeout. A positive `LITELLM_MAX_COMPLETION_TOKENS` is sent only when
+an operator deliberately enables that guard. The larger
+`RUN_SEGMENT_DEADLINE_SEC` covers workspace/binding preparation and the complete
+model/tool loop. On expiry, close, or heartbeat-loop failure, the owner cancels
+and awaits the worker before terminalizing the run row. The heartbeat remains
+live while a cancellation-resistant worker is stopping: the liveness signal
+must outlive the work it describes. A claim is never released while
+provisioning, tool calls, file writes, or model work remain live. Cancellation
+is cooperative: if a worker refuses to stop, its heartbeat, claim, and caller
+connection remain open until that worker returns. The service emits
+`worker_cancellation_slow` diagnostics every `RUN_CANCELLATION_WARN_SEC` while
+this condition persists; operators must investigate the blocked work rather
+than release its claim by elapsed time.
+Model and segment expiry return `TIMEOUT`; truncated model output returns
+`OUTPUT_LIMIT`. Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than
+being mislabeled as a timeout. These codes describe and safely report the
+attempt; they never decide whether a session is terminal.
+
+#### Claim, state, and retry contract
+
+An `ExecutionRun` is an attempt record and ends `completed` or `failed`.
+Claims conflict independently on persistent `execution_id` and conversation
+`threadId`; unrelated conversations do not contend at the claim layer. Capacity
+is still bounded by process, event-loop, model, database, and pod resources.
+The database coordinates claims across pods; `RunRegistry` only accelerates
+same-pod cancellation.
+
+After any failed segment, each durable object returns to the runnable state it
+actually represents:
+
+| Path | Attempt record | Persistent execution | Pending interaction / thread |
+| --- | --- | --- | --- |
+| Selected-workflow fresh execute | `failed` | `PENDING`, with the last attempt in `Execution.result` and `Execution.error_message` | No interaction is fabricated; execute may be tried again. |
+| Selected-workflow resume | `failed` | `AWAITING_RESPONSE`, with last-attempt diagnostics | The claimed `LLMState` returns to `AWAITING_RESPONSE`; the same answer may be tried again. |
+| AG-UI fresh run | `failed` | Historical execution remains `FAILED` | The conversation thread remains open and accepts a new run. |
+| AG-UI resume | `failed` | `AWAITING_RESPONSE`, with last-attempt diagnostics | The claimed hold returns to `AWAITING_RESPONSE`. |
+| Explicit close / closing | Ends after the worker stops | Closed lifecycle state is retained | Not runnable; this is an explicit lifecycle action, not failure recovery. |
+
+Success still completes the execution or persists its real pending interrupt.
+No error-code taxonomy alters these transitions. The engine guarantees that a
+retry starts after the previous worker stopped and its claim was finalized. It
+cannot undo arbitrary tool side effects; workflows must make repeated tool
+operations safe where needed.
+
+REST responses are emitted after their `finally` block finalizes the run claim.
+On AG-UI, run finalization occurs before every terminal `RUN_FINISHED` or
+`RUN_ERROR` event; the generator's `finally` is an idempotent disconnect
+fallback. Cancelling an AG-UI stream cancels its run task. This
+disconnect-cancellation behavior is currently specific to AG-UI.
+
+#### Known issue: synchronous workspace discovery
+
+Some harness/workspace discovery traversals still perform synchronous
+filesystem work on the service event loop. A blocked traversal prevents that
+loop from advancing the worker, heartbeat, cancellation diagnostics, or caller
+response. The owning request therefore holds its connection and logical claim
+until the filesystem call returns, while the unrefreshed database heartbeat can
+make the still-live work appear stale to another pod. Moving this work is a
+separate change because plain `asyncio.to_thread` is insufficient:
+cancelling the awaiting coroutine does not stop the underlying thread. The fix
+requires bounded executor concurrency, traversal budgets, cooperative
+cancellation semantics, and multi-pod tests so background discovery cannot
+outlive its liveness signal or starve existing storage offloads.
+
+The default deployment ordering is model **240s**, segment **270s**, caller
+**300s**, and reverse proxy **310s** or more. This leaves time for worker
+cancellation and DB finalization before the caller closes its connection.
 
 `RUN_HEARTBEAT_STALE_SEC` must exceed `RUN_HEARTBEAT_INTERVAL_SEC` (enforced at
 load). After a **202** `closing` response, retry the close endpoint or wait for
