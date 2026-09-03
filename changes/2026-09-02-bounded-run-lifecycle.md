@@ -7,7 +7,8 @@
   completion-token resource guard is disabled by default. Timeout, output-limit,
   conflict, and run-tracking failures are structured. Cancellation keeps both
   the heartbeat and run claim until the worker stops, logs resistant
-  cancellation, and cancels the worker if its heartbeat loop fails.
+  cancellation repeatedly until it ends, and cancels the worker if its
+  heartbeat loop fails.
   Workspace and binding preparation run under the same heartbeat and segment
   guard on both orchestrator and AG-UI paths.
   Claim creation conditionally terminalizes heartbeat-stale crash/orphan rows

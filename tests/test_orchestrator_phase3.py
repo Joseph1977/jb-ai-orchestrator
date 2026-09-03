@@ -1439,6 +1439,56 @@ async def test_execute_prep_binding_error_restores_execution_pending():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_code", ["UNAVAILABLE", "RUN_LIFECYCLE_FAILED"])
+async def test_execute_failure_returns_pending_after_claim_finalization(error_code):
+    exec_id = uuid.uuid4()
+    execution = SimpleNamespace(
+        id=exec_id,
+        workspace_path="/tmp/ws",
+        orchestration_type="generic",
+        config={"mode": "workflow"},
+        source=None,
+        closed_at=None,
+        close_requested_at=None,
+    )
+    failure = {
+        "success": False,
+        "error": "segment failed",
+        "error_code": error_code,
+    }
+    call_order: list[str] = []
+    restore_pending = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: call_order.append("restore")
+    )
+    complete_run = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: call_order.append("claim_finalized")
+    )
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.get_execution", AsyncMock(return_value=execution)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.update_execution", AsyncMock()), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.try_create_active_run", AsyncMock(return_value=_fake_run())), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.reject_if_close_requested", AsyncMock(return_value=False)), \
+         patch("app.controllers.orchestrator_controller._managed_hub_process", AsyncMock(return_value=failure)), \
+         patch("app.controllers.orchestrator_controller._restore_execution_pending", restore_pending), \
+         patch("app.controllers.orchestrator_controller._complete_run_lifecycle", complete_run):
+        response = await execute(
+            ExecuteOrchestratorInput(orchestratorGuid=exec_id, prompt="go")
+        )
+        call_order.append("response")
+
+    body = json.loads(response.body)
+    assert body["executionStatus"] == ExecutionStatus.PENDING
+    assert body["errorCode"] == error_code
+    restore_pending.assert_awaited_once_with(exec_id, failure)
+    assert call_order == ["restore", "claim_finalized", "response"]
+
+
+@pytest.mark.asyncio
 async def test_resume_prep_binding_error_restores_execution_awaiting():
     state_id = uuid.uuid4()
     exec_id = uuid.uuid4()

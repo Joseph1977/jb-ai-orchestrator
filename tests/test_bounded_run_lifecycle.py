@@ -244,6 +244,26 @@ def test_agui_run_failures_use_structured_public_messages(error_code, expected):
 
 
 @pytest.mark.asyncio
+async def test_streamed_length_finish_reason_surfaces_output_limit():
+    class LengthResponse:
+        async def aiter_lines(self):
+            yield (
+                'data: {"choices":[{"delta":{"content":"partial"},'
+                '"finish_reason":"length"}]}'
+            )
+            yield "data: [DONE]"
+
+    result = await MCPAgentService(mcp_server_configs=[])._consume_chat_stream(
+        LengthResponse()
+    )
+
+    with pytest.raises(LLMUpstreamError) as exc:
+        _check_output_limit(result)
+
+    assert exc.value.code == "OUTPUT_LIMIT"
+
+
+@pytest.mark.asyncio
 async def test_output_limit_prevents_tool_routing(tmp_path, monkeypatch):
     monkeypatch.setattr(Config, "LOCAL_TOOLS_ENABLED", False)
     mcp = MagicMock()
@@ -511,6 +531,73 @@ async def test_heartbeat_failure_keeps_claim_fresh_until_worker_stops(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_and_teardown_share_one_cancellation_diagnostic(monkeypatch, caplog):
+    settings = SessionCloseSettings(
+        heartbeat_interval_sec=0.005,
+        heartbeat_stale_sec=300,
+        close_wait_timeout_sec=10,
+        segment_deadline_sec=30,
+        cancellation_warn_sec=0.01,
+    )
+    service = SessionCloseService(settings=settings, registry=MagicMock())
+    service._registry.register = AsyncMock()
+    service._registry.unregister = AsyncMock()
+    heartbeat_attempts = 0
+
+    async def heartbeat_run(*_args, **_kwargs):
+        nonlocal heartbeat_attempts
+        heartbeat_attempts += 1
+        if heartbeat_attempts == 1:
+            raise RuntimeError("db down")
+        return True
+
+    service._lifecycle.heartbeat_run = AsyncMock(side_effect=heartbeat_run)
+    service._lifecycle.is_execution_close_requested = AsyncMock(return_value=False)
+    service._lifecycle.is_thread_close_requested = AsyncMock(return_value=False)
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    monkeypatch.setattr(
+        "app.services.session_close_service.get_session",
+        fake_get_session,
+    )
+
+    cancellation_seen = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    async def resistant_worker():
+        while not release_worker.is_set():
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+
+    worker = asyncio.create_task(resistant_worker())
+    context = service.manage_run(
+        run_pk=uuid.uuid4(),
+        execution_id=uuid.uuid4(),
+        task=worker,
+    )
+    await context.__aenter__()
+
+    with caplog.at_level("ERROR"):
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        teardown = asyncio.create_task(context.__aexit__(None, None, None))
+        await asyncio.sleep(0.035)
+        elapsed = [
+            getattr(record, "elapsed_sec")
+            for record in caplog.records
+            if getattr(record, "event", None) == "worker_cancellation_slow"
+        ]
+        assert len(elapsed) >= 2
+        assert elapsed == sorted(set(elapsed))
+        release_worker.set()
+        await asyncio.wait_for(teardown, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_stale_run_reclaimed_before_fresh_conflict():
     store = InMemoryLifecycleStore()
     exec_id = uuid.uuid4()
@@ -625,7 +712,7 @@ async def test_heartbeat_failure_is_not_reported_as_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_slow_worker_cancellation_is_logged(monkeypatch, caplog):
+async def test_slow_worker_cancellation_is_logged_until_worker_stops(monkeypatch, caplog):
     settings = SessionCloseSettings(
         heartbeat_interval_sec=60,
         heartbeat_stale_sec=300,
@@ -666,9 +753,24 @@ async def test_slow_worker_cancellation_is_logged(monkeypatch, caplog):
             with pytest.raises(asyncio.CancelledError):
                 await task
 
-    assert "worker_cancellation_slow" in {
-        getattr(record, "event", None) for record in caplog.records
-    }
+    diagnostics = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "worker_cancellation_slow"
+    ]
+    assert len(diagnostics) >= 2
+    assert [getattr(record, "elapsed_sec", 0) for record in diagnostics] == sorted(
+        getattr(record, "elapsed_sec", 0) for record in diagnostics
+    )
+    count_after_stop = len(diagnostics)
+    await asyncio.sleep(0.03)
+    assert (
+        sum(
+            getattr(record, "event", None) == "worker_cancellation_slow"
+            for record in caplog.records
+        )
+        == count_after_stop
+    )
 
 
 @pytest.mark.asyncio
@@ -768,7 +870,6 @@ async def test_worker_teardown_preserves_outer_cancellation():
             worker,
             run_pk=uuid.uuid4(),
             execution_id=uuid.uuid4(),
-            cancel_reason=None,
         )
     )
     await asyncio.sleep(0)

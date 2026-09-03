@@ -939,18 +939,15 @@ def _stream_run(
                 return
 
             if result.get("awaits_response"):
-                try:
-                    state_id = await _persist_await(
-                        execution_id,
-                        result,
-                        thread_id,
-                        run_id,
-                        workspace_path=bound_workspace,
-                        in_place=bound_inplace,
-                        runtime_path=bound_runtime,
-                    )
-                except Exception:
-                    raise
+                state_id = await _persist_await(
+                    execution_id,
+                    result,
+                    thread_id,
+                    run_id,
+                    workspace_path=bound_workspace,
+                    in_place=bound_inplace,
+                    runtime_path=bound_runtime,
+                )
                 if claimed_state_id:
                     if not await _complete_claimed_state(claimed_state_id):
                         restored = await _rollback_partial_resume_settlement(
@@ -1112,8 +1109,6 @@ def _stream_run(
                 yield _serialize_event(
                     RunErrorEvent(message=f"{SESSION_CLOSING}: Session close is in progress")
                 )
-            else:
-                raise
             return
         except Exception as exc:
             logger.error(f"AG-UI run failed: {exc}")

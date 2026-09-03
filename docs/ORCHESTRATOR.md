@@ -1081,7 +1081,12 @@ model/tool loop. On expiry, close, or heartbeat-loop failure, the owner cancels
 and awaits the worker before terminalizing the run row. The heartbeat remains
 live while a cancellation-resistant worker is stopping: the liveness signal
 must outlive the work it describes. A claim is never released while
-provisioning, tool calls, file writes, or model work remain live.
+provisioning, tool calls, file writes, or model work remain live. Cancellation
+is cooperative: if a worker refuses to stop, its heartbeat, claim, and caller
+connection remain open until that worker returns. The service emits
+`worker_cancellation_slow` diagnostics every `RUN_CANCELLATION_WARN_SEC` while
+this condition persists; operators must investigate the blocked work rather
+than release its claim by elapsed time.
 Model and segment expiry return `TIMEOUT`; truncated model output returns
 `OUTPUT_LIMIT`. Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than
 being mislabeled as a timeout. These codes describe and safely report the
@@ -1122,9 +1127,12 @@ disconnect-cancellation behavior is currently specific to AG-UI.
 #### Known issue: synchronous workspace discovery
 
 Some harness/workspace discovery traversals still perform synchronous
-filesystem work on the service event loop. A long traversal can delay the
-heartbeat, making a live claim appear stale to another pod. Moving this work is
-a separate change because plain `asyncio.to_thread` is insufficient:
+filesystem work on the service event loop. A blocked traversal prevents that
+loop from advancing the worker, heartbeat, cancellation diagnostics, or caller
+response. The owning request therefore holds its connection and logical claim
+until the filesystem call returns, while the unrefreshed database heartbeat can
+make the still-live work appear stale to another pod. Moving this work is a
+separate change because plain `asyncio.to_thread` is insufficient:
 cancelling the awaiting coroutine does not stop the underlying thread. The fix
 requires bounded executor concurrency, traversal budgets, cooperative
 cancellation semantics, and multi-pod tests so background discovery cannot
