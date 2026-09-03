@@ -34,7 +34,11 @@ from app.models.execution_models import ExecutionStatus, LLMStateStatus
 from app.services.binding_contract import BindingError
 from app.services.binding_runtime import RUN_BINDING_END, RUN_BINDING_START
 from app.services.run_lifecycle import RUN_STATUS_FAILED
-from app.services.session_close_service import CloseResult
+from app.services.session_close_service import (
+    CANCEL_REASON_CLOSE,
+    CloseResult,
+    RunCancelHandle,
+)
 
 
 FRONTEND_TOOLS = [
@@ -95,7 +99,7 @@ def _apply_patches(patches):
 
 @asynccontextmanager
 async def _noop_manage_run(**_kwargs):
-    yield asyncio.Event()
+    yield RunCancelHandle()
 
 
 class _FakeSessionContext:
@@ -696,7 +700,7 @@ async def test_cancellation_reconciles_without_restoring_close_discarded_hold():
 
     @asynccontextmanager
     async def managing_run(**kwargs):
-        yield cancel_event
+        yield RunCancelHandle(event=cancel_event, reason=CANCEL_REASON_CLOSE)
 
     async def segment_runner(_cancel_event):
         raise asyncio.CancelledError()
@@ -1134,24 +1138,39 @@ async def test_concurrent_fresh_input_only_winner_provisions():
 async def test_stream_persist_failure_finishes_run_once():
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
+    claimed_state_id = uuid.uuid4()
     finalize_segment = AsyncMock()
     restore = AsyncMock(return_value=True)
+    restore_execution = AsyncMock()
+    call_order: list[str] = []
+
+    async def finalize_run(*_args, **_kwargs):
+        call_order.append("finalize_run")
+
+    finalize_segment.side_effect = finalize_run
 
     @asynccontextmanager
     async def managing_run(**_kwargs):
-        yield asyncio.Event()
+        yield RunCancelHandle()
 
     async def failing_persist(*_args, **_kwargs):
         raise RuntimeError("persist failed")
 
     async def segment_runner(_cancel_event):
-        return {"success": True, "response": "nope", "tool_calls_info": []}
+        return {
+            "success": True,
+            "awaits_response": True,
+            "state": {"request": "x", "messages": []},
+            "pending_tools": [{"tool_call_id": "call-next"}],
+            "tool_calls_info": [],
+        }
 
     with patch("app.controllers.ag_ui_controller.agui_event_service.subscribe", AsyncMock(return_value=asyncio.Queue())), \
          patch("app.controllers.ag_ui_controller.agui_event_service.unsubscribe", AsyncMock()), \
          patch("app.controllers.ag_ui_controller.session_close_service.manage_run", managing_run), \
          patch("app.controllers.ag_ui_controller._persist_await", failing_persist), \
          patch("app.controllers.ag_ui_controller._restore_claimed_state", restore), \
+         patch("app.controllers.ag_ui_controller._restore_execution_awaiting", restore_execution), \
          patch("app.controllers.ag_ui_controller._finalize_run_segment", finalize_segment), \
          patch("app.controllers.ag_ui_controller._finalize", AsyncMock()):
         from app.controllers.ag_ui_controller import _stream_run
@@ -1162,10 +1181,16 @@ async def test_stream_persist_failure_finishes_run_once():
             run_id="run-persist",
             execution_id=exec_id,
             run_pk=run_pk,
+            claimed_state_id=claimed_state_id,
         )
-        await _read_sse_events(resp)
+        events = await _read_sse_events(resp)
+        call_order.append("terminal_event_received")
 
     finalize_segment.assert_awaited_once()
+    restore.assert_awaited_once_with(claimed_state_id)
+    restore_execution.assert_awaited_once()
+    assert events[-1]["type"] == "RUN_ERROR"
+    assert call_order == ["finalize_run", "terminal_event_received"]
 
 
 @pytest.mark.asyncio

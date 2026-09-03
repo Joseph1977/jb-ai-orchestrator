@@ -22,6 +22,7 @@ from app.models.execution_models import LLMStateStatus
 from app.services.agui_event_service import agui_event_service
 from app.services.agui_service import agui_service
 from app.services.tool_hub import ToolExecutionHub
+from app.services.session_close_service import RunCancelHandle
 
 
 class FakeMCPService:
@@ -241,7 +242,7 @@ def agui_db_mocks():
 
     @asynccontextmanager
     async def noop_manage_run(**_kwargs):
-        yield asyncio.Event()
+        yield RunCancelHandle()
 
     async def ensure_thread_session(session, thread_id):
         return SimpleNamespace(thread_key=f"key-{thread_id}", thread_id=thread_id)

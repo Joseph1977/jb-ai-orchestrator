@@ -592,6 +592,7 @@ class MCPAgentService:
         content_parts: List[str] = []
         tool_calls: List[dict] = []
         finish_reason = None
+        saw_done = False
         usage: dict = {}
         role = "assistant"
 
@@ -606,6 +607,7 @@ class MCPAgentService:
             if not payload:
                 continue
             if payload == "[DONE]":
+                saw_done = True
                 break
             try:
                 chunk = json.loads(payload)
@@ -648,11 +650,13 @@ class MCPAgentService:
                 if fn.get("arguments"):
                     current["function"]["arguments"] += fn["arguments"]
 
-        if finish_reason is None:
+        if finish_reason is None and not saw_done:
             raise LLMUpstreamError(
                 "UNAVAILABLE",
                 "Model stream ended without a completion reason",
             )
+        if finish_reason is None:
+            finish_reason = "stop"
 
         message: dict = {"role": role, "content": "".join(content_parts) or None}
         if tool_calls:
@@ -664,7 +668,7 @@ class MCPAgentService:
             len(tool_calls),
         )
         return {
-            "choices": [{"message": message, "finish_reason": finish_reason or "stop"}],
+            "choices": [{"message": message, "finish_reason": finish_reason}],
             "usage": usage,
         }
 

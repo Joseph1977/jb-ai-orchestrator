@@ -26,11 +26,12 @@ from app.services.binding_contract import (
     select_relative_workspace,
 )
 from app.services.runtime_paths import runtime_root_for_thread
+from app.services.session_close_service import RunCancelHandle
 
 
 @asynccontextmanager
 async def _noop_manage_run(**_kwargs):
-    yield AsyncMock()
+    yield RunCancelHandle()
 
 
 def test_resolve_local_context_requires_inplace_flag(tmp_path, monkeypatch):

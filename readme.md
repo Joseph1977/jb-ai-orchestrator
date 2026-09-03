@@ -523,7 +523,7 @@ name and URL. See
 | `LITELLM_API_KEY` | `sk-1234` | LiteLLM key |
 | `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network timeout for each LiteLLM request |
 | `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute wall-clock deadline for one complete LiteLLM call, including streamed response consumption |
-| `LITELLM_MAX_COMPLETION_TOKENS` | `4096` | Completion-token cap sent on every model request; `0` disables it |
+| `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard; when positive, sends a completion-token cap and accepts possible truncation |
 | `LITELLM_DROP_PARAMS` | `True` | Drop parameters a model does not accept |
 | `MAX_TOOL_CALLS` | `10` | Tool calls per request |
 | `ServiceName` | `jb-ai-orchestrator-service` | Service name |
@@ -555,6 +555,12 @@ The default ordering is model call **240s**, complete segment **270s**, caller
 worker before its `execution_runs` claim becomes terminal. A new claim may
 reconcile a crash-orphaned row only after its heartbeat is stale; a fresh row
 still returns `RUN_CONFLICT`.
+
+The service is a generic execution engine: it enforces containment, isolation,
+bounded execution, safe claim release, and retryable session state. It does not
+set workflow policy for model output or behavior. Failed attempt records remain
+diagnostic history, while the execution, pending interaction, or conversation
+returns to its real runnable state unless the caller explicitly closed it.
 
 ### Workspaces and bindings
 

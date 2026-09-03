@@ -101,11 +101,17 @@ router = APIRouter(prefix="/api/ag-ui", tags=["AG-UI"])
 
 _RUN_CONFLICT = "RUN_CONFLICT"
 _PUBLIC_RUN_FAILURES = {
-    "TIMEOUT": "Workflow run timed out",
-    "OUTPUT_LIMIT": "Model output limit reached",
-    "RUN_LIFECYCLE_FAILED": "Workflow run tracking failed",
+    "TIMEOUT": "The workflow run timed out. The session remains available; try again.",
+    "OUTPUT_LIMIT": (
+        "The model reply was cut off. The session and any pending question remain "
+        "available; try again."
+    ),
+    "RUN_LIFECYCLE_FAILED": (
+        "Workflow run tracking failed. The session remains available; try again."
+    ),
     "UNAVAILABLE": "Model service is unavailable",
 }
+_RUN_CONFLICT_MESSAGE = "The previous workflow run is still stopping. Try again shortly."
 
 
 def _run_failure_message(result: dict) -> str:
@@ -248,7 +254,7 @@ def _run_conflict_stream() -> StreamingResponse:
     async def error_stream():
         yield _serialize_event(
             RunErrorEvent(
-                message=f"{_RUN_CONFLICT}: Another run is active for this thread"
+                message=f"{_RUN_CONFLICT}: {_RUN_CONFLICT_MESSAGE}"
             )
         )
 
@@ -610,7 +616,7 @@ async def _finalize(execution_id, result: dict) -> None:
             session,
             execution_id,
             status=status,
-            result=result if result.get("success") else None,
+            result=result,
             error_message=None if result.get("success") else result.get("error"),
         )
 
@@ -659,12 +665,19 @@ async def _finalize_run_segment(
     await session_close_service.reconcile_thread_close(thread_id)
 
 
-async def _restore_execution_awaiting(execution_id: uuid.UUID) -> None:
+async def _restore_execution_awaiting(
+    execution_id: uuid.UUID,
+    result: Optional[dict] = None,
+) -> None:
     async with get_session() as session:
+        kwargs: dict[str, Any] = {"status": ExecutionStatus.AWAITING_RESPONSE}
+        if result is not None:
+            kwargs["result"] = result
+            kwargs["error_message"] = result.get("error") or "Workflow segment failed"
         await execution_state_service.update_execution(
             session,
             execution_id,
-            status=ExecutionStatus.AWAITING_RESPONSE,
+            **kwargs,
         )
 
 
@@ -801,6 +814,7 @@ def _stream_run(
         settled = False
         cancel_handle: Optional[RunCancelHandle] = None
         final_run_status = RUN_STATUS_FAILED
+        run_finalized = False
 
         async def _cancel_queue_task():
             nonlocal queue_task
@@ -809,6 +823,13 @@ def _stream_run(
                 with contextlib.suppress(asyncio.CancelledError):
                     await queue_task
                 queue_task = None
+
+        async def _settle_run(status: str) -> None:
+            nonlocal run_finalized
+            if run_finalized:
+                return
+            await _finalize_run_segment(run_pk, thread_id, run_status=status)
+            run_finalized = True
 
         async def _execute_managed():
             nonlocal cancel_handle
@@ -827,13 +848,13 @@ def _stream_run(
                     task=task,
                     thread_id=thread_id,
                 ) as handle:
-                    if isinstance(handle, RunCancelHandle):
-                        cancel_handle = handle
-                    else:
-                        cancel_handle = RunCancelHandle(event=handle)
+                    cancel_handle = handle
                     shared["cancel_event"] = cancel_handle.event
                     ready.set()
-                    return await task
+                    result = await task
+                    if cancel_handle.reason is not None:
+                        raise asyncio.CancelledError
+                    return result
             finally:
                 if not ready.is_set():
                     task.cancel()
@@ -841,6 +862,12 @@ def _stream_run(
                         await task
 
         run_task = asyncio.create_task(_execute_managed())
+
+        async def _stop_run_task() -> None:
+            if not run_task.done():
+                run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await run_task
 
         try:
             yield _serialize_event(
@@ -895,15 +922,17 @@ def _stream_run(
                     bound_runtime = segment_prep.runtime_path
 
             if result.get("_prep_failed"):
-                await _finalize(execution_id, result)
                 if claimed_state_id and not _close_discarded_claim(cancel_handle):
                     if not await _restore_claimed_state(claimed_state_id):
                         logger.warning(
                             "Failed to restore claimed state %s after prep failure",
                             claimed_state_id,
                         )
-                    await _restore_execution_awaiting(execution_id)
+                    await _restore_execution_awaiting(execution_id, result)
+                else:
+                    await _finalize(execution_id, result)
                 settled = True
+                await _settle_run(RUN_STATUS_FAILED)
                 yield _serialize_event(
                     RunErrorEvent(message=_run_failure_message(result))
                 )
@@ -921,14 +950,6 @@ def _stream_run(
                         runtime_path=bound_runtime,
                     )
                 except Exception:
-                    if claimed_state_id and not _close_discarded_claim(cancel_handle):
-                        restored = await _restore_claimed_state(claimed_state_id)
-                        if not restored:
-                            logger.warning(
-                                "Failed to restore claimed state %s after persist error",
-                                claimed_state_id,
-                            )
-                    settled = True
                     raise
                 if claimed_state_id:
                     if not await _complete_claimed_state(claimed_state_id):
@@ -943,6 +964,14 @@ def _stream_run(
                                 claimed_state_id,
                                 state_id,
                             )
+                        await _restore_execution_awaiting(
+                            execution_id,
+                            {
+                                "success": False,
+                                "error": "Failed to settle resume claim",
+                            },
+                        )
+                        await _settle_run(RUN_STATUS_FAILED)
                         yield _serialize_event(
                             RunErrorEvent(message="Failed to settle resume claim")
                         )
@@ -961,6 +990,7 @@ def _stream_run(
                     pending_tools=pending_tools,
                 ):
                     yield _serialize_event(event)
+                await _settle_run(RUN_STATUS_COMPLETED)
                 yield _serialize_event(
                     build_run_finished_interrupt_event(
                         thread_id=thread_id,
@@ -979,8 +1009,6 @@ def _stream_run(
                 yield _serialize_event(TextMessageContentEvent(message_id=message_id, delta=assistant_response))
                 yield _serialize_event(TextMessageEndEvent(message_id=message_id))
 
-            await _finalize(execution_id, result)
-
             if not result.get("success"):
                 if claimed_state_id and not _close_discarded_claim(cancel_handle):
                     if not await _restore_claimed_state(claimed_state_id):
@@ -988,7 +1016,11 @@ def _stream_run(
                             "Failed to restore claimed state %s after result failure",
                             claimed_state_id,
                         )
+                    await _restore_execution_awaiting(execution_id, result)
+                else:
+                    await _finalize(execution_id, result)
                 settled = True
+                await _settle_run(RUN_STATUS_FAILED)
                 yield _serialize_event(
                     RunErrorEvent(message=_run_failure_message(result))
                 )
@@ -1001,14 +1033,24 @@ def _stream_run(
                         "Failed to complete claimed state %s after successful final result",
                         claimed_state_id,
                     )
+                    await _restore_execution_awaiting(
+                        execution_id,
+                        {
+                            "success": False,
+                            "error": "Failed to settle resume claim",
+                        },
+                    )
+                    await _settle_run(RUN_STATUS_FAILED)
                     yield _serialize_event(
                         RunErrorEvent(message="Failed to settle resume claim")
                     )
                     return
+            await _finalize(execution_id, result)
             settled = True
             final_run_status = RUN_STATUS_COMPLETED
 
             if result.get("success"):
+                await _settle_run(RUN_STATUS_COMPLETED)
                 yield _serialize_event(
                     RunFinishedEvent(
                         thread_id=thread_id,
@@ -1017,68 +1059,83 @@ def _stream_run(
                     )
                 )
         except asyncio.CancelledError:
-            if claimed_state_id and not settled and not _close_discarded_claim(cancel_handle):
+            cancel_reason = cancel_handle.reason if cancel_handle is not None else None
+            if cancel_reason not in {
+                CANCEL_REASON_SEGMENT_DEADLINE,
+                CANCEL_REASON_HEARTBEAT_FAILURE,
+                CANCEL_REASON_CLOSE,
+            }:
+                raise
+            await _stop_run_task()
+            if (
+                claimed_state_id
+                and not settled
+                and not _close_discarded_claim(cancel_handle)
+            ):
                 if not await _restore_claimed_state(claimed_state_id):
                     logger.warning(
                         "Failed to restore claimed state %s after stream cancellation",
                         claimed_state_id,
                     )
-            if cancel_handle is not None and cancel_handle.reason == CANCEL_REASON_SEGMENT_DEADLINE:
-                await _finalize(
-                    execution_id,
-                    {
-                        "success": False,
-                        "error": "Workflow run timed out",
-                        "error_code": "TIMEOUT",
-                    },
-                )
+            if cancel_reason == CANCEL_REASON_SEGMENT_DEADLINE:
+                failure = {
+                    "success": False,
+                    "error": _PUBLIC_RUN_FAILURES["TIMEOUT"],
+                    "error_code": "TIMEOUT",
+                }
+                if claimed_state_id and not _close_discarded_claim(cancel_handle):
+                    await _restore_execution_awaiting(execution_id, failure)
+                else:
+                    await _finalize(execution_id, failure)
+                settled = True
+                await _settle_run(RUN_STATUS_FAILED)
                 yield _serialize_event(
-                    RunErrorEvent(message="TIMEOUT: Workflow run timed out")
+                    RunErrorEvent(message=_run_failure_message(failure))
                 )
-            elif (
-                cancel_handle is not None
-                and cancel_handle.reason == CANCEL_REASON_HEARTBEAT_FAILURE
-            ):
-                await _finalize(
-                    execution_id,
-                    {
-                        "success": False,
-                        "error": "Workflow run tracking failed",
-                        "error_code": "RUN_LIFECYCLE_FAILED",
-                    },
-                )
+            elif cancel_reason == CANCEL_REASON_HEARTBEAT_FAILURE:
+                failure = {
+                    "success": False,
+                    "error": _PUBLIC_RUN_FAILURES["RUN_LIFECYCLE_FAILED"],
+                    "error_code": "RUN_LIFECYCLE_FAILED",
+                }
+                if claimed_state_id and not _close_discarded_claim(cancel_handle):
+                    await _restore_execution_awaiting(execution_id, failure)
+                else:
+                    await _finalize(execution_id, failure)
+                settled = True
+                await _settle_run(RUN_STATUS_FAILED)
                 yield _serialize_event(
-                    RunErrorEvent(
-                        message="RUN_LIFECYCLE_FAILED: Workflow run tracking failed"
-                    )
+                    RunErrorEvent(message=_run_failure_message(failure))
                 )
-            else:
+            elif cancel_reason == CANCEL_REASON_CLOSE:
+                await _settle_run(RUN_STATUS_FAILED)
                 yield _serialize_event(
                     RunErrorEvent(message=f"{SESSION_CLOSING}: Session close is in progress")
                 )
+            else:
+                raise
             return
         except Exception as exc:
             logger.error(f"AG-UI run failed: {exc}")
-            if claimed_state_id and not settled and not _close_discarded_claim(cancel_handle):
-                if not await _restore_claimed_state(claimed_state_id):
+            await _stop_run_task()
+            failure = {"success": False, "error": str(exc)}
+            if claimed_state_id and not _close_discarded_claim(cancel_handle):
+                if not settled and not await _restore_claimed_state(claimed_state_id):
                     logger.warning(
                         "Failed to restore claimed state %s after run exception",
                         claimed_state_id,
                     )
+                await _restore_execution_awaiting(execution_id, failure)
                 settled = True
-            if not run_task.done():
-                run_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await run_task
+            else:
+                await _finalize(execution_id, failure)
+            await _settle_run(RUN_STATUS_FAILED)
             yield _serialize_event(RunErrorEvent(message=str(exc)))
         finally:
             await _cancel_queue_task()
-            if not run_task.done():
-                run_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await run_task
+            await _stop_run_task()
             await agui_event_service.unsubscribe(queue)
-            await _finalize_run_segment(run_pk, thread_id, run_status=final_run_status)
+            await _settle_run(final_run_status)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -1235,7 +1292,7 @@ async def _handle_tool_response(
             async def conflict_stream():
                 yield _serialize_event(
                     RunErrorEvent(
-                        message=f"{_RUN_CONFLICT}: Another run is active for this thread"
+                        message=f"{_RUN_CONFLICT}: {_RUN_CONFLICT_MESSAGE}"
                     )
                 )
 
@@ -1577,7 +1634,7 @@ async def run_agui_session(payload: AGUIRunRequest):
         await _terminalize_failed_execution(
             bound_execution_id,
             provisioned=False,
-            error=f"{_RUN_CONFLICT}: Another run is active for this thread",
+            error=f"{_RUN_CONFLICT}: {_RUN_CONFLICT_MESSAGE}",
         )
         return _run_conflict_stream()
 

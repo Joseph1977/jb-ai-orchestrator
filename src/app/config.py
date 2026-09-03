@@ -113,8 +113,8 @@ class Config:
     LITELLM_DROP_PARAMS = os.getenv('LITELLM_DROP_PARAMS', 'True')
     # Absolute wall-clock budget for one LiteLLM call (streaming or not).
     LITELLM_MODEL_DEADLINE_SEC = int(os.getenv('LITELLM_MODEL_DEADLINE_SEC', '240'))
-    # Completion-token cap forwarded to LiteLLM (0 disables).
-    LITELLM_MAX_COMPLETION_TOKENS = int(os.getenv('LITELLM_MAX_COMPLETION_TOKENS', '4096'))
+    # Optional operator resource guard forwarded to LiteLLM (0 disables).
+    LITELLM_MAX_COMPLETION_TOKENS = int(os.getenv('LITELLM_MAX_COMPLETION_TOKENS', '0'))
 
     # Database Configuration
     DATABASE_URL = os.getenv('DATABASE_URL')

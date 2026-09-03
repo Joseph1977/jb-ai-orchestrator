@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -52,7 +52,7 @@ def test_default_run_budgets_leave_cancellation_headroom():
     assert Config.LITELLM_MODEL_DEADLINE_SEC == 240
     assert Config.RUN_SEGMENT_DEADLINE_SEC == 270
     assert Config.LITELLM_MODEL_DEADLINE_SEC < Config.RUN_SEGMENT_DEADLINE_SEC
-    assert Config.LITELLM_MAX_COMPLETION_TOKENS == 4096
+    assert Config.LITELLM_MAX_COMPLETION_TOKENS == 0
     assert Config.RUN_CANCELLATION_WARN_SEC == 5
 
 
@@ -186,7 +186,6 @@ async def test_stream_without_completion_reason_is_not_accepted():
     class IncompleteResponse:
         async def aiter_lines(self):
             yield 'data: {"choices":[{"delta":{"content":"partial"}}]}'
-            yield "data: [DONE]"
 
     with pytest.raises(LLMUpstreamError) as exc:
         await MCPAgentService(mcp_server_configs=[])._consume_chat_stream(
@@ -196,14 +195,37 @@ async def test_stream_without_completion_reason_is_not_accepted():
     assert exc.value.code == "UNAVAILABLE"
 
 
+@pytest.mark.asyncio
+async def test_done_sentinel_without_finish_reason_defaults_to_stop():
+    class CompleteResponse:
+        async def aiter_lines(self):
+            yield 'data: {"choices":[{"delta":{"content":"complete"}}]}'
+            yield "data: [DONE]"
+
+    result = await MCPAgentService(mcp_server_configs=[])._consume_chat_stream(
+        CompleteResponse()
+    )
+
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert result["choices"][0]["message"]["content"] == "complete"
+
+
 @pytest.mark.parametrize(
     ("error_code", "expected"),
     [
-        ("TIMEOUT", "TIMEOUT: Workflow run timed out"),
-        ("OUTPUT_LIMIT", "OUTPUT_LIMIT: Model output limit reached"),
+        (
+            "TIMEOUT",
+            "TIMEOUT: The workflow run timed out. The session remains available; try again.",
+        ),
+        (
+            "OUTPUT_LIMIT",
+            "OUTPUT_LIMIT: The model reply was cut off. The session and any pending "
+            "question remain available; try again.",
+        ),
         (
             "RUN_LIFECYCLE_FAILED",
-            "RUN_LIFECYCLE_FAILED: Workflow run tracking failed",
+            "RUN_LIFECYCLE_FAILED: Workflow run tracking failed. The session remains "
+            "available; try again.",
         ),
         ("UNAVAILABLE", "UNAVAILABLE: Model service is unavailable"),
     ],
@@ -287,6 +309,45 @@ async def test_max_completion_tokens_forwarded_to_litellm(monkeypatch):
         stream=False,
     )
     assert captured["json"]["max_tokens"] == 512
+
+
+@pytest.mark.asyncio
+async def test_disabled_completion_token_guard_is_not_sent(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    class FakeClient:
+        async def post(self, _url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            return FakeResponse()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "app.services.mcp_agent_service.httpx.AsyncClient",
+        lambda *args, **kwargs: FakeClient(),
+    )
+
+    await MCPAgentService(
+        mcp_server_configs=[],
+        litellm_max_completion_tokens=0,
+        litellm_model_deadline_sec=5,
+    ).call_litellm(
+        messages=[{"role": "user", "content": "hi"}],
+        model="gpt-4o",
+        stream=False,
+    )
+
+    assert "max_tokens" not in captured["json"]
 
 
 @pytest.mark.asyncio
@@ -386,7 +447,7 @@ async def test_segment_deadline_cancels_worker(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_failure_cancels_worker(monkeypatch):
+async def test_heartbeat_failure_keeps_claim_fresh_until_worker_stops(monkeypatch):
     settings = SessionCloseSettings(
         heartbeat_interval_sec=0.01,
         heartbeat_stale_sec=300,
@@ -397,19 +458,28 @@ async def test_heartbeat_failure_cancels_worker(monkeypatch):
     service = SessionCloseService(settings=settings, registry=MagicMock())
     service._registry.register = AsyncMock()
     service._registry.unregister = AsyncMock()
-    service._lifecycle.heartbeat_run = AsyncMock(side_effect=RuntimeError("db down"))
+    heartbeat_attempts = 0
+
+    async def heartbeat_run(*_args, **_kwargs):
+        nonlocal heartbeat_attempts
+        heartbeat_attempts += 1
+        if heartbeat_attempts == 1:
+            raise RuntimeError("db down")
+        return True
+
+    service._lifecycle.heartbeat_run = AsyncMock(side_effect=heartbeat_run)
     service._lifecycle.is_execution_close_requested = AsyncMock(return_value=False)
     service._lifecycle.is_thread_close_requested = AsyncMock(return_value=False)
 
     worker_cancelled = asyncio.Event()
+    release_worker = asyncio.Event()
 
     async def worker():
-        try:
-            while True:
-                await asyncio.sleep(0.01)
-        except asyncio.CancelledError:
-            worker_cancelled.set()
-            raise
+        while not release_worker.is_set():
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                worker_cancelled.set()
 
     worker_task = asyncio.create_task(worker())
     handle: RunCancelHandle | None = None
@@ -430,6 +500,10 @@ async def test_heartbeat_failure_cancels_worker(monkeypatch):
     ) as cancel_handle:
         handle = cancel_handle
         await asyncio.wait_for(worker_cancelled.wait(), timeout=1)
+        await asyncio.sleep(0.04)
+        assert heartbeat_attempts >= 2
+        release_worker.set()
+        await worker_task
 
     assert handle is not None
     assert handle.reason == CANCEL_REASON_HEARTBEAT_FAILURE
@@ -598,6 +672,113 @@ async def test_slow_worker_cancellation_is_logged(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_cancellation_resistant_worker_keeps_claim_fresh(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.run_lifecycle.DEFAULT_HEARTBEAT_STALE_SEC",
+        0.04,
+    )
+    monkeypatch.setattr(Config, "RUN_HEARTBEAT_STALE_SEC", 0.04)
+    store = InMemoryLifecycleStore()
+    execution_id = uuid.uuid4()
+    thread_id = "slow-cancellation-thread"
+    store.add_execution(Execution(id=execution_id, status=ExecutionStatus.RUNNING))
+    lifecycle = RunLifecycleService()
+    run = await lifecycle.try_create_active_run(
+        ConcurrentLifecycleSession(store),
+        execution_id=execution_id,
+        run_id="first",
+        thread_id=thread_id,
+    )
+    assert run is not None
+
+    async def refresh_heartbeat(_session, run_pk):
+        store.execution_runs[run_pk].heartbeat_at = datetime.now(timezone.utc)
+        return True
+
+    heartbeat_run = AsyncMock(side_effect=refresh_heartbeat)
+    lifecycle.heartbeat_run = heartbeat_run
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield ConcurrentLifecycleSession(store)
+
+    monkeypatch.setattr(
+        "app.services.session_close_service.get_session",
+        fake_get_session,
+    )
+    registry = MagicMock()
+    registry.register = AsyncMock()
+    registry.unregister = AsyncMock()
+    service = SessionCloseService(
+        lifecycle=lifecycle,
+        registry=registry,
+        settings=SessionCloseSettings(
+            heartbeat_interval_sec=0.005,
+            heartbeat_stale_sec=0.04,
+            close_wait_timeout_sec=1,
+            segment_deadline_sec=60,
+            cancellation_warn_sec=1,
+        ),
+    )
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+
+    async def cancellation_resistant_worker():
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+
+    worker = asyncio.create_task(cancellation_resistant_worker())
+    context = service.manage_run(
+        run_pk=run.id,
+        execution_id=execution_id,
+        task=worker,
+        thread_id=thread_id,
+    )
+    await context.__aenter__()
+    teardown = asyncio.create_task(context.__aexit__(None, None, None))
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+    await asyncio.sleep(0.06)
+
+    try:
+        blocked = await lifecycle.try_create_active_run(
+            ConcurrentLifecycleSession(store),
+            execution_id=execution_id,
+            run_id="second",
+            thread_id=thread_id,
+        )
+
+        assert heartbeat_run.await_count > 0
+        assert blocked is None
+        assert store.execution_runs[run.id].status == RUN_STATUS_ACTIVE
+        assert not teardown.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(teardown, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_worker_teardown_preserves_outer_cancellation():
+    service = SessionCloseService(registry=MagicMock())
+    worker = asyncio.create_task(asyncio.sleep(30))
+    teardown = asyncio.create_task(
+        service._await_worker_with_diagnostics(
+            worker,
+            run_pk=uuid.uuid4(),
+            execution_id=uuid.uuid4(),
+            cancel_reason=None,
+        )
+    )
+    await asyncio.sleep(0)
+    teardown.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await teardown
+
+
+@pytest.mark.asyncio
 async def test_close_reconciliation_rechecks_stale_heartbeat_atomically():
     run = SimpleNamespace(id=uuid.uuid4(), execution_id=uuid.uuid4())
     lifecycle = MagicMock()
@@ -682,6 +863,7 @@ async def test_resume_failure_restores_claim_and_returns_code(
     )
     fake_run = SimpleNamespace(id=uuid.uuid4())
     restore = AsyncMock(return_value=True)
+    restore_execution = AsyncMock()
     finalize = AsyncMock()
 
     @asynccontextmanager
@@ -705,7 +887,7 @@ async def test_resume_failure_restores_claim_and_returns_code(
          })), \
          patch("app.controllers.orchestrator_controller._finalize", finalize), \
          patch("app.controllers.orchestrator_controller._complete_run_lifecycle", AsyncMock()), \
-         patch("app.controllers.orchestrator_controller._restore_execution_awaiting", AsyncMock()), \
+         patch("app.controllers.orchestrator_controller._restore_execution_awaiting", restore_execution), \
          patch("app.controllers.orchestrator_controller.run_lifecycle_service.reject_if_close_requested", AsyncMock(return_value=False)):
         response = await resume(
             OrchestratorResumeInput(
@@ -720,7 +902,15 @@ async def test_resume_failure_restores_claim_and_returns_code(
     body = response.body.decode()
     assert error_code in body
     restore.assert_awaited()
-    finalize.assert_awaited()
+    restore_execution.assert_awaited_once_with(
+        exec_id,
+        {
+            "success": False,
+            "error": error_message,
+            "error_code": error_code,
+        },
+    )
+    finalize.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1090,3 +1280,220 @@ async def test_agui_prep_cancellation_cleans_provisioned_workspace(monkeypatch):
     cleanup.assert_called_once_with(exec_id)
     finalize.assert_awaited_once()
     assert finalize.await_args.args[1]["error_code"] == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_agui_prep_failure_finalizes_claim_before_terminal_event():
+    from app.controllers.ag_ui_controller import _stream_run
+
+    order: list[str] = []
+
+    @asynccontextmanager
+    async def manage_run(**_kwargs):
+        yield RunCancelHandle()
+
+    async def segment_runner(_cancel_event):
+        return {
+            "success": False,
+            "error": "timed out",
+            "error_code": "TIMEOUT",
+            "_prep_failed": True,
+        }
+
+    async def finalize_segment(*_args, **_kwargs):
+        order.append("claim_finalized")
+
+    with patch(
+        "app.controllers.ag_ui_controller.agui_event_service.subscribe",
+        AsyncMock(return_value=asyncio.Queue()),
+    ), patch(
+        "app.controllers.ag_ui_controller.agui_event_service.unsubscribe",
+        AsyncMock(),
+    ), patch(
+        "app.controllers.ag_ui_controller.session_close_service.manage_run",
+        manage_run,
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize",
+        AsyncMock(),
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize_run_segment",
+        finalize_segment,
+    ):
+        response = _stream_run(
+            segment_runner=segment_runner,
+            thread_id="terminal-order",
+            run_id="run",
+            execution_id=uuid.uuid4(),
+            run_pk=uuid.uuid4(),
+        )
+        async for chunk in response.body_iterator:
+            if "RUN_ERROR" in chunk:
+                order.append("terminal_event")
+
+    assert order == ["claim_finalized", "terminal_event"]
+
+
+@pytest.mark.asyncio
+async def test_agui_deadline_waits_for_resistant_worker_before_terminal_event():
+    from app.controllers.ag_ui_controller import _stream_run
+
+    order: list[str] = []
+    cancellation_seen = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    @asynccontextmanager
+    async def manage_run(*, task, **_kwargs):
+        handle = RunCancelHandle()
+
+        async def cancel_worker():
+            await asyncio.sleep(0)
+            handle.reason = CANCEL_REASON_SEGMENT_DEADLINE
+            handle.event.set()
+            task.cancel()
+
+        asyncio.create_task(cancel_worker())
+        yield handle
+
+    async def segment_runner(_cancel_event):
+        try:
+            await release_worker.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_worker.wait()
+        order.append("worker_stopped")
+        return {"success": True, "response": "late"}
+
+    async def finalize_segment(*_args, **_kwargs):
+        order.append("claim_finalized")
+
+    with patch(
+        "app.controllers.ag_ui_controller.agui_event_service.subscribe",
+        AsyncMock(return_value=asyncio.Queue()),
+    ), patch(
+        "app.controllers.ag_ui_controller.agui_event_service.unsubscribe",
+        AsyncMock(),
+    ), patch(
+        "app.controllers.ag_ui_controller.session_close_service.manage_run",
+        manage_run,
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize",
+        AsyncMock(),
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize_run_segment",
+        finalize_segment,
+    ):
+        response = _stream_run(
+            segment_runner=segment_runner,
+            thread_id="deadline-order",
+            run_id="run",
+            execution_id=uuid.uuid4(),
+            run_pk=uuid.uuid4(),
+        )
+
+        async def consume():
+            async for chunk in response.body_iterator:
+                if "RUN_ERROR" in chunk:
+                    order.append("terminal_event")
+
+        consumer = asyncio.create_task(consume())
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert order == []
+        release_worker.set()
+        await asyncio.wait_for(consumer, timeout=1)
+
+    assert order == ["worker_stopped", "claim_finalized", "terminal_event"]
+
+
+@pytest.mark.asyncio
+async def test_agui_resume_failure_restores_awaiting_before_terminal_event():
+    from app.controllers.ag_ui_controller import _stream_run
+
+    execution_id = uuid.uuid4()
+    state_id = uuid.uuid4()
+    restore_state = AsyncMock(return_value=True)
+    restore_execution = AsyncMock()
+    finalize_execution = AsyncMock()
+    finalize_segment = AsyncMock()
+
+    @asynccontextmanager
+    async def manage_run(**_kwargs):
+        yield RunCancelHandle()
+
+    failure = {
+        "success": False,
+        "error": "provider unavailable",
+        "error_code": "UNAVAILABLE",
+    }
+
+    with patch(
+        "app.controllers.ag_ui_controller.agui_event_service.subscribe",
+        AsyncMock(return_value=asyncio.Queue()),
+    ), patch(
+        "app.controllers.ag_ui_controller.agui_event_service.unsubscribe",
+        AsyncMock(),
+    ), patch(
+        "app.controllers.ag_ui_controller.session_close_service.manage_run",
+        manage_run,
+    ), patch(
+        "app.controllers.ag_ui_controller._restore_claimed_state",
+        restore_state,
+    ), patch(
+        "app.controllers.ag_ui_controller._restore_execution_awaiting",
+        restore_execution,
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize",
+        finalize_execution,
+    ), patch(
+        "app.controllers.ag_ui_controller._finalize_run_segment",
+        finalize_segment,
+    ):
+        response = _stream_run(
+            segment_runner=lambda _event: asyncio.sleep(0, result=failure),
+            thread_id="resume-recovery",
+            run_id="run",
+            execution_id=execution_id,
+            run_pk=uuid.uuid4(),
+            claimed_state_id=state_id,
+        )
+        chunks = [chunk async for chunk in response.body_iterator]
+
+    assert any("RUN_ERROR" in chunk for chunk in chunks)
+    restore_state.assert_awaited_once_with(state_id)
+    restore_execution.assert_awaited_once_with(execution_id, failure)
+    finalize_execution.assert_not_awaited()
+    finalize_segment.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_failure_state_preserves_last_attempt_diagnostics():
+    from app.controllers.orchestrator_controller import _restore_execution_pending
+
+    execution_id = uuid.uuid4()
+    failure = {
+        "success": False,
+        "error": "model unavailable",
+        "error_code": "UNAVAILABLE",
+    }
+    update_execution = AsyncMock()
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    with patch(
+        "app.controllers.orchestrator_controller.get_session",
+        fake_get_session,
+    ), patch(
+        "app.controllers.orchestrator_controller.execution_state_service.update_execution",
+        update_execution,
+    ):
+        await _restore_execution_pending(execution_id, failure)
+
+    update_execution.assert_awaited_once_with(
+        ANY,
+        execution_id,
+        status=ExecutionStatus.PENDING,
+        result=failure,
+        error_message="model unavailable",
+    )

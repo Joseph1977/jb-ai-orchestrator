@@ -37,7 +37,7 @@ from app.models.requests import (
 )
 from app.services.binding_contract import BindingError
 from app.services.binding_runtime import RUN_BINDING_END, RUN_BINDING_START
-from app.services.session_close_service import CloseResult
+from app.services.session_close_service import CloseResult, RunCancelHandle
 from app.services.storage import StorageError
 
 
@@ -147,7 +147,7 @@ async def test_status_omits_stale_interrupts_when_execution_is_not_awaiting():
 
 @asynccontextmanager
 async def _noop_manage_run(**_kwargs):
-    yield AsyncMock()
+    yield RunCancelHandle()
 
 
 @pytest.mark.asyncio
@@ -1086,7 +1086,11 @@ async def test_execute_persist_await_failure_finishes_run():
         closed_at=None,
         close_requested_at=None,
     )
-    complete = AsyncMock()
+    call_order: list[str] = []
+    complete = AsyncMock(side_effect=lambda *_args, **_kwargs: call_order.append("complete"))
+    restore_pending = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: call_order.append("restore_pending")
+    )
 
     @asynccontextmanager
     async def fake_get_session():
@@ -1116,12 +1120,22 @@ async def test_execute_persist_await_failure_finishes_run():
          patch("app.controllers.orchestrator_controller._build_execute_system_prompt", return_value="sys"), \
          patch("app.controllers.orchestrator_controller.session_close_service.manage_run", _noop_manage_run), \
          patch("app.controllers.orchestrator_controller._persist_awaiting", AsyncMock(side_effect=RuntimeError("persist failed"))), \
+         patch("app.controllers.orchestrator_controller._restore_execution_pending", restore_pending), \
          patch("app.controllers.orchestrator_controller._complete_run_lifecycle", complete):
         with pytest.raises(HTTPException):
             await execute(ExecuteOrchestratorInput(orchestratorGuid=exec_id, prompt="go"))
+        call_order.append("response")
 
     complete.assert_awaited_once()
     assert complete.await_args.kwargs["run_status"] == RUN_STATUS_FAILED
+    restore_pending.assert_awaited_once_with(
+        exec_id,
+        {
+            "success": False,
+            "error": "Failed to persist awaiting state: persist failed",
+        },
+    )
+    assert call_order == ["restore_pending", "complete", "response"]
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1390,7 @@ async def test_resume_initial_close_gate_uses_state_thread_id():
 
 
 @pytest.mark.asyncio
-async def test_execute_prep_binding_error_finalizes_execution():
+async def test_execute_prep_binding_error_restores_execution_pending():
     exec_id = uuid.uuid4()
     execution = SimpleNamespace(
         id=exec_id,
@@ -1388,6 +1402,7 @@ async def test_execute_prep_binding_error_finalizes_execution():
         close_requested_at=None,
     )
     finalize = AsyncMock(return_value=ExecutionStatus.FAILED)
+    restore_pending = AsyncMock()
     complete = AsyncMock()
 
     @asynccontextmanager
@@ -1405,13 +1420,21 @@ async def test_execute_prep_binding_error_finalizes_execution():
              side_effect=BindingError(RUN_BINDING_AMBIGUOUS, "ambiguous markers"),
          ), \
          patch("app.controllers.orchestrator_controller._finalize", finalize), \
+         patch("app.controllers.orchestrator_controller._restore_execution_pending", restore_pending), \
          patch("app.controllers.orchestrator_controller._complete_run_lifecycle", complete):
         resp = await execute(ExecuteOrchestratorInput(orchestratorGuid=exec_id, prompt="go"))
 
     assert isinstance(resp, JSONResponse)
     assert resp.status_code == 400
-    finalize.assert_awaited_once()
-    assert finalize.await_args.args[1]["success"] is False
+    finalize.assert_not_awaited()
+    restore_pending.assert_awaited_once_with(
+        exec_id,
+        {
+            "success": False,
+            "error": "ambiguous markers",
+            "error_code": RUN_BINDING_AMBIGUOUS,
+        },
+    )
     complete.assert_awaited_once()
 
 
@@ -1475,5 +1498,92 @@ async def test_resume_prep_binding_error_restores_execution_awaiting():
     assert isinstance(resp, JSONResponse)
     assert resp.status_code == 400
     restore_claim.assert_awaited_once()
-    restore_awaiting.assert_awaited_once_with(exec_id)
+    restore_awaiting.assert_awaited_once_with(
+        exec_id,
+        {
+            "success": False,
+            "error": "missing",
+            "error_code": INPUT_WORKSPACE_MISSING,
+        },
+    )
     finalize.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_persist_failure_restores_awaiting_with_diagnostics():
+    state_id = uuid.uuid4()
+    exec_id = uuid.uuid4()
+    execution = SimpleNamespace(
+        id=exec_id,
+        workspace_path="/tmp/ws",
+        config={"mode": "workflow"},
+        source=None,
+        closed_at=None,
+        close_requested_at=None,
+    )
+    state = SimpleNamespace(
+        id=state_id,
+        execution_id=exec_id,
+        state_payload={
+            "request": "prompt",
+            "model": "gpt-4o",
+            "pending_tools": [{"tool_call_id": "call_a"}],
+            "messages": [],
+        },
+        status=LLMStateStatus.AWAITING_RESPONSE,
+        thread_id="t-db",
+        run_id="r-db",
+    )
+    restore_claim = AsyncMock()
+    restore_awaiting = AsyncMock()
+    complete_run = AsyncMock()
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.get_execution", AsyncMock(return_value=execution)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.get_state", AsyncMock(return_value=state)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.recover_stale_pending_claims", AsyncMock(return_value=0)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.try_claim_state_for_resume", AsyncMock(return_value=True)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.update_execution", AsyncMock()), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.try_create_active_run", AsyncMock(return_value=_fake_run())), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.reject_if_close_requested", AsyncMock(return_value=False)), \
+         patch(
+             "app.controllers.orchestrator_controller._managed_hub_process",
+             AsyncMock(
+                 return_value={
+                     "success": True,
+                     "awaits_response": True,
+                     "state": {"request": "prompt", "messages": []},
+                     "pending_tools": [{"tool_call_id": "call_b"}],
+                 }
+             ),
+         ), \
+         patch(
+             "app.controllers.orchestrator_controller._persist_awaiting",
+             AsyncMock(side_effect=RuntimeError("persist failed")),
+         ), \
+         patch("app.controllers.orchestrator_controller._restore_claimed_state_if_needed", restore_claim), \
+         patch("app.controllers.orchestrator_controller._restore_execution_awaiting", restore_awaiting), \
+         patch("app.controllers.orchestrator_controller._complete_run_lifecycle", complete_run):
+        with pytest.raises(HTTPException):
+            await resume(
+                OrchestratorResumeInput(
+                    orchestratorGuid=exec_id,
+                    stateGuid=state_id,
+                    toolCallId="call_a",
+                    result={"answer": "a"},
+                )
+            )
+
+    restore_claim.assert_awaited_once_with(state_id, restore=True)
+    restore_awaiting.assert_awaited_once_with(
+        exec_id,
+        {
+            "success": False,
+            "error": "Failed to persist awaiting state: persist failed",
+        },
+    )
+    complete_run.assert_awaited_once()
