@@ -1,7 +1,7 @@
 # Bound model calls and run segments
 
 - **Date:** 2026-09-02
-- **Branch / PR:** `fix/bounded-run-lifecycle` (jb-ai-orchestrator)
+- **Branch / PR:** `fix/bounded-run-lifecycle`, PR #10 (jb-ai-orchestrator)
 - **What changed:** Model calls now have an absolute wall-clock deadline, while
   the complete model/tool segment has a larger deadline. The optional
   completion-token resource guard is disabled by default. Timeout, output-limit,
