@@ -45,7 +45,7 @@ from app.services.session_close_service import (
     SessionCloseSettings,
 )
 from app.services.tool_hub import ToolExecutionHub
-from tests.test_run_lifecycle_phase3 import ConcurrentLifecycleSession, InMemoryLifecycleStore
+from test_run_lifecycle_phase3 import ConcurrentLifecycleSession, InMemoryLifecycleStore
 
 
 def test_default_run_budgets_leave_cancellation_headroom():
@@ -1117,7 +1117,7 @@ async def test_agui_prep_failure_cleans_provisioned_workspace_without_task_leak(
     from ag_ui.core.types import UserMessage
     from app.controllers.ag_ui_controller import AGUIRunRequest, run_agui_session
     from app.services.binding_contract import BindingError
-    from tests.test_agui_phase3 import _apply_patches, _fake_run, _lifecycle_patches
+    from test_agui_phase3 import _apply_patches, _fake_run, _lifecycle_patches
 
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
