@@ -678,6 +678,10 @@ async def _list_output(args: Dict[str, Any], ctx: LocalToolContext) -> Dict[str,
 # --------------------------------------------------------------------------
 
 _PATH_PROP = {"type": "string", "description": "Workspace-relative path"}
+_OUTPUT_PATH_PROP = {
+    "type": "string",
+    "description": "Path relative to the bound durable output root",
+}
 
 _TOOLS: List[LocalTool] = [
     LocalTool(
@@ -907,7 +911,7 @@ _TOOLS: List[LocalTool] = [
         description="Write UTF-8 text directly to the bound durable output store.",
         parameters={
             "type": "object",
-            "properties": {"path": _PATH_PROP, "content": {"type": "string"}},
+            "properties": {"path": _OUTPUT_PATH_PROP, "content": {"type": "string"}},
             "required": ["path", "content"],
         },
         handler=_write_output,
@@ -922,7 +926,7 @@ _TOOLS: List[LocalTool] = [
         parameters={
             "type": "object",
             "properties": {
-                "path": _PATH_PROP,
+                "path": _OUTPUT_PATH_PROP,
                 "old_string": {"type": "string", "description": "Exact text to find"},
                 "new_string": {"type": "string", "description": "Replacement text"},
                 "replace_all": {
@@ -939,7 +943,7 @@ _TOOLS: List[LocalTool] = [
         description="Read UTF-8 text from the bound durable output store.",
         parameters={
             "type": "object",
-            "properties": {"path": _PATH_PROP},
+            "properties": {"path": _OUTPUT_PATH_PROP},
             "required": ["path"],
         },
         handler=_read_output,
@@ -950,7 +954,7 @@ _TOOLS: List[LocalTool] = [
         parameters={
             "type": "object",
             "properties": {
-                "path": _PATH_PROP,
+                "path": _OUTPUT_PATH_PROP,
                 "nextToken": {"type": "string"},
             },
             "required": [],

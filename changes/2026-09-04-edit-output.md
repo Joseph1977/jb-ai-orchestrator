@@ -31,5 +31,5 @@ not use ETag preconditions.
 
 ## Verification
 
-- Focused output, prompt, and fresh-run tool tests: 42 passed.
-- Full orchestrator suite: 760 passed.
+- Focused output, prompt, and fresh-run tool tests: 45 passed.
+- Full orchestrator suite: 763 passed.

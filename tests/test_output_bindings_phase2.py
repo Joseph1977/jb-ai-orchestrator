@@ -202,6 +202,10 @@ def test_edit_output_replaces_target_and_preserves_other_values(tmp_path):
             {"path": "state.txt", "old_string": "", "new_string": "new"},
             "old_string is required and must be non-empty",
         ),
+        (
+            {"path": "state.txt", "old_string": "original"},
+            "new_string is required",
+        ),
     ],
 )
 def test_edit_output_rejects_invalid_needles_without_changing_file(
@@ -216,6 +220,40 @@ def test_edit_output_rejects_invalid_needles_without_changing_file(
 
     assert error_text in result["error"]
     assert (output / "state.txt").read_text() == "original value"
+
+
+def test_edit_output_allows_empty_new_string_for_deletion(tmp_path):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    run(backend.write_text("state.txt", "keep remove keep"))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+
+    result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.txt", "old_string": "remove ", "new_string": ""},
+            ctx,
+        )
+    )
+
+    assert result["replacements"] == 1
+    assert (output / "state.txt").read_text() == "keep keep"
+
+
+def test_output_tool_schemas_describe_binding_relative_paths():
+    tools = {
+        item["function"]["name"]: item["function"]["parameters"]
+        for item in local_tool_provider.list_litellm_tools(output_bound=True)
+    }
+    for name in (
+        "write_output_local",
+        "edit_output_local",
+        "read_output_local",
+        "list_output_local",
+    ):
+        description = tools[name]["properties"]["path"]["description"]
+        assert "bound durable output root" in description
+        assert "Workspace-relative" not in description
 
 
 def test_edit_output_requires_unique_match_unless_replace_all(tmp_path):

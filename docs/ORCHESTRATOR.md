@@ -700,16 +700,16 @@ Prefixed names below assume the default namespace `local` (e.g. `read_file` → 
 | `read_file` | `read_file_local` | Read text file contents (lazy-load skills/rules). |
 | `write_file` | `write_file_local` | Create or overwrite a file. |
 | `edit_file` | `edit_file_local` | Exact string replacement (`old_string` → `new_string`; use `replace_all` for multi-match). |
-| `write_output` | `write_output_local` | Create or fully replace UTF-8 text in the bound durable output store. |
-| `edit_output` | `edit_output_local` | Exact replacement in an existing durable-output file; rejects an empty or missing needle and ambiguous matches unless `replace_all=true`. |
-| `read_output` | `read_output_local` | Read UTF-8 text from the bound durable output store. |
-| `list_output` | `list_output_local` | List logical paths in the bound durable output store. |
 | `create_file` | `create_file_local` | Create a file; fails if it exists unless `overwrite=true`. |
 | `create_folder` | `create_folder_local` | `mkdir -p` under the workspace. |
 | `glob` | `glob_local` | Find paths matching a glob (e.g. `**/*.py`). |
 | `grep` | `grep_local` | Regex search over file contents (optional `glob` filter, context lines). |
 | `execute` | `execute_local` | Run a shell command with `cwd` = workspace (see shell notes). |
 | `write_todos` | `write_todos_local` | Replace structured todo list (persists `.agent/todos.json`). |
+| `write_output` | `write_output_local` | Create or fully replace UTF-8 text in the bound durable output store. |
+| `edit_output` | `edit_output_local` | Exact replacement in an existing durable-output file; rejects an empty or missing needle and ambiguous matches unless `replace_all=true`. |
+| `read_output` | `read_output_local` | Read UTF-8 text from the bound durable output store. |
+| `list_output` | `list_output_local` | List logical paths in the bound durable output store. |
 | `task` | `task_local` | Spawn an isolated subagent; returns a summary (see §7). |
 | `git_status` | `git_status_local` | `git status --porcelain`. |
 | `git_diff` | `git_diff_local` | `git diff` (optional staged / path). |
