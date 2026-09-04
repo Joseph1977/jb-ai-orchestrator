@@ -230,8 +230,8 @@ step.
   `list_files`, `read_file` (text plus images and PDFs), `write_file`,
   `edit_file`, `create_file`, `create_folder`, `glob`, `grep`, `execute`,
   `write_todos`, `task` for subagents, git helpers and `ask_user`. Binding
-  durable output adds `write_output_local`, `read_output_local` and
-  `list_output_local`.
+  durable output adds `write_output_local`, `edit_output_local`,
+  `read_output_local` and `list_output_local`.
 - **Context management** — token streaming, oversized tool results offloaded to
   disk and referenced by handle, LLM summarization of older turns, and tool
   message compaction on a character or token budget.
@@ -665,7 +665,9 @@ are `shared_folder` and `azure_blob`.
 
 With `OUTPUT_BINDINGS_ENABLED=true`, callers may bind `shared_folder` or
 `azure_blob` output, and the model gains `write_output_local`,
-`read_output_local` and `list_output_local`. For Azure,
+`edit_output_local`, `read_output_local` and `list_output_local`. Targeted
+edits use exact string replacement and fail on missing or ambiguous text rather
+than silently rewriting the file. For Azure,
 `credentials.outputAccessToken` is a SAS supplied fresh with each execute or
 resume; it must stay valid for that segment and is never persisted.
 

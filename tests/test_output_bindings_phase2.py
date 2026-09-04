@@ -151,6 +151,214 @@ def test_working_copy_and_output_can_both_write(tmp_path):
     assert (output / "durable.txt").read_text() == "output"
 
 
+def test_edit_output_replaces_target_and_preserves_other_values(tmp_path):
+    output = tmp_path / "output"
+    ctx = LocalToolContext(
+        workspace_path=str(tmp_path),
+        output_backend=SharedFolderBackend(str(output)),
+    )
+    original = '{"first":"one","second":"two","third":"three"}'
+    run(
+        local_tool_provider.execute(
+            "write_output_local",
+            {"path": "state.json", "content": original},
+            ctx,
+        )
+    )
+
+    first = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.json", "old_string": '"two"', "new_string": '"updated"'},
+            ctx,
+        )
+    )
+    second = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.json", "old_string": '"three"', "new_string": '"final"'},
+            ctx,
+        )
+    )
+
+    assert first["replacements"] == 1
+    assert second["replacements"] == 1
+    assert first["durable"] is True
+    assert json.loads((output / "state.json").read_text()) == {
+        "first": "one",
+        "second": "updated",
+        "third": "final",
+    }
+
+
+@pytest.mark.parametrize(
+    ("args", "error_text"),
+    [
+        (
+            {"path": "state.txt", "old_string": "missing", "new_string": "new"},
+            "old_string not found",
+        ),
+        (
+            {"path": "state.txt", "old_string": "", "new_string": "new"},
+            "old_string is required and must be non-empty",
+        ),
+        (
+            {"path": "state.txt", "old_string": "original"},
+            "new_string is required",
+        ),
+    ],
+)
+def test_edit_output_rejects_invalid_needles_without_changing_file(
+    tmp_path, args, error_text
+):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    run(backend.write_text("state.txt", "original value"))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+
+    result = run(local_tool_provider.execute("edit_output_local", args, ctx))
+
+    assert error_text in result["error"]
+    assert (output / "state.txt").read_text() == "original value"
+
+
+def test_edit_output_allows_empty_new_string_for_deletion(tmp_path):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    run(backend.write_text("state.txt", "keep remove keep"))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+
+    result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.txt", "old_string": "remove ", "new_string": ""},
+            ctx,
+        )
+    )
+
+    assert result["replacements"] == 1
+    assert (output / "state.txt").read_text() == "keep keep"
+
+
+def test_output_tool_schemas_describe_binding_relative_paths():
+    tools = {
+        item["function"]["name"]: item["function"]["parameters"]
+        for item in local_tool_provider.list_litellm_tools(output_bound=True)
+    }
+    for name in (
+        "write_output_local",
+        "edit_output_local",
+        "read_output_local",
+        "list_output_local",
+    ):
+        description = tools[name]["properties"]["path"]["description"]
+        assert "bound durable output root" in description
+        assert "Workspace-relative" not in description
+
+
+def test_edit_output_requires_unique_match_unless_replace_all(tmp_path):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    run(backend.write_text("state.txt", "same and same"))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+    args = {"path": "state.txt", "old_string": "same", "new_string": "new"}
+
+    ambiguous = run(local_tool_provider.execute("edit_output_local", args, ctx))
+    assert "matched 2 times" in ambiguous["error"]
+    assert (output / "state.txt").read_text() == "same and same"
+
+    replaced = run(
+        local_tool_provider.execute(
+            "edit_output_local", {**args, "replace_all": True}, ctx
+        )
+    )
+    assert replaced["replacements"] == 2
+    assert (output / "state.txt").read_text() == "new and new"
+
+
+def test_edit_output_missing_file_and_unbound_output(tmp_path):
+    bound = LocalToolContext(
+        workspace_path=str(tmp_path),
+        output_backend=SharedFolderBackend(str(tmp_path / "output")),
+    )
+    missing = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "missing.txt", "old_string": "old", "new_string": "new"},
+            bound,
+        )
+    )
+    assert missing["errorCode"] == "STORAGE_NOT_FOUND"
+    assert not (tmp_path / "output" / "missing.txt").exists()
+
+    unbound = LocalToolContext(workspace_path=str(tmp_path), mode="workflow")
+    result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.txt", "old_string": "old", "new_string": "new"},
+            unbound,
+        )
+    )
+    names = {
+        item["function"]["name"]
+        for item in local_tool_provider.list_litellm_tools(
+            mode="workflow", output_bound=False
+        )
+    }
+    assert result["error"] == "No durable output store is bound"
+    assert "edit_output_local" not in names
+
+
+@pytest.mark.parametrize("path", ["../escape", "/absolute", ".agent/todos.json"])
+def test_edit_output_paths_are_confined(tmp_path, path):
+    ctx = LocalToolContext(
+        workspace_path=str(tmp_path),
+        output_backend=SharedFolderBackend(str(tmp_path / "output")),
+    )
+    result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": path, "old_string": "old", "new_string": "new"},
+            ctx,
+        )
+    )
+    assert result["errorCode"] == "STORAGE_PATH_INVALID"
+
+
+def test_edit_output_enforces_read_and_write_limits_without_changing_file(
+    monkeypatch, tmp_path
+):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+    monkeypatch.setattr(Config, "OUTPUT_READ_MAX_BYTES", 100)
+    monkeypatch.setattr(Config, "OUTPUT_WRITE_MAX_BYTES", 100)
+    run(backend.write_text("state.txt", "old"))
+
+    monkeypatch.setattr(Config, "OUTPUT_WRITE_MAX_BYTES", 2)
+    write_result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.txt", "old_string": "old", "new_string": "larger"},
+            ctx,
+        )
+    )
+    assert write_result["errorCode"] == "STORAGE_LIMIT_EXCEEDED"
+    assert (output / "state.txt").read_text() == "old"
+
+    monkeypatch.setattr(Config, "OUTPUT_WRITE_MAX_BYTES", 100)
+    monkeypatch.setattr(Config, "OUTPUT_READ_MAX_BYTES", 2)
+    read_result = run(
+        local_tool_provider.execute(
+            "edit_output_local",
+            {"path": "state.txt", "old_string": "old", "new_string": "new"},
+            ctx,
+        )
+    )
+    assert read_result["errorCode"] == "STORAGE_LIMIT_EXCEEDED"
+    assert (output / "state.txt").read_text() == "old"
+
+
 def test_partitioned_list_and_dual_read(tmp_path):
     (tmp_path / "same.txt").write_text("input")
     output = tmp_path / "durable"
@@ -287,6 +495,31 @@ def test_write_output_log_omits_content(caplog, tmp_path):
     assert "contentChars" in caplog.text
 
 
+def test_edit_output_log_omits_old_and_new_strings(caplog, tmp_path):
+    output = tmp_path / "output"
+    backend = SharedFolderBackend(str(output))
+    run(backend.write_text("state.txt", "private-old-value"))
+    ctx = LocalToolContext(workspace_path=str(tmp_path), output_backend=backend)
+
+    with caplog.at_level("INFO"):
+        run(
+            local_tool_provider.execute(
+                "edit_output_local",
+                {
+                    "path": "state.txt",
+                    "old_string": "private-old-value",
+                    "new_string": "private-new-value",
+                },
+                ctx,
+            )
+        )
+
+    assert "private-old-value" not in caplog.text
+    assert "private-new-value" not in caplog.text
+    assert "oldStringChars" in caplog.text
+    assert "newStringChars" in caplog.text
+
+
 def test_binding_prompt_contains_no_physical_location_or_token(monkeypatch):
     monkeypatch.setattr(Config, "OUTPUT_BINDINGS_ENABLED", True)
     prompt = binding_system_prompt(
@@ -302,4 +535,5 @@ def test_binding_prompt_contains_no_physical_location_or_token(monkeypatch):
     assert "azure_blob" in prompt
     assert "projects" in prompt
     assert "write_output_local" in prompt
+    assert "edit_output_local" in prompt
     assert "secret.blob" not in prompt
