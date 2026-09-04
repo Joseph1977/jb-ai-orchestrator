@@ -6,10 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Optional
 
 from sqlalchemy import select, update
@@ -39,9 +40,21 @@ from app.utils.logger import logger
 SESSION_CLOSED_ERROR = "session_closed"
 _POLL_INTERVAL_SEC = 0.25
 
+CANCEL_REASON_CLOSE = "close_requested"
+CANCEL_REASON_SEGMENT_DEADLINE = "segment_deadline"
+CANCEL_REASON_HEARTBEAT_FAILURE = "heartbeat_failure"
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@dataclass
+class RunCancelHandle:
+    """Cancellation signal shared between manage_run and segment workers."""
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -49,6 +62,8 @@ class SessionCloseSettings:
     heartbeat_interval_sec: int
     heartbeat_stale_sec: int
     close_wait_timeout_sec: int
+    segment_deadline_sec: int
+    cancellation_warn_sec: int
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,8 @@ def resolve_session_close_settings() -> SessionCloseSettings:
     raw_interval = getattr(Config, "RUN_HEARTBEAT_INTERVAL_SEC", 5)
     raw_stale = getattr(Config, "RUN_HEARTBEAT_STALE_SEC", 300)
     raw_close_wait = getattr(Config, "CLOSE_WAIT_TIMEOUT_SEC", 10)
+    raw_segment_deadline = getattr(Config, "RUN_SEGMENT_DEADLINE_SEC", 270)
+    raw_cancel_warn = getattr(Config, "RUN_CANCELLATION_WARN_SEC", 5)
     try:
         interval = int(raw_interval)
     except (TypeError, ValueError):
@@ -81,13 +98,25 @@ def resolve_session_close_settings() -> SessionCloseSettings:
         close_wait = int(raw_close_wait)
     except (TypeError, ValueError):
         close_wait = 10
+    try:
+        segment_deadline = int(raw_segment_deadline)
+    except (TypeError, ValueError):
+        segment_deadline = 270
+    try:
+        cancel_warn = int(raw_cancel_warn)
+    except (TypeError, ValueError):
+        cancel_warn = 5
     interval = max(1, interval)
     stale = max(interval + 1, stale)
     close_wait = max(1, close_wait)
+    segment_deadline = max(1, segment_deadline)
+    cancel_warn = max(1, cancel_warn)
     return SessionCloseSettings(
         heartbeat_interval_sec=interval,
         heartbeat_stale_sec=stale,
         close_wait_timeout_sec=close_wait,
+        segment_deadline_sec=segment_deadline,
+        cancellation_warn_sec=cancel_warn,
     )
 
 
@@ -130,14 +159,14 @@ class SessionCloseService:
         task: asyncio.Task,
         thread_id: Optional[str] = None,
         thread_key: Optional[str] = None,
-    ) -> AsyncIterator[asyncio.Event]:
-        cancel_event = asyncio.Event()
+    ) -> AsyncIterator[RunCancelHandle]:
+        cancel_handle = RunCancelHandle()
         key = thread_key or (thread_key_for(thread_id) if thread_id else None)
         await self._registry.register(
             run_pk=run_pk,
             execution_id=execution_id,
             task=task,
-            cancel_event=cancel_event,
+            cancel_event=cancel_handle.event,
             thread_key=key,
         )
         heartbeat_task = asyncio.create_task(
@@ -145,20 +174,144 @@ class SessionCloseService:
                 run_pk=run_pk,
                 execution_id=execution_id,
                 task=task,
-                cancel_event=cancel_event,
+                cancel_handle=cancel_handle,
                 thread_id=thread_id,
                 thread_key=key,
             )
         )
+        segment_watchdog = asyncio.create_task(
+            self._segment_deadline_watchdog(
+                cancel_handle=cancel_handle,
+                task=task,
+                deadline_sec=self._settings.segment_deadline_sec,
+                run_pk=run_pk,
+                execution_id=execution_id,
+            )
+        )
+        cancellation_warning_task = asyncio.create_task(
+            self._cancellation_warning_loop(
+                cancel_handle=cancel_handle,
+                task=task,
+                run_pk=run_pk,
+                execution_id=execution_id,
+            )
+        )
         try:
-            yield cancel_event
+            yield cancel_handle
         finally:
-            heartbeat_task.cancel()
+            segment_watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await segment_watchdog
+            if not task.done() and not cancel_handle.event.is_set():
+                cancel_handle.reason = cancel_handle.reason or "unknown"
+                cancel_handle.event.set()
             try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-            await self._registry.unregister(run_pk)
+                await self._await_worker_with_diagnostics(
+                    task,
+                    run_pk=run_pk,
+                    execution_id=execution_id,
+                )
+            finally:
+                # The liveness signal must outlive the work it describes. A
+                # cancellation-resistant worker therefore keeps its claim fresh
+                # until it has actually stopped.
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
+                cancellation_warning_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cancellation_warning_task
+                await self._registry.unregister(run_pk)
+
+    async def _segment_deadline_watchdog(
+        self,
+        *,
+        cancel_handle: RunCancelHandle,
+        task: asyncio.Task,
+        deadline_sec: int,
+        run_pk: uuid.UUID,
+        execution_id: uuid.UUID,
+    ) -> None:
+        await asyncio.sleep(deadline_sec)
+        if task.done():
+            return
+        cancel_handle.reason = CANCEL_REASON_SEGMENT_DEADLINE
+        cancel_handle.event.set()
+        task.cancel()
+
+    async def _cancellation_warning_loop(
+        self,
+        *,
+        cancel_handle: RunCancelHandle,
+        task: asyncio.Task,
+        run_pk: uuid.UUID,
+        execution_id: uuid.UUID,
+    ) -> None:
+        await cancel_handle.event.wait()
+        await self._warn_if_cancellation_slow(
+            task,
+            run_pk=run_pk,
+            execution_id=execution_id,
+            cancel_reason=cancel_handle.reason or "unknown",
+        )
+
+    async def _warn_if_cancellation_slow(
+        self,
+        task: asyncio.Task,
+        *,
+        run_pk: uuid.UUID,
+        execution_id: uuid.UUID,
+        cancel_reason: str,
+    ) -> None:
+        interval = self._settings.cancellation_warn_sec
+        elapsed = 0
+        while True:
+            await asyncio.sleep(interval)
+            if task.done():
+                return
+            elapsed += interval
+            logger.error(
+                "Worker cancellation remains incomplete: "
+                "run_pk=%s execution_id=%s cancel_reason=%s elapsed_sec=%s",
+                run_pk,
+                execution_id,
+                cancel_reason,
+                elapsed,
+                extra={
+                    "run_pk": str(run_pk),
+                    "execution_id": str(execution_id),
+                    "cancel_reason": cancel_reason,
+                    "elapsed_sec": elapsed,
+                    "event": "worker_cancellation_slow",
+                },
+            )
+
+    async def _await_worker_with_diagnostics(
+        self,
+        task: asyncio.Task,
+        *,
+        run_pk: uuid.UUID,
+        execution_id: uuid.UUID,
+    ) -> None:
+        was_done = task.done()
+        if not was_done:
+            task.cancel()
+        outer_cancel: Optional[asyncio.CancelledError] = None
+        try:
+            await task
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                outer_cancel = exc
+        except Exception:
+            if not was_done:
+                logger.exception(
+                    "Worker task raised after cancellation for run_pk=%s execution_id=%s",
+                    run_pk,
+                    execution_id,
+                )
+        if outer_cancel is not None:
+            raise outer_cancel
 
     async def start_heartbeat(
         self,
@@ -171,12 +324,13 @@ class SessionCloseService:
         thread_key: Optional[str] = None,
     ) -> asyncio.Task:
         key = thread_key or (thread_key_for(thread_id) if thread_id else None)
+        cancel_handle = RunCancelHandle(event=cancel_event)
         return asyncio.create_task(
             self._heartbeat_loop(
                 run_pk=run_pk,
                 execution_id=execution_id,
                 task=task,
-                cancel_event=cancel_event,
+                cancel_handle=cancel_handle,
                 thread_id=thread_id,
                 thread_key=key,
             )
@@ -188,13 +342,13 @@ class SessionCloseService:
         run_pk: uuid.UUID,
         execution_id: uuid.UUID,
         task: asyncio.Task,
-        cancel_event: asyncio.Event,
+        cancel_handle: RunCancelHandle,
         thread_id: Optional[str],
         thread_key: Optional[str],
     ) -> None:
         interval = self._settings.heartbeat_interval_sec
-        try:
-            while not task.done():
+        while not task.done():
+            try:
                 should_cancel = False
                 async with get_session() as session:
                     if await self._lifecycle.is_execution_close_requested(
@@ -208,21 +362,26 @@ class SessionCloseService:
                             thread_key=thread_key,
                         ):
                             should_cancel = True
-                    if should_cancel:
-                        cancel_event.set()
-                        if not task.done():
-                            task.cancel()
-                        break
                     await self._lifecycle.heartbeat_run(session, run_pk)
+            except Exception:
+                logger.exception(
+                    "Heartbeat attempt failed for run_pk=%s execution_id=%s",
+                    run_pk,
+                    execution_id,
+                )
+                if cancel_handle.reason is None:
+                    cancel_handle.reason = CANCEL_REASON_HEARTBEAT_FAILURE
+                    cancel_handle.event.set()
+                    if not task.done():
+                        task.cancel()
                 await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception(
-                "Heartbeat loop failed for run_pk=%s execution_id=%s",
-                run_pk,
-                execution_id,
-            )
+                continue
+            if should_cancel and cancel_handle.reason is None:
+                cancel_handle.reason = CANCEL_REASON_CLOSE
+                cancel_handle.event.set()
+                if not task.done():
+                    task.cancel()
+            await asyncio.sleep(interval)
 
     async def _close_execution_scope(self, execution_id: uuid.UUID) -> CloseResult:
         async with get_session() as session:
@@ -673,6 +832,9 @@ class SessionCloseService:
         execution_id: Optional[uuid.UUID] = None,
         thread_key: Optional[str] = None,
     ) -> int:
+        cutoff = _utcnow() - timedelta(
+            seconds=self._settings.heartbeat_stale_sec
+        )
         stale_runs = await self._lifecycle.list_stale_runs(
             session,
             stale_sec=self._settings.heartbeat_stale_sec,
@@ -689,6 +851,7 @@ class SessionCloseService:
                 run.id,
                 status=RUN_STATUS_FAILED,
                 preserve_completed_execution=True,
+                heartbeat_before=cutoff,
             ):
                 failed_exec_ids.add(run.execution_id)
                 count += 1

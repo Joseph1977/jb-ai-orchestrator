@@ -22,6 +22,9 @@ from app.models.execution_models import (
 from app.services.run_lifecycle import thread_key_for
 
 
+_UNSET = object()
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -64,8 +67,8 @@ class ExecutionStateService:
         execution_id: uuid.UUID,
         *,
         status: Optional[ExecutionStatus] = None,
-        result: Optional[dict[str, Any]] = None,
-        error_message: Optional[str] = None,
+        result: Optional[dict[str, Any]] | object = _UNSET,
+        error_message: Optional[str] | object = _UNSET,
         source: Optional[str] = None,
         workspace_path: Optional[str] = None,
         orchestration_type: Optional[str] = None,
@@ -76,9 +79,11 @@ class ExecutionStateService:
             values["status"] = status
             if status in (ExecutionStatus.COMPLETED, ExecutionStatus.FAILED):
                 values["completed_at"] = datetime.now(timezone.utc)
-        if result is not None:
+            else:
+                values["completed_at"] = None
+        if result is not _UNSET:
             values["result"] = result
-        if error_message is not None:
+        if error_message is not _UNSET:
             values["error_message"] = error_message
         if source is not None:
             values["source"] = source

@@ -111,6 +111,10 @@ class Config:
     LITELLM_API_KEY = os.getenv('LITELLM_API_KEY', 'sk-1234')
     LITELLM_REQUEST_TIMEOUT_IN_SEC = int(os.getenv('LITELLM_REQUEST_TIMEOUT_IN_SEC', 300))
     LITELLM_DROP_PARAMS = os.getenv('LITELLM_DROP_PARAMS', 'True')
+    # Absolute wall-clock budget for one LiteLLM call (streaming or not).
+    LITELLM_MODEL_DEADLINE_SEC = int(os.getenv('LITELLM_MODEL_DEADLINE_SEC', '240'))
+    # Optional operator resource guard forwarded to LiteLLM (0 disables).
+    LITELLM_MAX_COMPLETION_TOKENS = int(os.getenv('LITELLM_MAX_COMPLETION_TOKENS', '0'))
 
     # Database Configuration
     DATABASE_URL = os.getenv('DATABASE_URL')
@@ -133,6 +137,10 @@ class Config:
     RUN_HEARTBEAT_STALE_SEC = int(os.getenv('RUN_HEARTBEAT_STALE_SEC', '300'))
     # Phase 3: wait/poll budget before returning closing when runs remain active.
     CLOSE_WAIT_TIMEOUT_SEC = int(os.getenv('CLOSE_WAIT_TIMEOUT_SEC', '10'))
+    # Hard wall-clock budget for one executable segment (tool loop + model calls).
+    RUN_SEGMENT_DEADLINE_SEC = int(os.getenv('RUN_SEGMENT_DEADLINE_SEC', '270'))
+    # Log a structured warning when worker cancellation exceeds this threshold.
+    RUN_CANCELLATION_WARN_SEC = int(os.getenv('RUN_CANCELLATION_WARN_SEC', '5'))
 
     # Orchestrator / Workspace Configuration
     # Root directory under which each orchestration run gets an isolated
@@ -241,6 +249,17 @@ class Config:
         """Validate required configuration values"""
         # Parse MCP servers first
         cls._parse_mcp_servers()
+
+        if cls.LITELLM_MODEL_DEADLINE_SEC <= 0:
+            raise ValueError("LITELLM_MODEL_DEADLINE_SEC must be greater than zero")
+        if cls.RUN_SEGMENT_DEADLINE_SEC <= cls.LITELLM_MODEL_DEADLINE_SEC:
+            raise ValueError(
+                "RUN_SEGMENT_DEADLINE_SEC must exceed LITELLM_MODEL_DEADLINE_SEC"
+            )
+        if cls.LITELLM_MAX_COMPLETION_TOKENS < 0:
+            raise ValueError("LITELLM_MAX_COMPLETION_TOKENS must not be negative")
+        if cls.RUN_CANCELLATION_WARN_SEC <= 0:
+            raise ValueError("RUN_CANCELLATION_WARN_SEC must be greater than zero")
 
         required_configs = ['DATABASE_URL']
         missing_configs = []

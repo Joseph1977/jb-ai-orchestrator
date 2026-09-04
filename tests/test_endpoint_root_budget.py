@@ -205,6 +205,9 @@ async def run_execute(finalized, run_statuses, *, prompt_error=None):
         finalized.append(result)
         return ExecutionStatus.FAILED
 
+    async def _restore_pending(execution_id, result):
+        finalized.append(result)
+
     async def _complete(run_pk, execution_id, *, run_status):
         run_statuses.append(run_status)
 
@@ -229,6 +232,7 @@ async def run_execute(finalized, run_statuses, *, prompt_error=None):
          patch(f"{CONTROLLER}._local_context", MagicMock(return_value=MagicMock())), \
          patch(f"{CONTROLLER}.get_tool_hub", return_value=hub), \
          patch(f"{CONTROLLER}._finalize", _finalize), \
+         patch(f"{CONTROLLER}._restore_execution_pending", _restore_pending), \
          patch(f"{CONTROLLER}._complete_run_lifecycle", _complete):
         response = await execute(
             ExecuteOrchestratorInput(orchestratorGuid=exec_id, prompt="do it")
@@ -261,7 +265,7 @@ async def test_execute_distinguishes_unreadable_from_oversized():
 
 
 @pytest.mark.asyncio
-async def test_execute_root_budget_failure_finalizes_the_execution():
+async def test_execute_root_budget_failure_restores_pending_with_diagnostics():
     finalized: list[dict] = []
     run_statuses: list[str] = []
 

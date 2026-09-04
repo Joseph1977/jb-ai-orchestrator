@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Config
 from app.models.bindings import SESSION_CLOSED, SESSION_CLOSING
 from app.models.execution_models import Execution, ExecutionRun, ExecutionStatus, ThreadSession
 
@@ -361,6 +362,23 @@ class RunLifecycleService:
                 close_requested_at=locked_thread.close_requested_at,
             )
 
+        stale_sec = getattr(
+            Config, "RUN_HEARTBEAT_STALE_SEC", DEFAULT_HEARTBEAT_STALE_SEC
+        )
+        await self.mark_stale_runs_failed(
+            session,
+            stale_sec=stale_sec,
+            execution_id=execution_id,
+            preserve_completed_execution=True,
+        )
+        if thread_key:
+            await self.mark_stale_runs_failed(
+                session,
+                stale_sec=stale_sec,
+                thread_key=thread_key,
+                preserve_completed_execution=True,
+            )
+
         if await self._has_conflicting_active_run(
             session,
             execution_id=execution_id,
@@ -410,16 +428,22 @@ class RunLifecycleService:
         status: str = RUN_STATUS_COMPLETED,
         preserve_completed_execution: bool = True,
         update_execution_status: bool = True,
+        heartbeat_before: Optional[datetime] = None,
     ) -> bool:
         """Finish a run; optionally update parent execution or record run-only."""
         now = _utcnow()
-        result = await session.execute(
+        finish_query = (
             update(ExecutionRun)
             .where(ExecutionRun.id == run_pk)
             .where(ExecutionRun.finished_at.is_(None))
             .values(status=status, finished_at=now)
             .returning(ExecutionRun.execution_id)
         )
+        if heartbeat_before is not None:
+            finish_query = finish_query.where(
+                ExecutionRun.heartbeat_at < heartbeat_before
+            )
+        result = await session.execute(finish_query)
         execution_id = result.scalar_one_or_none()
         if execution_id is None:
             return False
@@ -514,6 +538,7 @@ class RunLifecycleService:
         preserve_completed_execution: bool = True,
     ) -> int:
         """Fail stale active/closing runs without downgrading completed executions."""
+        cutoff = _utcnow() - timedelta(seconds=stale_sec)
         stale_runs = await self.list_stale_runs(
             session,
             stale_sec=stale_sec,
@@ -527,6 +552,7 @@ class RunLifecycleService:
                 run.id,
                 status=RUN_STATUS_FAILED,
                 preserve_completed_execution=preserve_completed_execution,
+                heartbeat_before=cutoff,
             ):
                 count += 1
         return count
