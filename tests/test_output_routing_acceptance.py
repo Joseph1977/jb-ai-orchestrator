@@ -97,6 +97,7 @@ def test_same_logical_path_keeps_input_and_output_separate(tmp_path):
     assert json.loads((output_root / "state.json").read_text()) == {"source": "output"}
     assert "write_file_local" not in tool_names(ctx)
     assert "write_output_local" in tool_names(ctx)
+    assert "edit_output_local" in tool_names(ctx)
 
 
 def test_distinct_output_bindings_do_not_cross_write(tmp_path):
@@ -154,6 +155,7 @@ def test_unbound_workflow_cannot_create_input_or_output_files(tmp_path):
     assert output_result["error"] == "No durable output store is bound"
     assert input_result["errorCode"] == "INPUT_WRITE_FORBIDDEN"
     assert "write_output_local" not in tool_names(ctx)
+    assert "edit_output_local" not in tool_names(ctx)
     assert "write_file_local" not in tool_names(ctx)
     assert not (input_root / "state.json").exists()
 
@@ -183,7 +185,8 @@ def test_binding_prompt_is_explicit_and_secret_free(tmp_path):
         "The bound output store is the sole destination for every durable write"
         in normalized_prompt
     )
-    assert "Always use write_output_local to persist them" in normalized_prompt
+    assert "write_output_local to create or fully replace them" in normalized_prompt
+    assert "prefer edit_output_local for an exact targeted replacement" in normalized_prompt
     assert "The output backend already applies that prefix" in normalized_prompt
     assert "do not prepend the prefix or a physical URI" in normalized_prompt
     assert "Logical prefix: tenant-a" in prompt
