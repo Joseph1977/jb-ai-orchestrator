@@ -15,6 +15,8 @@ output binding, and redacts replacement text from logs.
 
 The output-binding prompt and public documentation now distinguish full writes
 from targeted edits and document the read-modify-write concurrency behavior.
+The existing write, read, and list output tools now also describe their paths
+as relative to the bound output root rather than to the input workspace.
 
 ## Why
 
