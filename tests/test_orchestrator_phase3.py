@@ -1484,6 +1484,8 @@ async def test_execute_failure_returns_pending_after_claim_finalization(error_co
         call_order.append("response")
 
     body = json.loads(response.body)
+    assert response.status_code == 200
+    assert body["success"] is False
     assert body["executionStatus"] == ExecutionStatus.PENDING
     assert body["errorCode"] == error_code
     restore_pending.assert_awaited_once_with(exec_id, failure)
