@@ -400,8 +400,8 @@ can poll without replaying the run.
 
 A failed `initiate`, `execute` or `resume` may carry a stable `errorCode`
 alongside the human-readable `error`. Provider failures use `QUOTA`,
-`RATE_LIMIT`, `AUTH` or `UNAVAILABLE`; raw provider response bodies are never
-returned.
+`RATE_LIMIT`, `AUTH` or `UNAVAILABLE`; a segment that exhausts its tool budget
+uses `MAX_TOOL_CALLS`. Raw provider response bodies are never returned.
 
 Two codes describe a workspace whose root instructions (`AGENTS.md` /
 `CLAUDE.md`) cannot be loaded. They are separate because they need different

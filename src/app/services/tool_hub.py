@@ -688,6 +688,7 @@ class ToolExecutionHub:
                         max_result = {
                             "success": False,
                             "error": f"Maximum tool calls ({max_calls}) reached",
+                            "error_code": "MAX_TOOL_CALLS",
                             **result_counter_fields(
                                 segment_tool_call_count, total_tool_call_count
                             ),
@@ -790,6 +791,7 @@ class ToolExecutionHub:
             max_result = {
                 "success": False,
                 "error": f"Maximum tool calls ({max_calls}) reached",
+                "error_code": "MAX_TOOL_CALLS",
                 **result_counter_fields(segment_tool_call_count, total_tool_call_count),
                 "partial_response": messages[-1].get("content", "") if messages else "",
                 "total_tokens": total_tokens,

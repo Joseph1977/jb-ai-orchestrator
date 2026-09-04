@@ -281,8 +281,9 @@ Returns either a completed result, or when input is required:
 ```
 
 Failed execute/resume results may include a stable `errorCode`. Provider
-failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
-response bodies are never returned.
+failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; exhausting the
+segment tool budget returns `MAX_TOOL_CALLS`. Raw provider response bodies are
+never returned.
 
 Root instruction failures carry two distinct codes, because they send an
 operator to different fixes. `ROOT_INSTRUCTIONS_TOO_LARGE` means the file loaded
@@ -1108,9 +1109,10 @@ connection remain open until that worker returns. The service emits
 this condition persists; operators must investigate the blocked work rather
 than release its claim by elapsed time.
 Model and segment expiry return `TIMEOUT`; truncated model output returns
-`OUTPUT_LIMIT`. Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than
-being mislabeled as a timeout. These codes describe and safely report the
-attempt; they never decide whether a session is terminal.
+`OUTPUT_LIMIT`; exhausting the segment tool budget returns `MAX_TOOL_CALLS`.
+Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than being mislabeled as
+a timeout. These codes describe and safely report the attempt; they never decide
+whether a session is terminal.
 
 #### Claim, state, and retry contract
 

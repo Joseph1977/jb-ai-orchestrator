@@ -268,9 +268,45 @@ def test_single_segment_exceeding_cap_fails(monkeypatch):
             include_agui_tools=False,
         )
         assert res["success"] is False
+        assert res["error_code"] == "MAX_TOOL_CALLS"
         assert "Maximum tool calls" in res["error"]
         assert res["segment_tool_calls_made"] == 2
         assert res["tool_calls_made"] == 2
+        assert len(fake.mcp_executed) == 2
+
+    asyncio.run(run())
+
+
+def test_single_segment_reaching_cap_at_loop_exit_has_structured_error(monkeypatch):
+    monkeypatch.setattr(Config, "MAX_TOOL_CALLS", 2)
+
+    async def run():
+        mcp = [
+            MCPTool(
+                name="sync_tool",
+                description="sync",
+                input_schema={},
+                server_url="http://x",
+                server_name="srv",
+                original_name="sync_tool",
+            )
+        ]
+        fake = FakeMCPService(
+            [
+                _llm_tool_calls([
+                    ("sync_tool", {}, "a"),
+                    ("sync_tool", {}, "b"),
+                ]),
+            ],
+            mcp_tools=mcp,
+        )
+        res = await _hub(fake).process_request(
+            request="go",
+            include_agui_tools=False,
+        )
+        assert res["success"] is False
+        assert res["error_code"] == "MAX_TOOL_CALLS"
+        assert res["segment_tool_calls_made"] == 2
         assert len(fake.mcp_executed) == 2
 
     asyncio.run(run())

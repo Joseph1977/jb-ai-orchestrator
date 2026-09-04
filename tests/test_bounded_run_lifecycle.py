@@ -223,6 +223,11 @@ async def test_done_sentinel_without_finish_reason_defaults_to_stop():
             "question remain available; try again.",
         ),
         (
+            "MAX_TOOL_CALLS",
+            "MAX_TOOL_CALLS: The workflow run stopped at its tool-call limit. The "
+            "session remains available; try again.",
+        ),
+        (
             "RUN_LIFECYCLE_FAILED",
             "RUN_LIFECYCLE_FAILED: Workflow run tracking failed. The session remains "
             "available; try again.",

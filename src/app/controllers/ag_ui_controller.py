@@ -106,6 +106,10 @@ _PUBLIC_RUN_FAILURES = {
         "The model reply was cut off. The session and any pending question remain "
         "available; try again."
     ),
+    "MAX_TOOL_CALLS": (
+        "The workflow run stopped at its tool-call limit. The session remains "
+        "available; try again."
+    ),
     "RUN_LIFECYCLE_FAILED": (
         "Workflow run tracking failed. The session remains available; try again."
     ),
