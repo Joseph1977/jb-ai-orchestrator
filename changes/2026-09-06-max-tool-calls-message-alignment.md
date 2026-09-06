@@ -1,7 +1,7 @@
 # Align the recoverable tool-limit message
 
 **Date:** 2026-09-06
-**Branch / PR:** `fix/max-tool-calls-message-alignment` / pending
+**Branch / PR:** `fix/max-tool-calls-message-alignment` / PR #14
 **Target:** `on-going-dev`
 
 ## What changed
