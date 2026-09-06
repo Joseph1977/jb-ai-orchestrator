@@ -224,8 +224,8 @@ async def test_done_sentinel_without_finish_reason_defaults_to_stop():
         ),
         (
             "MAX_TOOL_CALLS",
-            "MAX_TOOL_CALLS: The workflow run stopped at its tool-call limit. The "
-            "session remains available; try again.",
+            "MAX_TOOL_CALLS: The workflow run stopped after reaching its tool limit. "
+            "The session and any pending question remain available; try again.",
         ),
         (
             "RUN_LIFECYCLE_FAILED",
@@ -246,6 +246,18 @@ def test_agui_run_failures_use_structured_public_messages(error_code, expected):
         )
         == expected
     )
+
+
+def test_tool_limit_message_promises_pending_question_recovery():
+    message = _run_failure_message(
+        {
+            "success": False,
+            "error_code": "MAX_TOOL_CALLS",
+            "error": "private upstream detail",
+        }
+    )
+
+    assert "pending question remain available" in message
 
 
 @pytest.mark.asyncio
