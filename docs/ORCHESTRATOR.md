@@ -304,9 +304,29 @@ Continue a run that awaited input. Works from **any** instance.
   "stateGuid": "…uuid…",
   "toolCallId": "call_abc",
   "result": { "answer": "yes, proceed" },
-  "error": null
+  "error": null,
+  "model": "gpt-4o",
+  "maxToolCalls": 25
 }
 ```
+
+`model` and `maxToolCalls` are optional per-resume overrides. Resolution is
+compatibility-first: the request value wins, then the persisted await snapshot,
+then the initiated session config. A missing model finally uses
+`gpt-3.5-turbo`; a missing budget is resolved by `MAX_TOOL_CALLS` in the tool
+hub. This preserves existing sessions when callers omit the new fields while
+letting a caller deliberately move a resumed segment to another LiteLLM model
+or provider. Provider changes replay the existing message/tool-call history
+without translation.
+
+The effective model and budget are written into any next await snapshot, so an
+override remains in effect for later resumes until another request overrides
+it. A zero `maxToolCalls` value is valid, matches execute semantics, and causes
+immediate structured `MAX_TOOL_CALLS` exhaustion without executing a tool.
+AG-UI accepts the same `model` / `maxToolCalls` fields on the resume request and
+uses one resolved model for both hook-permission replay and the resumed segment.
+The legacy `/v1/agent/resumeRun` endpoint uses `model` / `max_tool_calls`; it has
+no initiated-session config tier.
 
 ### `GET /v1/orchestrator/{orchestratorGuid}`
 
@@ -864,11 +884,13 @@ instance can retry.
 ### Resume contracts
 
 - **AG-UI:** canonical `resume[]` can resolve or cancel several interrupts in one
-  request. Unresolved entries remain in `pending_tools`.
+  request. Unresolved entries remain in `pending_tools`; optional `model` /
+  `maxToolCalls` values override the await snapshot.
 - **Orchestrator:** `/v1/orchestrator/resume` accepts one `toolCallId` and result
-  per request.
+  per request, plus optional `model` / `maxToolCalls` overrides.
 - **Direct agent API:** `/v1/agent/resumeRun` uses
-  `executionGuid`/`stateGuid`/`toolCallId`.
+  `executionGuid`/`stateGuid`/`toolCallId` and optional snake-case `model` /
+  `max_tool_calls`.
 - **Hook permission:** the response targets the interrupt's permission ID; an
   approval executes the deferred tool exactly once.
 - **Thread reset:** a fresh executable AG-UI run discards stale awaiting holds

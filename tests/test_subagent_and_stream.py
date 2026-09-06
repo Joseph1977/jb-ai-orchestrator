@@ -162,6 +162,7 @@ async def test_subagent_loads_agent_md_and_returns_summary(tmp_path, monkeypatch
     assert call_kwargs["local_context"].mode == "workflow"
     assert call_kwargs["local_context"].output_backend is output_backend
     assert call_kwargs["include_agui_tools"] is False
+    assert call_kwargs["max_tool_calls"] == Config.SUBAGENT_MAX_TOOL_CALLS
 
 
 def test_load_agent_system_prompt_by_path(tmp_path):
