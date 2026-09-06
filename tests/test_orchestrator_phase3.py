@@ -1565,6 +1565,79 @@ async def test_resume_max_tool_calls_failure_restores_existing_await():
 
 
 @pytest.mark.asyncio
+async def test_resume_passes_request_model_and_zero_budget_to_hub():
+    state_id = uuid.uuid4()
+    exec_id = uuid.uuid4()
+    execution = SimpleNamespace(
+        id=exec_id,
+        workspace_path="/tmp/ws",
+        orchestration_type="generic",
+        config={
+            "mode": "workflow",
+            "model": "segment-model",
+            "maxToolCalls": 3,
+        },
+        source=None,
+        closed_at=None,
+        close_requested_at=None,
+    )
+    state = SimpleNamespace(
+        id=state_id,
+        execution_id=exec_id,
+        state_payload={
+            "request": "prompt",
+            "model": "snapshot-model",
+            "max_calls": 2,
+            "pending_tools": [{"tool_call_id": "call_a"}],
+            "messages": [],
+        },
+        status=LLMStateStatus.AWAITING_RESPONSE,
+        thread_id="t-db",
+        run_id="r-db",
+    )
+    hub = AsyncMock()
+    hub.process_request = AsyncMock(
+        return_value={"success": True, "response": "done", "tool_calls_info": []}
+    )
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    async def run_managed(**kwargs):
+        return await kwargs["make_coro"](asyncio.Event())
+
+    with patch("app.controllers.orchestrator_controller.get_session", fake_get_session), \
+         patch("app.controllers.orchestrator_controller.get_tool_hub", return_value=hub), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.get_execution", AsyncMock(return_value=execution)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.get_state", AsyncMock(return_value=state)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.recover_stale_pending_claims", AsyncMock(return_value=0)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.try_claim_state_for_resume", AsyncMock(return_value=True)), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.update_execution", AsyncMock()), \
+         patch("app.controllers.orchestrator_controller.execution_state_service.complete_claimed_state", AsyncMock(return_value=True)), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.try_create_active_run", AsyncMock(return_value=_fake_run())), \
+         patch("app.controllers.orchestrator_controller.run_lifecycle_service.reject_if_close_requested", AsyncMock(return_value=False)), \
+         patch("app.controllers.orchestrator_controller._ensure_workspace_for_segment", AsyncMock(return_value="/tmp/ws")), \
+         patch("app.controllers.orchestrator_controller._managed_hub_process", run_managed), \
+         patch("app.controllers.orchestrator_controller._finalize", AsyncMock(return_value=ExecutionStatus.COMPLETED)), \
+         patch("app.controllers.orchestrator_controller._complete_run_lifecycle", AsyncMock()):
+        await resume(
+            OrchestratorResumeInput(
+                orchestratorGuid=exec_id,
+                stateGuid=state_id,
+                toolCallId="call_a",
+                result={"answer": "a"},
+                model="request-model",
+                maxToolCalls=0,
+            )
+        )
+
+    call_kwargs = hub.process_request.await_args.kwargs
+    assert call_kwargs["model"] == "request-model"
+    assert call_kwargs["max_tool_calls"] == 0
+
+
+@pytest.mark.asyncio
 async def test_resume_prep_binding_error_restores_execution_awaiting():
     state_id = uuid.uuid4()
     exec_id = uuid.uuid4()

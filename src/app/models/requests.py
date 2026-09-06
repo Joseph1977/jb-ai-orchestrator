@@ -73,6 +73,8 @@ class ResumeRunInput(BaseModel):
     toolCallId: str
     result: Optional[Any] = None
     error: Optional[str] = None
+    model: Optional[str] = None
+    max_tool_calls: Optional[int] = None
 
 
 class ExecutionStatusResponse(BaseModel):
@@ -169,3 +171,5 @@ class OrchestratorResumeInput(BaseModel):
     result: Optional[Any] = None
     error: Optional[str] = None
     credentials: Optional[TransientCredentials] = None
+    model: Optional[str] = None
+    maxToolCalls: Optional[int] = None

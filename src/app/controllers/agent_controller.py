@@ -21,6 +21,10 @@ from app.models.requests import (
 from app.services.mcp_agent_service import MCPAgentService
 from app.services.agui_service import agui_service
 from app.services.agui_event_service import agui_event_service
+from app.services.resume_options import (
+    resolve_resume_max_tool_calls,
+    resolve_resume_model,
+)
 from app.services.tool_hub import ToolExecutionHub
 from app.services.execution_state_service import execution_state_service
 from app.utils.logger import logger
@@ -257,11 +261,20 @@ async def resume_run(payload: ResumeRunInput):
     if payload.error:
         tool_result["error"] = payload.error
 
+    resolved_model = resolve_resume_model(
+        payload.model,
+        state_payload.get("model"),
+    )
+    resolved_max_calls = resolve_resume_max_tool_calls(
+        payload.max_tool_calls,
+        state_payload.get("max_calls"),
+    )
+
     try:
         result = await tool_execution_hub.process_request(
             request=state_payload.get("request", ""),
-            model=state_payload.get("model", "gpt-3.5-turbo"),
-            max_tool_calls=state_payload.get("max_calls"),
+            model=resolved_model,
+            max_tool_calls=resolved_max_calls,
             requested_tools=state_payload.get("requested_tools"),
             lite_llm_request_timeout_in_sec=state_payload.get("lite_llm_request_timeout_in_sec"),
             resume_state=state_payload,

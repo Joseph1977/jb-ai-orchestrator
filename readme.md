@@ -297,7 +297,7 @@ Interactive documentation is served at `/swagger`.
 |---|---|---|
 | `POST` | `/v1/agent/executeRequest` | Execute a request with optional MCP and AG-UI tools |
 | `GET` | `/v1/agent/getTools` | List available MCP tools (plus legacy globally-bound frontend tools) |
-| `POST` | `/v1/agent/resumeRun` | Resume a paused execution with an AG-UI tool result |
+| `POST` | `/v1/agent/resumeRun` | Resume a paused execution with an AG-UI tool result and optional `model` / `max_tool_calls` overrides |
 | `GET` | `/v1/agent/execution/{executionGuid}` | Latest execution status and result metadata |
 
 ### Orchestrator
@@ -306,7 +306,7 @@ Interactive documentation is served at `/swagger`.
 |---|---|---|
 | `POST` | `/v1/orchestrator/initiate` | Bind a folder to a new session, provision the workspace, detect the orchestration type, return `orchestratorGuid` plus discovered agents and skills. No LLM call. |
 | `POST` | `/v1/orchestrator/execute` | Run a prompt against an initiated session. Returns the result, or `awaitsResponse` plus `stateGuid` when input is needed. Send the complete current `frontendTools` list: their names are named in the system prompt so the model knows an interaction tool exists. |
-| `POST` | `/v1/orchestrator/resume` | Continue an awaiting run with `{ orchestratorGuid, stateGuid, toolCallId, result }`. Pod-agnostic. |
+| `POST` | `/v1/orchestrator/resume` | Continue an awaiting run with `{ orchestratorGuid, stateGuid, toolCallId, result }` and optional `model` / `maxToolCalls` overrides. Pod-agnostic. |
 | `GET` | `/v1/orchestrator/{orchestratorGuid}` | Session and run status. While awaiting input, also replays canonical `interrupts` and `pendingToolCallIds` from persisted state so authorized callers can rebuild interaction UI. |
 | `POST` | `/v1/orchestrator/{orchestratorGuid}/close` | Close the session. **200** `closed` or **202** `closing`; retry after active runs finish or go stale. Removes service-owned runtime and workspace; never touches in-place caller input or durable output. |
 
@@ -318,6 +318,13 @@ Interactive documentation is served at `/swagger`.
 | `GET` | `/api/ag-ui/events` | Fan-out SSE stream of all tool-call events |
 | `POST` | `/api/ag-ui/threads/{threadId}/close` | Close thread lifecycle. **200** `closed` or **202** `closing`. Cancels holds and removes thread runtime and AG-UI-owned sandboxes only. |
 | `POST` | `/api/ag-ui/threads/{threadId}/abandon` | Idempotently discard active holds. Non-destructive; leaves runtime and workspaces in place. |
+
+All three resume paths can select the model and tool budget for the new
+segment. AG-UI and orchestrator requests use `model` / `maxToolCalls`; the
+legacy direct-agent endpoint uses `model` / `max_tool_calls`. When omitted, a
+persisted await snapshot remains authoritative, preserving existing behavior.
+An explicit override is persisted if the segment awaits again, and switching
+models or providers replays the existing history without translation.
 
 `/api/ag-ui/events` emits the same `TOOL_CALL_START`, `TOOL_CALL_ARGS` and
 `TOOL_CALL_END` payloads the AG-UI runtime produces, for every run rather than

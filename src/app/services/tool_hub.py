@@ -209,8 +209,14 @@ class ToolExecutionHub:
         resumed_run = bool(resume_state)
         original_prompt = resume_state.get("request", request)
 
-        default_max_calls = max_tool_calls if max_tool_calls is not None else Config.MAX_TOOL_CALLS
-        max_calls = resume_state.get("max_calls", default_max_calls)
+        snapshot_max_calls = resume_state.get("max_calls")
+        max_calls = (
+            max_tool_calls
+            if max_tool_calls is not None
+            else snapshot_max_calls
+            if snapshot_max_calls is not None
+            else Config.MAX_TOOL_CALLS
+        )
         lite_llm_timeout = (
             resume_state.get("lite_llm_request_timeout_in_sec")
             or lite_llm_request_timeout_in_sec
