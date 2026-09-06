@@ -31,7 +31,8 @@ returns structured `MAX_TOOL_CALLS` exhaustion without executing a tool.
 ## Verification
 
 - Focused resume, AG-UI, lifecycle, tool-counter, and subagent tests: 95 passed.
-- Full orchestrator suite: 784 passed.
+- Controller request/snapshot/segment precedence cases: 4 passed.
+- Full orchestrator suite: 786 passed.
 - A live AG-UI resume with `maxToolCalls: 0` emitted exactly:
   `MAX_TOOL_CALLS: The workflow run stopped after reaching its tool limit. The session and any pending question remain available; try again.`
 - Retrying the same preserved interrupt with `maxToolCalls: 50` completed with

@@ -1565,7 +1565,19 @@ async def test_resume_max_tool_calls_failure_restores_existing_await():
 
 
 @pytest.mark.asyncio
-async def test_resume_passes_request_model_and_zero_budget_to_hub():
+@pytest.mark.parametrize(
+    ("request_model", "request_max_calls", "expected_model", "expected_max_calls"),
+    [
+        ("request-model", 0, "request-model", 0),
+        (None, None, "snapshot-model", 2),
+    ],
+)
+async def test_resume_resolves_request_then_snapshot_before_segment_config(
+    request_model,
+    request_max_calls,
+    expected_model,
+    expected_max_calls,
+):
     state_id = uuid.uuid4()
     exec_id = uuid.uuid4()
     execution = SimpleNamespace(
@@ -1627,14 +1639,14 @@ async def test_resume_passes_request_model_and_zero_budget_to_hub():
                 stateGuid=state_id,
                 toolCallId="call_a",
                 result={"answer": "a"},
-                model="request-model",
-                maxToolCalls=0,
+                model=request_model,
+                maxToolCalls=request_max_calls,
             )
         )
 
     call_kwargs = hub.process_request.await_args.kwargs
-    assert call_kwargs["model"] == "request-model"
-    assert call_kwargs["max_tool_calls"] == 0
+    assert call_kwargs["model"] == expected_model
+    assert call_kwargs["max_tool_calls"] == expected_max_calls
 
 
 @pytest.mark.asyncio

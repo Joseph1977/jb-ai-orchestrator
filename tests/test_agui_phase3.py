@@ -258,7 +258,19 @@ async def test_fresh_builds_tagged_binding_block_once():
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_db_thread_and_run_ids():
+@pytest.mark.parametrize(
+    ("request_model", "request_max_calls", "expected_model", "expected_max_calls"),
+    [
+        ("request-model", 9, "request-model", 9),
+        (None, None, "snapshot-model", 4),
+    ],
+)
+async def test_resume_uses_db_ids_and_resolves_request_then_snapshot(
+    request_model,
+    request_max_calls,
+    expected_model,
+    expected_max_calls,
+):
     state_id = uuid.uuid4()
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
@@ -315,8 +327,8 @@ async def test_resume_uses_db_thread_and_run_ids():
         payload = AGUIRunRequest.model_validate({
             "threadId": "thread-from-db",
             "runId": "payload-run",
-            "model": "request-model",
-            "maxToolCalls": 9,
+            "model": request_model,
+            "maxToolCalls": request_max_calls,
             "state": {"toolCallId": "call_a", "result": {"answer": "a"}},
         })
         resp = await run_agui_session(payload)
@@ -331,8 +343,8 @@ async def test_resume_uses_db_thread_and_run_ids():
     ctx = hub.process_request.await_args.kwargs["agui_context"]
     assert ctx.thread_id == "thread-from-db"
     assert ctx.run_id == "run-from-db"
-    assert hub.process_request.await_args.kwargs["model"] == "request-model"
-    assert hub.process_request.await_args.kwargs["max_tool_calls"] == 9
+    assert hub.process_request.await_args.kwargs["model"] == expected_model
+    assert hub.process_request.await_args.kwargs["max_tool_calls"] == expected_max_calls
 
 
 @pytest.mark.asyncio
