@@ -100,6 +100,9 @@ from app.utils.logger import logger
 router = APIRouter(prefix="/api/ag-ui", tags=["AG-UI"])
 
 _RUN_CONFLICT = "RUN_CONFLICT"
+# These safe messages are mirrored by jb-web-code's backend/app/api_errors.py
+# and _PUBLIC_ERROR_MESSAGES mapping. Change both repositories together so
+# AG-UI and selected-workflow users see identical text.
 _PUBLIC_RUN_FAILURES = {
     "TIMEOUT": "The workflow run timed out. The session remains available; try again.",
     "OUTPUT_LIMIT": (
@@ -107,8 +110,8 @@ _PUBLIC_RUN_FAILURES = {
         "available; try again."
     ),
     "MAX_TOOL_CALLS": (
-        "The workflow run stopped at its tool-call limit. The session remains "
-        "available; try again."
+        "The workflow run stopped after reaching its tool limit. The session and "
+        "any pending question remain available; try again."
     ),
     "RUN_LIFECYCLE_FAILED": (
         "Workflow run tracking failed. The session remains available; try again."
