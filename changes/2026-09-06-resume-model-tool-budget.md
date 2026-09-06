@@ -1,7 +1,7 @@
 # Select model and tool budget on resume
 
 **Date:** 2026-09-06
-**Branch / PR:** `feature/resume-model-tool-budget` / pending
+**Branch / PR:** `feature/resume-model-tool-budget` / PR #15
 
 ## What changed
 
