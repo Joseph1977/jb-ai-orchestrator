@@ -39,11 +39,28 @@ fails naming the variable instead of falling back.
 
 **Configured URLs no longer reach the logs verbatim.** Malformed
 `MCP_SERVER_URLS` values were logged in full, as were the configured MCP URLs,
-the LiteLLM base URL, and the URL in the MCP fetch-failure path. Endpoints
-routinely carry userinfo or a query token, and logs travel. All of them pass
-through `redact_url()`, which keeps scheme, host, port and path; a value that
-does not parse as a URL is reported by length only. A test walks the source for
-log calls interpolating a URL without redacting it.
+the LiteLLM base URL, the URL in the MCP fetch-failure path, and — found by the
+second pass — the LiteLLM completion URL, which was logged raw on *every* model
+call rather than only at startup. Endpoints routinely carry userinfo or a query
+token, and logs travel. All of them pass through `redact_url()`, which keeps
+scheme, host, port and path; a value that does not parse as a URL is reported by
+length only.
+
+The coverage is behavioural: tests execute `validate_config()`,
+`MCPAgentService.__init__` and a real failing connection with credentials in the
+URL, and assert the secret is absent while the host survives. An AST guard over
+logger calls supplements them for call sites no test reaches yet, judging the
+expressions a call substitutes rather than the wording of its message; it is
+what found the per-call leak.
+
+**The bundled demo can reach the quickstart service.** CORS shipped empty in the
+Docker configuration while `ag-ui-demo` serves on `http://localhost:5173`, so
+the demo built and started and then had every browser request refused. The
+Docker example now lists both loopback origins for the demo's port while the
+code default stays empty, so anything not built from that file still starts with
+no origin allowed. `SECURITY.md` and the demo README explain the split, and the
+demo README names the symptom, because a CORS failure looks like a broken
+service while `/isalive` still answers.
 
 **The Windows bootstrap is fixed and covered.** It generated randomness with
 `RandomNumberGenerator::Fill`, which does not exist on the .NET Framework
