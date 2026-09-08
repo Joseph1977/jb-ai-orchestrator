@@ -4,7 +4,7 @@
 """create execution and llm_state tables
 
 Revision ID: 20250124_create_execution_state
-Revises: 
+Revises:
 Create Date: 2025-01-24 00:00:00
 
 """

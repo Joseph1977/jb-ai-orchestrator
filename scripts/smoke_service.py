@@ -55,7 +55,7 @@ async def check_get_tools():
 async def check_execute_request():
     """Test the execute request endpoint"""
     print("\nTesting execute request endpoint...")
-    
+
     # Test basic request without tools
     request_data = {
         "task": "What is the weather like today?",
@@ -64,7 +64,7 @@ async def check_execute_request():
         "outputInstruction": "Provide a brief response",
         "model": MODEL
     }
-    
+
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{BASE_URL}/v1/agent/executeRequest",
@@ -74,7 +74,7 @@ async def check_execute_request():
         if response.status_code == 200:
             result = response.json()
             print(f"Execute request response: {json.dumps(result, indent=2)}")
-            
+
             # VALIDATE the response properly - fail if there are errors
             if not result.get("success", False):
                 print(f"❌ Execute request FAILED: {result.get('error', 'Unknown error')}")
@@ -115,19 +115,19 @@ async def check_tool_selection_request(available_tools):
         if response.status_code == 200:
             result = response.json()
             print(f"Tool-selection response: {json.dumps(result, indent=2)}")
-            
+
             # VALIDATE the response properly
             if not result.get("success", False):
                 print(f"❌ Tool-selection request FAILED: {result.get('error', 'Unknown error')}")
                 raise Exception(f"Tool-selection request failed: {result.get('error')}")
-            
+
             # Show tool call information with server details
             if result.get('tool_calls_info'):
                 print(f"\nTool calls made:")
                 for call_info in result['tool_calls_info']:
                     server_info = f" on {call_info.get('mcp_server_id', 'unknown')}" if call_info.get('mcp_server_id') else ""
                     print(f"  - {call_info['tool_name']}{server_info}")
-            
+
             print("✅ Tool-selection request passed")
         else:
             print(f"❌ Tool-selection request FAILED: {response.status_code} - {response.text}")
@@ -137,15 +137,15 @@ async def main():
     """Run all tests"""
     print("Testing AI Agent MCP Microservice")
     print("=" * 50)
-    
+
     try:
         await check_health()
         available_tools = await check_get_tools()
         await check_execute_request()
         await check_tool_selection_request(available_tools)
-        
+
         print("\n✅ ALL TESTS COMPLETED SUCCESSFULLY")
-        
+
     except Exception as e:
         print(f"\n❌ TESTS FAILED: {str(e)}")
         raise e  # Re-raise to ensure the script exits with error code
@@ -157,4 +157,4 @@ if __name__ == "__main__":
         sys.exit(0)
     except Exception as e:
         print(f"\n💥 Test suite failed: {e}")
-        sys.exit(1) 
+        sys.exit(1)

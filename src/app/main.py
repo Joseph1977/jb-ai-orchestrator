@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI):
         for i, url in enumerate(Config.MCP_SERVER_URLS):
             logger.info(f"  - mcp{i+1}: {url}")
         logger.info(f"LiteLLM Server URL: {Config.LITELLM_BASE_URL}")
-        
+
         # Initialize MCP service after configuration is loaded
         await init_db()
         from app.controllers.agent_controller import initialize_mcp_service
@@ -41,9 +41,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start service: {str(e)}")
         raise
-    
+
     yield
-    
+
     # Shutdown (if needed)
     logger.info(f"Shutting down {Config.SERVICE_NAME}")
 
