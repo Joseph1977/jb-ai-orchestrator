@@ -7,7 +7,11 @@ runs a full tool loop against any model LiteLLM can reach. It is an HTTP
 microservice, so one deployment serves many callers, and a paused run can be
 resumed by a different replica.
 
-Python 3.11 · FastAPI · Apache-2.0
+[![tests](https://github.com/Joseph1977/jb-ai-orchestrator/actions/workflows/tests.yml/badge.svg)](https://github.com/Joseph1977/jb-ai-orchestrator/actions/workflows/tests.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Python 3.11 · FastAPI · Postgres · Apache-2.0
 
 Designed and built by [Joseph Benraz](https://www.linkedin.com/in/josephbenraz)
 
@@ -257,6 +261,23 @@ input the loop persists and returns rather than blocking.
 [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) is the source of truth for every
 step.
 
+### Vocabulary
+
+A few words carry precise meanings throughout the API, and the distinctions
+matter when reading the lifecycle rules:
+
+| Term | Meaning |
+|---|---|
+| **Playbook** | The instructions a caller points the service at: a `.cursor/` or `.claude/` directory, or a plain `AGENTS.md`. It is input, never baked into the image. |
+| **Session** | A bound folder you can execute against repeatedly. Created by `initiate`, identified by `orchestratorGuid`. A **thread** is the AG-UI equivalent. |
+| **Run** | One request executing against a session. Recorded as an `ExecutionRun` so a failed attempt is visible without disabling the session it belonged to. |
+| **Segment** | The bounded slice of a run between two pauses — one tool loop plus its model calls, governed by `RUN_SEGMENT_DEADLINE_SEC`. A run that pauses for input resumes as a new segment, possibly on a different replica. |
+| **Interrupt** | A pause needing a human: a frontend tool, the built-in `ask_user`, or a hook asking permission. Surfaces as `awaitsResponse` with a `stateGuid`. |
+| **Binding** | Where a run reads input and writes durable output. Input can be bound in place or copied into a sandbox; durable output survives the session. |
+
+The harness-side concepts — adapters, primitives, loading policy, compaction —
+are defined in [docs/ORCHESTRATOR.md §1](docs/ORCHESTRATOR.md#1-concepts).
+
 ## Features
 
 - **Harness discovery** — Cursor, Claude Code and generic adapters; eager loading
@@ -323,7 +344,9 @@ projects move quickly; check their own documentation for current behaviour.
 
 ## API reference
 
-Interactive documentation is served at `/swagger`.
+Interactive documentation is served at `/swagger` while `DOCS_ENABLED` is true,
+which is the default; setting it false withdraws both `/swagger` and
+`/openapi.json`.
 
 ### Health
 
@@ -416,6 +439,22 @@ tool that is not present, the request fails with a "Requested tools not found"
 error.
 
 ### Execution lifecycle (`awaitsResponse`)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: execute
+    Running --> AwaitingResponse: a tool needs a human
+    AwaitingResponse --> Running: resume, on any replica
+    Running --> Completed: run finishes
+    Running --> Failed: segment fails
+    Failed --> Running: execute again
+    AwaitingResponse --> AwaitingResponse: claim goes stale, restored for retry
+    Completed --> [*]
+```
+
+A failed segment is recorded against that attempt and leaves the session
+runnable — only an explicit close makes it terminal. That is why `Failed` above
+returns to `Running` rather than ending the diagram.
 
 When a tool pauses a run, `/v1/agent/executeRequest` responds with:
 
@@ -787,6 +826,13 @@ Deployments that send non-null output bindings must opt into
 env-driven bindings on fresh AG-UI runs and thread close with bounded **202**
 retry; see [ag-ui-demo/README.md](ag-ui-demo/README.md). Production integration
 belongs in the calling application; this service stays a generic orchestrator.
+
+For a fuller picture of what that calling application looks like,
+[jb-web-code](https://github.com/Joseph1977/jb-web-code) is a complete web
+application built on this service — a React front end over its own gateway,
+handling workflow selection, interactive tools and durable output. It is
+published separately and is being prepared for release, so the link may not
+resolve yet.
 
 ## Running many instances
 
