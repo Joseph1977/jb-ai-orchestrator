@@ -45,24 +45,35 @@ function Write-EnvFile {
 
 # These files hold generated credentials, so keep them readable only by the
 # account that created them — the counterpart of chmod 600 in the shell script.
+#
+# Hardening is defence in depth on a file that is already git-ignored, so a
+# failure here warns rather than stopping: leaving inherited permissions on a
+# local file is a far smaller problem than a clone that cannot start.
 function Protect-EnvFile {
     param([string]$Path)
 
     $full = Convert-Path $Path
-    if ($OnWindows) {
-        $acl = Get-Acl $full
-        # Drop inherited access ($false = do not copy it in) so that only the
-        # rule added below survives.
-        $acl.SetAccessRuleProtection($true, $false)
-        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
-        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
-            $me, 'FullControl', 'Allow')))
-        Set-Acl -Path $full -AclObject $acl
+    try {
+        if ($OnWindows) {
+            # icacls.exe rather than Get-Acl/Set-Acl: those live in
+            # Microsoft.PowerShell.Security, and a PSModulePath that omits the
+            # Windows PowerShell module directories leaves 5.1 unable to
+            # autoload them. icacls is always present and needs no module.
+            # /inheritance:r drops inherited access, /grant:r replaces any rule
+            # for the principal, and the SID avoids localized account names.
+            # (F) rather than (R,W) so the account keeps the delete right the
+            # rewrite below and ordinary cleanup need.
+            $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $output = & icacls $full '/inheritance:r' '/grant:r' "*${sid}:(F)" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw ($output -join [Environment]::NewLine) }
+        }
+        elseif (Get-Command chmod -ErrorAction SilentlyContinue) {
+            # Reached when the cross-platform test suite exercises this script.
+            & chmod 600 $full
+        }
     }
-    elseif (Get-Command chmod -ErrorAction SilentlyContinue) {
-        # Reached when the cross-platform test suite exercises this script.
-        & chmod 600 $full
+    catch {
+        Write-Warning "could not restrict permissions on $Path : $($_.Exception.Message)"
     }
 }
 
