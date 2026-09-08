@@ -74,6 +74,16 @@ restricts the file to the current account, and is covered by
 `windows-latest` CI job running both PowerShells. CI also builds and tests the
 bundled demo, and rejects newly introduced trailing whitespace.
 
+That CI job immediately earned its place: it caught a third failure of the same
+kind. Restricting the file used `Get-Acl`, which lives in
+`Microsoft.PowerShell.Security`, and 5.1 cannot autoload that module when
+`PSModulePath` omits the Windows PowerShell module directories. Under a `Stop`
+error preference this aborted the run before either environment file existed,
+so the quickstart failed outright rather than merely skipping the hardening.
+Permissions are now set with `icacls`, which needs no module, and a failure
+warns instead of stopping: these files are git-ignored, so inherited
+permissions on a local file matter far less than a clone that cannot start.
+
 **Internal material removed.** The `dev-usc1`, `qa-usc1`, `sb-usc1` and
 `prod-usc1` environment directories carried private gateway hostnames and are
 deleted. A superseded demo planning document went with them, and a comment
