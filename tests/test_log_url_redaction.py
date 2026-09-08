@@ -99,39 +99,142 @@ def test_malformed_numbered_mcp_url_is_not_logged_verbatim(monkeypatch, caplog):
     assert "MCP_SERVER_URL_1" in caplog.text
 
 
-def test_configured_mcp_urls_are_redacted_when_listed(monkeypatch, caplog):
+def test_validate_config_does_not_log_credentials_in_mcp_urls(monkeypatch, caplog):
+    """Drives the real listing path: validate_config() logs each server."""
     monkeypatch.setenv(
         "MCP_SERVER_URLS",
-        json.dumps([{"name": "general", "url": "https://u:listedpw@mcp.example.com/sse"}]),
+        json.dumps([{"name": "general", "url": "https://u:listedpw@mcp.example.com/sse?t=qs"}]),
     )
+    monkeypatch.setattr(Config, "DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setattr(Config, "LITELLM_API_KEY", "sk-test")
+    monkeypatch.setattr(Config, "LITELLM_BASE_URL", "https://k:basepw@llm.example.com/v1")
 
     with caplog.at_level(logging.INFO):
-        Config._parse_mcp_servers()
-        for server in Config.MCP_SERVER_URLS:
-            logging.getLogger(__name__).info(
-                "  - %s: %s", server["name"], redact_url(server["url"])
-            )
+        Config.validate_config()
 
     assert "listedpw" not in caplog.text
+    assert "qs" not in caplog.text
+    assert "mcp.example.com" in caplog.text, "the host is what makes the line useful"
+
+
+def test_service_construction_does_not_log_credentials(caplog):
+    """Drives MCPAgentService.__init__, which lists servers and the gateway."""
+    from app.services.mcp_agent_service import MCPAgentService
+
+    with caplog.at_level(logging.INFO):
+        MCPAgentService(
+            mcp_server_configs=[
+                {"name": "general", "url": "https://u:ctorpw@mcp.example.com/sse"}
+            ],
+            litellm_base_url="https://key:gatewaypw@llm.example.com/v1",
+            litellm_api_key="sk-test",
+        )
+
+    assert "ctorpw" not in caplog.text
+    assert "gatewaypw" not in caplog.text
     assert "mcp.example.com" in caplog.text
 
 
-def test_no_source_line_interpolates_a_raw_url_into_a_log():
-    """Guards the pattern, not just the four call sites fixed today."""
+async def test_connect_failure_does_not_log_credentials(caplog):
+    """The error path is the one most likely to be pasted into a bug report."""
+    from app.services.mcp_agent_service import MCPAgentService
+
+    service = MCPAgentService(
+        mcp_server_configs=[],
+        litellm_base_url="http://llm.example.com",
+        litellm_api_key="sk-test",
+    )
+    caplog.clear()
+
+    # An unroutable host makes the real connect attempt fail, so the failure
+    # log is produced by the code under test rather than by a patched stub.
+    with caplog.at_level(logging.INFO):
+        tools = await service.fetch_mcp_tools_from_server(
+            {"name": "general", "url": "http://u:failpw@127.0.0.1:1/sse?token=failqs"}
+        )
+
+    assert tools == []
+    assert "failpw" not in caplog.text
+    assert "failqs" not in caplog.text
+    assert "127.0.0.1" in caplog.text, "the operator still needs to know which server"
+
+
+def _url_bearing_log_arguments(source: str):
+    """Yield (line, expression) for URL-valued arguments passed to a logger.
+
+    Parsed rather than pattern-matched, so it judges the values a call
+    substitutes and not the wording of its message. A message that merely
+    mentions MCP_SERVER_URLS is fine; passing `server_url` is what matters.
+    Both f-string interpolations and %-style arguments are covered.
+    """
+    import ast
     import re
+
+    # A name whose value is a URL. `len(...)` of a server list is not one.
+    url_name = re.compile(r"\b\w*(?:url|urls|base_url|endpoint)\b", re.I)
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        if not isinstance(callee, ast.Attribute):
+            continue
+        if callee.attr not in {"info", "warning", "error", "debug", "exception"}:
+            continue
+        if not (isinstance(callee.value, ast.Name) and "logger" in callee.value.id):
+            continue
+
+        # Every expression whose value is substituted into the message.
+        substituted = []
+        for argument in node.args + [keyword.value for keyword in node.keywords]:
+            if isinstance(argument, ast.JoinedStr):
+                substituted += [
+                    piece.value
+                    for piece in argument.values
+                    if isinstance(piece, ast.FormattedValue)
+                ]
+            elif not isinstance(argument, ast.Constant):
+                substituted.append(argument)
+
+        for expression in substituted:
+            text = ast.get_source_segment(source, expression) or ""
+            if "redact_url" in text or text.startswith("len("):
+                continue
+            if url_name.search(text):
+                yield expression.lineno, text
+
+
+def test_no_log_call_passes_a_raw_url():
+    """Supplementary to the execution tests above.
+
+    Those cover the paths that exist today; this catches a new call site before
+    any test exercises it.
+    """
     from pathlib import Path
 
     src = Path(__file__).resolve().parents[1] / "src" / "app"
-    offenders = []
-    # An f-string log call substituting something URL-shaped without redacting.
-    # `len(...)` is excluded: counting the configured servers reveals nothing.
-    pattern = re.compile(
-        r"logger\.(?:info|warning|error|debug|exception)\(\s*f?\"[^\"]*\{(?!len\()[^}]*"
-        r"(?:url|URL|base_url|endpoint)[^}]*\}",
-    )
-    for path in src.rglob("*.py"):
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if pattern.search(line) and "redact_url" not in line:
-                offenders.append(f"{path.relative_to(src)}:{number}: {line.strip()}")
+    offenders = [
+        f"{path.relative_to(src)}:{line}: {expression}"
+        for path in sorted(src.rglob("*.py"))
+        for line, expression in _url_bearing_log_arguments(
+            path.read_text(encoding="utf-8")
+        )
+    ]
 
-    assert not offenders, "log a URL through redact_url():\n" + "\n".join(offenders)
+    assert not offenders, (
+        "pass URLs through redact_url() before logging them:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_guard_detects_both_leak_styles():
+    """A guard that silently matches nothing would pass for the wrong reason."""
+    fstring_leak = 'logger.info(f"connecting to {server_url}")'
+    percent_leak = 'logger.info("connecting to %s", server_url)'
+    message_only = 'logger.warning("Invalid JSON in MCP_SERVER_URLS; expected an array")'
+    redacted = 'logger.info("connecting to %s", redact_url(server_url))'
+
+    assert list(_url_bearing_log_arguments(fstring_leak)), "missed an f-string leak"
+    assert list(_url_bearing_log_arguments(percent_leak)), "missed a %-style leak"
+    assert not list(_url_bearing_log_arguments(message_only)), "flagged message wording"
+    assert not list(_url_bearing_log_arguments(redacted)), "flagged a redacted call"

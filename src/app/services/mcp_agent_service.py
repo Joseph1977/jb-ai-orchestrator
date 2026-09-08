@@ -517,7 +517,7 @@ class MCPAgentService:
 
             logger.info(
                 "Calling LiteLLM at %s with model %s (stream=%s)",
-                url,
+                redact_url(url),
                 model,
                 bool(stream),
             )
