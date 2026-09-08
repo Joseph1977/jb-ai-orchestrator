@@ -11,6 +11,8 @@ outright.
 """
 
 import importlib
+import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -219,3 +221,48 @@ def test_listed_origin_is_allowed_and_others_are_not(monkeypatch):
 
     refused = client.get("/openapi.json", headers={"Origin": "http://evil.example"})
     assert "access-control-allow-origin" not in refused.headers
+
+
+# --- The quickstart must actually reach the bundled demo ---------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _example_origins() -> list:
+    """CORS_ALLOWED_ORIGINS as the Docker quickstart ships it."""
+    for line in (REPO / "src/.env/docker/.env.example").read_text().splitlines():
+        if line.startswith("CORS_ALLOWED_ORIGINS="):
+            _, _, value = line.partition("=")
+            return [item.strip() for item in value.split(",") if item.strip()]
+    raise AssertionError("CORS_ALLOWED_ORIGINS is absent from the Docker example")
+
+
+def test_docker_example_allows_the_demo_dev_server_origin():
+    """Otherwise the demo builds, starts, and every request fails in the browser."""
+    port = re.search(
+        r"port:\s*(\d+)", (REPO / "ag-ui-demo/vite.config.ts").read_text()
+    )
+    assert port, "the demo no longer pins a dev-server port"
+
+    origins = _example_origins()
+    for host in ("localhost", "127.0.0.1"):
+        assert f"http://{host}:{port.group(1)}" in origins, (
+            f"the demo serves on port {port.group(1)}; the Docker example must list it"
+        )
+
+
+def test_the_demo_origin_is_accepted_by_the_app_as_configured(monkeypatch):
+    """Drives the real middleware with the origins the example file supplies."""
+    main = _reload_app(monkeypatch, docs_enabled=True, origins=_example_origins())
+    client = TestClient(main.app)
+
+    response = client.get("/isalive", headers={"Origin": "http://localhost:5173"})
+
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+
+def test_the_code_default_stays_closed_though_the_example_opens_it(monkeypatch):
+    """The example is a local convenience; the default is what others inherit."""
+    monkeypatch.delenv("CORS_ALLOWED_ORIGINS", raising=False)
+
+    assert _env_list("CORS_ALLOWED_ORIGINS") == []

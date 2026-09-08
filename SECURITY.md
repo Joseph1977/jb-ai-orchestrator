@@ -57,12 +57,27 @@ require an explicit opt-in before they do anything:
 | `OUTPUT_BINDINGS_ENABLED` | `false` | Durable output writes outside the sandbox |
 | `BIND_ADDR` | `127.0.0.1` | Published Compose ports do not leave the host |
 
-Those are the code defaults, which apply when nothing overrides them. The
-tracked `src/.env/docker/.env.example` deliberately differs on one: it sets
-`ALLOW_INPLACE_WORKSPACE=true` with `WORKSPACE_ALLOWED_ROOTS=/workspaces`,
-because reading playbooks from a mounted folder is the point of the Docker
-path. The containment there comes from the allowed root, which confines binding
-to the single directory the operator chose to mount.
+Those are the code defaults: they apply when nothing overrides them, and they
+are what an embedding application inherits. The tracked
+`src/.env/docker/.env.example` is a different thing — a working configuration
+for the local quickstart — and it deliberately relaxes two of them:
+
+- `ALLOW_INPLACE_WORKSPACE=true` with `WORKSPACE_ALLOWED_ROOTS=/workspaces`,
+  because reading playbooks from a mounted folder is the point of the Docker
+  path. The containment comes from the allowed root, which confines binding to
+  the single directory the operator chose to mount.
+- `CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173`, the
+  origins the bundled `ag-ui-demo` runs on. Without them the demo builds and
+  starts but every browser request to the service is refused, which reads as a
+  broken quickstart rather than a policy decision. Both origins are loopback,
+  and the published ports are bound to loopback, so nothing off this machine
+  gains access.
+
+Keeping the code default empty while the example names an origin is the point:
+a deployment that does not use this file — an embedding application, or a
+container built from your own configuration — starts closed and has to say
+which origin it serves. Delete both relaxations from your copy of the file for
+anything that is not the local demo.
 
 Startup refuses to continue on two combinations that cannot be made safe:
 `CORS_ALLOWED_ORIGINS=*` together with `CORS_ALLOW_CREDENTIALS=true`, and

@@ -206,14 +206,24 @@ least capable version of it. Each item below is off until you turn it on, and
 | Every port binds to `127.0.0.1`, so nothing is reachable from the network | `BIND_ADDR=0.0.0.0`, once something in front of it authenticates callers |
 | No browser origin can call the API; requests from a page are refused | `CORS_ALLOWED_ORIGINS=https://your.app` |
 | `/swagger` and `/openapi.json` are served | `DOCS_ENABLED=false` |
-| `execute_local` is absent — the agent cannot run shell commands | `LOCAL_SHELL_ENABLED=true` |
-| Workspace hooks do not run | `HOOKS_ENABLED=true` |
-| Credentials are generated per machine, never shipped | supply your own in `.env` before the first run |
+| `execute_local` is absent — the agent cannot run shell commands | `LOCAL_SHELL_ENABLED=true`, ideally with `SHELL_COMMAND_ALLOWLIST` naming what may run |
+| Workspace hooks do not run | `HOOKS_ENABLED=true`, remembering that hooks are shell commands the bound workspace supplies |
+| `LITELLM_MASTER_KEY` and `POSTGRES_PASSWORD` are generated on this machine's first launcher run | supply your own in `.env` before that first run |
 
-The Docker path is the one exception, and a confined one: it sets
-`ALLOW_INPLACE_WORKSPACE=true` so a bind-mounted folder can be edited in place,
-while `WORKSPACE_ALLOWED_ROOTS` restricts that to the folder you mounted.
-Startup refuses the combination of in-place access and an empty allowlist.
+Two of those the Docker quickstart relaxes for you, both confined to this
+machine. It sets `ALLOW_INPLACE_WORKSPACE=true` so a bind-mounted folder can be
+edited in place, with `WORKSPACE_ALLOWED_ROOTS` restricting that to the folder
+you mounted — startup refuses in-place access with an empty allowlist. And it
+lists `http://localhost:5173` and `http://127.0.0.1:5173` in
+`CORS_ALLOWED_ORIGINS`, the origins the bundled [ag-ui-demo](ag-ui-demo/README.md)
+runs on, so the demo works without editing configuration first. Both are
+relaxations of `src/.env/docker/.env.example` only; the code defaults stay
+closed, so anything not built from that file starts with no origin allowed.
+Remove both from your copy for any deployment that is not the local demo.
+
+Skipping the launchers and running `docker compose` directly is supported, but
+then nothing has generated the secrets: Compose stops and names the variable to
+set rather than falling back to a default that would be identical everywhere.
 
 ### Database schema
 

@@ -20,7 +20,16 @@ A lightweight React + TypeScript **protocol sandbox** that exercises the [AG-UI 
 ## Prerequisites
 
 - Node.js 18+
-- A running `jb-ai-orchestrator` service (default `http://localhost:8000`)
+- A running `jb-ai-orchestrator` service (default `http://localhost:8000`) whose
+  `CORS_ALLOWED_ORIGINS` includes this app's origin. The orchestrator accepts no
+  cross-origin call by default, so a browser request from here is refused until
+  the origin is listed. `src/.env/docker/.env.example` already lists
+  `http://localhost:5173` and `http://127.0.0.1:5173`, which covers the Docker
+  quickstart; if you run the service another way, or serve this app on a
+  different port, add that origin there and restart the service. The symptom of
+  a missing origin is a browser CORS error with the service otherwise healthy —
+  `curl http://localhost:8000/isalive` still succeeds, because curl sends no
+  `Origin` header.
 - For binding examples with output: operator flags `ALLOW_INPLACE_WORKSPACE=true`, `OUTPUT_BINDINGS_ENABLED=true` (web deployments opt in; the standalone orchestrator defaults to `false`), and `WORKSPACE_ALLOWED_ROOTS` covering mounts (see root `readme.md`)
 
 ## Quick Start
