@@ -19,6 +19,7 @@ Designed and built by [Joseph Benraz](https://www.linkedin.com/in/josephbenraz)
 
 - [What makes it different](#what-makes-it-different)
 - [Quick start](#quick-start)
+  - [What the shipped defaults allow](#what-the-shipped-defaults-allow)
 - [Security model](#security-model)
 - [How it works](#how-it-works)
 - [Features](#features)
@@ -80,13 +81,20 @@ The shared stack deploys what the agent depends on — Postgres, LiteLLM and Oll
 carrying it. Copy the compose-layer example, then start both:
 
 ```bash
-cp .env.example .env      # host ports, POSTGRES_*, LITELLM_MASTER_KEY, provider keys
 ./start-shared-mac.sh     # macOS: Ollama stays on the host for the Metal GPU
 ./start-agent-mac.sh      # or ./start-agent-mac.sh --ensure-shared to do both
 ```
 
 On Windows use `start-shared-windows.bat` and `start-agent-windows.bat`; there
 Ollama runs in a container and the default model is pulled for you.
+
+There is no file to copy first. On their first run the launchers create both
+git-ignored environment files from the tracked examples, and generate this
+machine's `LITELLM_MASTER_KEY` and `POSTGRES_PASSWORD` into `.env`. Nothing is
+overwritten afterwards, so the credentials keep matching the data volumes
+already created from them, and no two clones share a password. Running
+`docker compose` directly instead of the launchers fails with the name of the
+variable to set rather than falling back to a well-known default.
 
 The launcher never deploys infrastructure. It joins a running `jb-ai-shared`
 stack, and if that is not up it stops and prints the command to run.
@@ -164,8 +172,10 @@ configured. [MCP servers](#mcp-servers) below covers each malformed shape.
 curl http://localhost:8000/isalive
 ```
 
-Interactive API docs are at [http://localhost:8000/swagger](http://localhost:8000/swagger).
-List the tools your MCP servers actually exposed, then run a request:
+Interactive API docs are at [http://localhost:8000/swagger](http://localhost:8000/swagger),
+unless you set `DOCS_ENABLED=false`, which removes both `/swagger` and
+`/openapi.json`. List the tools your MCP servers actually exposed, then run a
+request:
 
 ```bash
 curl http://localhost:8000/v1/agent/getTools
@@ -184,6 +194,26 @@ curl -X POST "http://localhost:8000/v1/agent/executeRequest" \
 > Tool names are whatever your servers expose, suffixed with the server name —
 > replace the `tools` above with names from `/getTools`. Omit `tools` entirely to
 > let the agent use everything available.
+
+### What the shipped defaults allow
+
+The service authenticates no one, so what you just started is deliberately the
+least capable version of it. Each item below is off until you turn it on, and
+[Security model](#security-model) explains what changes when you do.
+
+| Out of the box | To change it |
+|---|---|
+| Every port binds to `127.0.0.1`, so nothing is reachable from the network | `BIND_ADDR=0.0.0.0`, once something in front of it authenticates callers |
+| No browser origin can call the API; requests from a page are refused | `CORS_ALLOWED_ORIGINS=https://your.app` |
+| `/swagger` and `/openapi.json` are served | `DOCS_ENABLED=false` |
+| `execute_local` is absent — the agent cannot run shell commands | `LOCAL_SHELL_ENABLED=true` |
+| Workspace hooks do not run | `HOOKS_ENABLED=true` |
+| Credentials are generated per machine, never shipped | supply your own in `.env` before the first run |
+
+The Docker path is the one exception, and a confined one: it sets
+`ALLOW_INPLACE_WORKSPACE=true` so a bind-mounted folder can be edited in place,
+while `WORKSPACE_ALLOWED_ROOTS` restricts that to the folder you mounted.
+Startup refuses the combination of in-place access and an empty allowlist.
 
 ### Database schema
 
@@ -606,7 +636,7 @@ name and URL. See
 |---|---|---|
 | `DATABASE_URL` | — | Required. Async SQLAlchemy URL, e.g. `postgresql+asyncpg://pyagent:pyagent@localhost:5432/pyagent` |
 | `LITELLM_BASE_URL` | `http://localhost:4000` | LiteLLM endpoint |
-| `LITELLM_API_KEY` | `sk-1234` | LiteLLM key |
+| `LITELLM_API_KEY` | — | Required. LiteLLM key. No default: it must match what your gateway expects, and a shipped one would be the same known credential everywhere. The launchers generate one for the bundled stack |
 | `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network timeout for each LiteLLM request |
 | `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute wall-clock deadline for one complete LiteLLM call, including streamed response consumption |
 | `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard; when positive, sends a completion-token cap and accepts possible truncation |
@@ -678,7 +708,7 @@ returns to its real runnable state unless the caller explicitly closed it.
 | `LOCAL_TOOLS_ENABLED` | `true` | Expose the built-in local coding tools |
 | `LOCAL_TOOLS_NAMESPACE` | `local` | Suffix marking local tools, e.g. `read_file_local` |
 | `FILTER_MCP_TOOLS_CONFLICTING_WITH_LOCAL` | `true` | Drop remote MCP tools whose base name collides with a built-in |
-| `LOCAL_SHELL_ENABLED` | `true` | Expose `execute_local`; when `false` the tool is hidden |
+| `LOCAL_SHELL_ENABLED` | `false` | Expose `execute_local`. Off by default: the service authenticates no one, so this grants a shell to anyone who can reach the API |
 | `LOCAL_SHELL_TIMEOUT_SEC` | `60` | Default shell timeout |
 | `LOCAL_SHELL_MAX_OUTPUT_BYTES` | `100000` | Captured bytes per output stream |
 | `SUBAGENT_ENABLED` | `true` | Expose the `task_local` subagent tool |
@@ -703,7 +733,7 @@ returns to its real runnable state unless the caller explicitly closed it.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HOOKS_ENABLED` | `true` | Run project Cursor/Claude hooks |
+| `HOOKS_ENABLED` | `false` | Run project Cursor/Claude hooks. Off by default: hooks are shell commands supplied by the bound workspace |
 | `HOOKS_FAIL_CLOSED` | `false` | Block the action when a hook errors or times out |
 | `HOOKS_TIMEOUT_SEC` | `30` | Per-hook subprocess timeout |
 | `HOOKS_MAX_OUTPUT_BYTES` | `100000` | Cap on hook output |
@@ -827,12 +857,8 @@ env-driven bindings on fresh AG-UI runs and thread close with bounded **202**
 retry; see [ag-ui-demo/README.md](ag-ui-demo/README.md). Production integration
 belongs in the calling application; this service stays a generic orchestrator.
 
-For a fuller picture of what that calling application looks like,
-[jb-web-code](https://github.com/Joseph1977/jb-web-code) is a complete web
-application built on this service — a React front end over its own gateway,
-handling workflow selection, interactive tools and durable output. It is
-published separately and is being prepared for release, so the link may not
-resolve yet.
+An end-to-end web application built on this orchestrator will be released soon:
+[jb-web-code](https://github.com/Joseph1977/jb-web-code).
 
 ## Running many instances
 
