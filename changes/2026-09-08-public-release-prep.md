@@ -29,6 +29,34 @@ their tracked examples. `src/.env/docker/.env` is now `.env.example` and the
 runtime file is ignored, so no tracked file is ever hand-edited with real
 values.
 
+Review found three more of the same kind. `LITELLM_API_KEY` still defaulted to
+`sk-1234` in `config.py` and is now empty and required; the LiteLLM admin UI
+password still fell back to that string and no longer does; and
+`POSTGRES_PASSWORD` shipped as `postgres` in `.env.example` with a matching
+Compose fallback, on a port published to the host. The launchers now generate
+it too, and Compose declares both secrets with `:?` so running it directly
+fails naming the variable instead of falling back.
+
+**Configured URLs no longer reach the logs verbatim.** Malformed
+`MCP_SERVER_URLS` values were logged in full, as were the configured MCP URLs,
+the LiteLLM base URL, and the URL in the MCP fetch-failure path. Endpoints
+routinely carry userinfo or a query token, and logs travel. All of them pass
+through `redact_url()`, which keeps scheme, host, port and path; a value that
+does not parse as a URL is reported by length only. A test walks the source for
+log calls interpolating a URL without redacting it.
+
+**The Windows bootstrap is fixed and covered.** It generated randomness with
+`RandomNumberGenerator::Fill`, which does not exist on the .NET Framework
+runtime behind the `powershell` command the `.bat` launchers invoke, so the
+Windows quickstart would have failed while generating credentials. It also
+wrote `.env` with PowerShell's implicit encoding — ANSI on 5.1, and a
+byte-order mark under `-Encoding utf8` — which Compose would have folded into
+the first variable's name. It now writes UTF-8 without BOM and LF explicitly,
+restricts the file to the current account, and is covered by
+`tests/test_compose_bootstrap.py` on every interpreter present, with a
+`windows-latest` CI job running both PowerShells. CI also builds and tests the
+bundled demo, and rejects newly introduced trailing whitespace.
+
 **Internal material removed.** The `dev-usc1`, `qa-usc1`, `sb-usc1` and
 `prod-usc1` environment directories carried private gateway hostnames and are
 deleted. A superseded demo planning document went with them, and a comment
@@ -69,6 +97,14 @@ behavioural changes would be refused in review.
   `WORKSPACE_ALLOWED_ROOTS` to be non-empty, and startup fails otherwise.
 - **Breaking.** `LITELLM_MASTER_KEY` has no default. Compose refuses to start
   without it; the launchers generate one.
+- **Breaking.** `LITELLM_API_KEY` has no default and is now required. Startup
+  fails naming it, because the previous `sk-1234` default let a deployment run
+  against an unintended gateway on a key every installation shared.
+- **Breaking.** `POSTGRES_PASSWORD` has no default in `.env.example` and no
+  Compose fallback. Existing `.env` files are untouched and keep working, since
+  regenerating would orphan the data volume created with the old password. A
+  deployment that relied on the fallback rather than setting the variable must
+  now set it.
 - The `dev-usc1`, `qa-usc1`, `sb-usc1` and `prod-usc1` environment directories
   are deleted. Deployments setting `ENV` to any of those must supply their own
   configuration directory.
