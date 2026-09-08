@@ -128,7 +128,10 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+# Runtime environment files, each created from the tracked .env.example beside
+# it. Only examples are committed, so no tracked file is ever hand-edited.
 src/.env/localhost/.env
+src/.env/docker/.env
 # Compose-layer secrets for the shared stack (see .env.example).
 /.env
 .venv

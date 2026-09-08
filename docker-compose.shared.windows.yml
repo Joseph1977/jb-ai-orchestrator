@@ -15,7 +15,9 @@ services:
     container_name: jb-ai-shared-ollama
     restart: unless-stopped
     ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+      # OLLAMA_HOST=0.0.0.0 below binds inside the container; this decides who
+      # can reach it from outside. Loopback unless BIND_ADDR widens it.
+      - "${BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ${OLLAMA_MODELS_PATH:-shared_ollama_data}:/root/.ollama
     environment:

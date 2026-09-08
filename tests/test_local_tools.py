@@ -3,6 +3,7 @@
 
 import asyncio
 
+from app.config import Config
 from app.services.local_tool_provider import LocalToolContext, local_tool_provider
 
 
@@ -144,7 +145,8 @@ def test_glob_and_grep(tmp_path):
     assert grepped["matches"][0]["path"] == "src/a.py"
 
 
-def test_execute_shell(tmp_path):
+def test_execute_shell(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.config.Config.LOCAL_SHELL_ENABLED", True)
     ctx = _ctx(tmp_path)
     (tmp_path / "note.txt").write_text("hi")
     res = run(local_tool_provider.execute("execute_local", {"command": "cat note.txt"}, ctx))
@@ -152,6 +154,14 @@ def test_execute_shell(tmp_path):
     assert "hi" in res.get("stdout", "")
     bad = run(local_tool_provider.execute("execute_local", {"command": "exit 7"}, ctx))
     assert bad.get("exitCode") == 7
+
+
+def test_execute_shell_is_refused_by_default(tmp_path):
+    """The shipped default withholds command execution until it is opted into."""
+    assert Config.LOCAL_SHELL_ENABLED is False
+    ctx = _ctx(tmp_path)
+    res = run(local_tool_provider.execute("execute_local", {"command": "echo hi"}, ctx))
+    assert "LOCAL_SHELL_ENABLED" in res.get("error", "")
 
 
 def test_write_todos(tmp_path):

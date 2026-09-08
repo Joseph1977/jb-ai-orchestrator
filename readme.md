@@ -113,10 +113,12 @@ docker compose up --build -d
 exactly this, skipping shared-stack detection — the mode to use when Postgres and
 LiteLLM are managed elsewhere.
 
-> `src/.env/docker/.env` is currently tracked in this repository and ships with
-> populated values. Treat it as your own local configuration, replace those
-> values, and do not commit your credentials. It is being converted to a
-> placeholder example.
+> Only `src/.env/docker/.env.example` is tracked. The launchers copy it to
+> `src/.env/docker/.env`, which is git-ignored and is where your own values
+> belong. Standalone mode reaches Postgres and LiteLLM directly, so you must
+> replace the `__POSTGRES_PASSWORD__` and `__LITELLM_API_KEY__` placeholders —
+> the service refuses to start while any placeholder remains, naming the
+> variables it found. The shared-stack path supplies both for you.
 
 ### 1c. Local, without Docker
 

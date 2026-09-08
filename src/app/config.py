@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import tempfile
 from dotenv import load_dotenv
 from pathlib import Path
 from app.utils.logger import logger
 from app.utils.config_logging import log_safe_configuration
+
+# Deploy-time substitution markers, e.g. __LITELLM_API_KEY__.
+_PLACEHOLDER_PATTERN = re.compile(r'__[A-Z0-9_]+__')
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -15,6 +19,12 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_list(name: str, default: str = '') -> list:
+    """Parse a comma-separated environment variable into a trimmed list."""
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(',') if item.strip()]
 
 
 def is_running_in_kubernetes():
@@ -125,6 +135,15 @@ class Config:
 
     # Swagger Configuration
     SWAGGER_BASE_PATH = os.getenv('SwaggerBasePath', '')
+    # Interactive API documentation. False withdraws /swagger, /redoc and the
+    # /openapi.json schema together, so the surface is not merely unlinked.
+    DOCS_ENABLED = _env_bool('DOCS_ENABLED', True)
+
+    # CORS. An empty list sends no cross-origin headers, so browsers refuse
+    # cross-site calls; every deployment states its own origins. "*" is an
+    # explicit opt-in and cannot be combined with credentials.
+    CORS_ALLOWED_ORIGINS = _env_list('CORS_ALLOWED_ORIGINS')
+    CORS_ALLOW_CREDENTIALS = _env_bool('CORS_ALLOW_CREDENTIALS', False)
 
     # Agent Configuration
     MAX_TOOL_CALLS = int(os.getenv('MAX_TOOL_CALLS', '10'))
@@ -177,7 +196,9 @@ class Config:
     )
 
     # Local shell tool (execute_local). Runs with cwd=workspace; not a full OS jail.
-    LOCAL_SHELL_ENABLED = _env_bool('LOCAL_SHELL_ENABLED', True)
+    # Off by default: the service has no native authentication, so enabling this
+    # grants command execution to anyone who can reach the API.
+    LOCAL_SHELL_ENABLED = _env_bool('LOCAL_SHELL_ENABLED', False)
     LOCAL_SHELL_TIMEOUT_SEC = int(os.getenv('LOCAL_SHELL_TIMEOUT_SEC', '60'))
     LOCAL_SHELL_MAX_OUTPUT_BYTES = int(os.getenv('LOCAL_SHELL_MAX_OUTPUT_BYTES', '100000'))
 
@@ -206,7 +227,10 @@ class Config:
     LLM_STREAMING_ENABLED = _env_bool('LLM_STREAMING_ENABLED', True)
 
     # Cursor / Claude project hooks (.cursor/hooks.json, .claude/hooks|settings).
-    HOOKS_ENABLED = _env_bool('HOOKS_ENABLED', True)
+    # Off by default for the same reason as LOCAL_SHELL_ENABLED: hooks are shell
+    # commands supplied by the bound workspace, so a caller who controls the
+    # workspace controls what runs.
+    HOOKS_ENABLED = _env_bool('HOOKS_ENABLED', False)
     HOOKS_FAIL_CLOSED = _env_bool('HOOKS_FAIL_CLOSED', False)
     HOOKS_TIMEOUT_SEC = int(os.getenv('HOOKS_TIMEOUT_SEC', '30'))
     HOOKS_MAX_OUTPUT_BYTES = int(os.getenv('HOOKS_MAX_OUTPUT_BYTES', '100000'))
@@ -245,6 +269,24 @@ class Config:
     )
 
     @classmethod
+    def _unfilled_placeholders(cls):
+        """Names of settings whose value still carries an example placeholder.
+
+        The pattern is searched anywhere in the value, not anchored, because
+        placeholders are embedded in composite values such as
+        ``DATABASE_URL=postgresql+asyncpg://user:__POSTGRES_PASSWORD__@host/db``.
+        Only names are returned; values are never surfaced or logged.
+        """
+        found = []
+        for name in dir(cls):
+            if name.startswith('_') or not name.isupper():
+                continue
+            value = getattr(cls, name, None)
+            if isinstance(value, str) and _PLACEHOLDER_PATTERN.search(value):
+                found.append(name)
+        return sorted(found)
+
+    @classmethod
     def validate_config(cls):
         """Validate required configuration values"""
         # Parse MCP servers first
@@ -270,6 +312,29 @@ class Config:
 
         if missing_configs:
             raise ValueError(f"Missing required configuration: {', '.join(missing_configs)}")
+
+        unfilled = cls._unfilled_placeholders()
+        if unfilled:
+            raise ValueError(
+                "Configuration still holds example placeholders: "
+                f"{', '.join(unfilled)}. Copy the tracked .env.example and "
+                "supply real values."
+            )
+
+        if cls.ALLOW_INPLACE_WORKSPACE and not cls.WORKSPACE_ALLOWED_ROOTS.strip():
+            raise ValueError(
+                "ALLOW_INPLACE_WORKSPACE=true requires WORKSPACE_ALLOWED_ROOTS "
+                "to list the absolute container paths callers may bind. Leaving "
+                "it empty permits binding any path on the filesystem."
+            )
+
+        if '*' in cls.CORS_ALLOWED_ORIGINS and cls.CORS_ALLOW_CREDENTIALS:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS='*' cannot be combined with "
+                "CORS_ALLOW_CREDENTIALS=true: it would let any site issue "
+                "credentialed cross-origin requests. List explicit origins "
+                "instead."
+            )
 
         # Validate MCP servers
         if not cls.MCP_SERVER_URLS or len(cls.MCP_SERVER_URLS) == 0:

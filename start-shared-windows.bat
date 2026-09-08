@@ -16,6 +16,11 @@ REM 5432 / 4000 - point the orchestrator at those instead (--no-shared).
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+REM Runs before any compose command: the overlays require LITELLM_MASTER_KEY, so
+REM even 'down' and 'logs' need .env to exist and carry a key.
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\ensure-compose-env.ps1"
+if not %errorlevel%==0 exit /b %errorlevel%
+
 set "COMPOSE=docker compose -f docker-compose.shared.yml -f docker-compose.shared.windows.yml"
 
 set "ARGS=%*"

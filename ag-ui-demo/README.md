@@ -115,13 +115,10 @@ ag-ui-demo/
 │       └── theme.css         # CSS variables / dark mode
 ├── package.json
 ├── tsconfig.json
-├── vite.config.ts
-└── PLAN.md
+└── vite.config.ts
 ```
 
 ## Architecture Notes
-
-See [PLAN.md](./PLAN.md) for the design document.
 
 The demo uses **fetch + ReadableStream** to consume SSE from `POST /api/ag-ui/run` (the AG-UI protocol uses POST for runs, not GET). The global events endpoint (`GET /api/ag-ui/events`) uses the standard `EventSource` API via the `useSSE` hook.
 

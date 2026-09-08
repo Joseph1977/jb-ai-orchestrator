@@ -11,18 +11,20 @@ services:
     build: .
     container_name: jb-ai-orchestrator
     ports:
-      - "8000:8000"
+      # Loopback by default: the service has no authentication of its own, so it
+      # must not be reachable from the network without a gateway in front. Set
+      # BIND_ADDR=0.0.0.0 only once something authenticates callers.
+      - "${BIND_ADDR:-127.0.0.1}:${AGENT_PORT:-8000}:8000"
     env_file:
       - ./src/.env/docker/.env
     environment:
       - ENV=docker
       # In-place workflow input: mount host folders under /workspaces (or other roots
       # below) and list every container path callers may bind in WORKSPACE_ALLOWED_ROOTS.
-      # OUTPUT_BINDINGS_ENABLED stays false here (secure default). Deployments that
-      # send non-null output bindings must opt in to true in their own compose/env.
-      - ALLOW_INPLACE_WORKSPACE=true
+      # ALLOW_INPLACE_WORKSPACE and OUTPUT_BINDINGS_ENABLED are deliberately not set
+      # here so src/.env/docker/.env stays the single place that decides them; a
+      # value listed here would silently override that file.
       - WORKSPACE_ALLOWED_ROOTS=/workspaces
-      - OUTPUT_BINDINGS_ENABLED=false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -42,7 +42,7 @@ Two consequences are contracts:
 | Lifecycle, resume, close, persistence | `docs/ORCHESTRATOR.md` §10, §12, §13 |
 | `src/app/controllers/**`, public API | `readme.md` — the caller-facing contract |
 | `alembic/versions/**` | `docs/ORCHESTRATOR.md` §13 before adding a revision |
-| `ag-ui-demo/**` | `ag-ui-demo/README.md`. Its `PLAN.md` is historical — do not treat it as current |
+| `ag-ui-demo/**` | `ag-ui-demo/README.md` |
 
 `docs/ORCHESTRATOR.md` is the source of truth for harness and lifecycle
 behaviour; `readme.md` is the source of truth for the caller-facing API.
