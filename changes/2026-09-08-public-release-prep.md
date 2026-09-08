@@ -82,6 +82,11 @@ error preference this aborted the run before either environment file existed,
 so the Windows quickstart failed outright. Permissions are now set with
 `icacls`, which needs no module.
 
+The shell script sets `umask 077` for the same reason. It rewrites `.env`
+through a temporary file, and a redirect obeys the caller's umask, so the
+generated secret was briefly world-readable under the common `022` — as was
+`.env` itself, since `mv` carries the source's mode across.
+
 Failure there still stops the run, matching `set -e` in the shell script:
 git-ignored keeps a file out of commits, not away from another account on the
 same machine, so continuing with a readable credential is not an option. The

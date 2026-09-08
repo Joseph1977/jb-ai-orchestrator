@@ -16,6 +16,11 @@
 # Called by start-shared-mac.sh and start-agent-mac.sh; the Windows launchers
 # run scripts/ensure-compose-env.ps1, which does the same work.
 set -euo pipefail
+# Every file below holds a generated credential, including the temporary one the
+# rewrite redirects into. A redirect obeys the caller's umask, so without this
+# the temporary file would be world-readable under the common 022 — and mv keeps
+# the source's mode, so .env would inherit it until the chmod that follows.
+umask 077
 cd "$(dirname "$0")/.."
 
 # Secrets to generate into ./.env, as "VARIABLE:prefix". The prefix exists
