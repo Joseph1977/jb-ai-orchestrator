@@ -37,3 +37,61 @@ jobs:
         # Several tests shell out to git; conftest supplies the identity via
         # GIT_AUTHOR_*/GIT_COMMITTER_* so no global git config is needed.
         run: pytest -q
+
+  # The launchers generate the deployment's credentials, so a bug here ships a
+  # predictable password. The Linux job above already covers the shell script
+  # and pwsh; this covers the interpreter start-*-windows.bat actually invokes.
+  bootstrap-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install test dependencies
+        # The bootstrap tests drive the scripts as subprocesses and import no
+        # application code, so the runtime dependencies are not needed.
+        run: python -m pip install "pytest>=8.0.0" "pytest-asyncio>=0.23.0"
+
+      - name: Run bootstrap tests
+        # Parameterised over every PowerShell present. windows-latest carries
+        # both pwsh 7 and Windows PowerShell 5.1, so both run here.
+        run: pytest tests/test_compose_bootstrap.py -q
+
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ag-ui-demo/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ag-ui-demo
+        run: npm ci
+
+      - name: Type-check and build
+        working-directory: ag-ui-demo
+        run: npm run build
+
+      - name: Run tests
+        working-directory: ag-ui-demo
+        run: npm test
+
+  # Trailing whitespace makes `git diff --check` noisy for everyone who later
+  # touches the same line, so reject it at the point it is introduced.
+  whitespace:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for whitespace errors
+        run: git diff --check "origin/${{ github.base_ref }}...HEAD"
