@@ -315,10 +315,12 @@ class Config:
 
         unfilled = cls._unfilled_placeholders()
         if unfilled:
+            env_name = os.getenv('ENV', 'localhost')
             raise ValueError(
                 "Configuration still holds example placeholders: "
-                f"{', '.join(unfilled)}. Copy the tracked .env.example and "
-                "supply real values."
+                f"{', '.join(unfilled)}. Replace them with real values in "
+                f"src/.env/{env_name}/.env, or supply them from your "
+                "deployment environment."
             )
 
         if cls.ALLOW_INPLACE_WORKSPACE and not cls.WORKSPACE_ALLOWED_ROOTS.strip():
