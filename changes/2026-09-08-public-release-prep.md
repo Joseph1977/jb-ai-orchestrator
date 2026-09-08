@@ -79,10 +79,15 @@ kind. Restricting the file used `Get-Acl`, which lives in
 `Microsoft.PowerShell.Security`, and 5.1 cannot autoload that module when
 `PSModulePath` omits the Windows PowerShell module directories. Under a `Stop`
 error preference this aborted the run before either environment file existed,
-so the quickstart failed outright rather than merely skipping the hardening.
-Permissions are now set with `icacls`, which needs no module, and a failure
-warns instead of stopping: these files are git-ignored, so inherited
-permissions on a local file matter far less than a clone that cannot start.
+so the Windows quickstart failed outright. Permissions are now set with
+`icacls`, which needs no module.
+
+Failure there still stops the run, matching `set -e` in the shell script:
+git-ignored keeps a file out of commits, not away from another account on the
+same machine, so continuing with a readable credential is not an option. The
+secret path restricts the file before writing rather than after — truncating an
+existing file keeps its permissions — so an abort leaves the generated value in
+memory and never on disk.
 
 **Internal material removed.** The `dev-usc1`, `qa-usc1`, `sb-usc1` and
 `prod-usc1` environment directories carried private gateway hostnames and are
