@@ -69,6 +69,10 @@ from app.services.harness import (
     render_system_prompt,
 )
 from app.services.local_tool_provider import LocalToolContext
+from app.services.resume_options import (
+    resolve_resume_max_tool_calls,
+    resolve_resume_model,
+)
 from app.services.run_lifecycle import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -967,6 +971,16 @@ async def resume(request: OrchestratorResumeInput):
         resume_state["messages"] = _refresh_resume_messages(
             resume_state, segment_config
         )
+        resolved_model = resolve_resume_model(
+            request.model,
+            resume_state.get("model"),
+            segment_config.get("model"),
+        )
+        resolved_max_calls = resolve_resume_max_tool_calls(
+            request.maxToolCalls,
+            resume_state.get("max_calls"),
+            segment_config.get("maxToolCalls"),
+        )
         local_ctx = _local_context(
             execution,
             segment_config,
@@ -976,8 +990,8 @@ async def resume(request: OrchestratorResumeInput):
         hub = get_tool_hub()
         return await hub.process_request(
             request=resume_state.get("request", ""),
-            model=resume_state.get("model", "gpt-3.5-turbo"),
-            max_tool_calls=resume_state.get("max_calls"),
+            model=resolved_model,
+            max_tool_calls=resolved_max_calls,
             requested_tools=resume_state.get("requested_tools"),
             resume_state=resume_state,
             resume_tool_results=[tool_result],

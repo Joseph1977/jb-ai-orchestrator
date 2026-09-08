@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 # Keys safe to log at INFO (explicit allowlist).
 _SAFE_LOG_KEYS = frozenset(
@@ -69,6 +70,62 @@ def redact_value(key: str, value: Any) -> str:
     return text
 
 
+def redact_url(value: Any) -> str:
+    """Return a URL reduced to the part that is safe to log.
+
+    An endpoint is configuration, not a secret, but operators routinely embed
+    credentials in one: userinfo before the host (``https://user:pass@host``),
+    a token in the query string, or one in the fragment. All three are dropped
+    and only ``scheme://host[:port]/path`` survives, which is what makes a log
+    line useful for diagnosis.
+
+    A value that is not a parsable absolute URL is never echoed, because the
+    reason it failed to parse is usually that it is not the thing we assumed.
+    """
+    if value is None:
+        return "(unset)"
+
+    text = str(value).strip()
+    if not text:
+        return "(unset)"
+
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return "(unparsable url)"
+
+    if not parts.scheme or not parts.hostname:
+        return "(unparsable url)"
+
+    origin = f"{parts.scheme}://{parts.hostname}"
+    try:
+        if parts.port:
+            origin += f":{parts.port}"
+    except ValueError:
+        # A non-numeric port means the authority is malformed; the host we
+        # already extracted is still safe to show.
+        pass
+
+    redacted = origin + parts.path
+    if parts.username or parts.password:
+        redacted += " (credentials removed)"
+    if parts.query or parts.fragment:
+        redacted += " (query removed)"
+    return redacted
+
+
+def describe_malformed_value(value: Any) -> str:
+    """Describe an unparsable config value without reproducing its content.
+
+    Malformed input is logged so the operator can find it, but the value is
+    exactly the thing most likely to hold a mistyped credential, so only its
+    shape is reported.
+    """
+    if value is None:
+        return "(unset)"
+    return f"{len(str(value))} characters, not echoed"
+
+
 def safe_config_snapshot(config_cls: type) -> dict[str, str]:
     """Build an allowlisted, redacted snapshot of Config for logging."""
     snapshot: dict[str, str] = {}
@@ -82,8 +139,8 @@ def safe_config_snapshot(config_cls: type) -> dict[str, str]:
         snapshot["MCP_SERVER_NAMES"] = ", ".join(
             str(s.get("name", "?")) for s in urls if isinstance(s, dict)
         )
-    snapshot["LITELLM_BASE_URL"] = redact_value(
-        "LITELLM_BASE_URL", getattr(config_cls, "LITELLM_BASE_URL", None)
+    snapshot["LITELLM_BASE_URL"] = redact_url(
+        getattr(config_cls, "LITELLM_BASE_URL", None)
     )
     snapshot["DATABASE_URL"] = redact_value(
         "DATABASE_URL", getattr(config_cls, "DATABASE_URL", None)

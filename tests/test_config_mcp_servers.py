@@ -138,6 +138,7 @@ def test_array_entry_missing_name_becomes_default(monkeypatch):
 def test_array_entry_missing_url_is_kept_then_rejected(monkeypatch):
     """Unlike the numbered form, a bad array entry is not skipped — it fails validation."""
     monkeypatch.setattr("app.config.Config.DATABASE_URL", "postgresql+asyncpg://x/y")
+    monkeypatch.setattr("app.config.Config.LITELLM_API_KEY", "sk-test")
     monkeypatch.setenv("MCP_SERVER_URLS", '[{"name": "a"}]')
     Config._parse_mcp_servers()
     assert Config.MCP_SERVER_URLS == [{"name": "a"}]
@@ -161,12 +162,14 @@ def test_no_configuration_yields_empty_list():
 
 def test_validate_config_requires_at_least_one_server(monkeypatch):
     monkeypatch.setattr("app.config.Config.DATABASE_URL", "postgresql+asyncpg://x/y")
+    monkeypatch.setattr("app.config.Config.LITELLM_API_KEY", "sk-test")
     with pytest.raises(ValueError, match="At least one MCP server URL"):
         Config.validate_config()
 
 
 def test_validate_config_accepts_named_servers(monkeypatch):
     monkeypatch.setattr("app.config.Config.DATABASE_URL", "postgresql+asyncpg://x/y")
+    monkeypatch.setattr("app.config.Config.LITELLM_API_KEY", "sk-test")
     monkeypatch.setenv("MCP_SERVER_URLS", '[{"name": "general", "url": "http://a/mcp"}]')
     Config.validate_config()
     assert Config.MCP_SERVER_URLS == [{"name": "general", "url": "http://a/mcp"}]

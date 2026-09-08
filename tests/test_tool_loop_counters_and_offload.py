@@ -49,7 +49,7 @@ class FakeMCPService:
         ]
 
     async def call_litellm(self, messages, model="gpt", tools=None, **kwargs):
-        self.calls.append({"messages": messages, "tools": tools})
+        self.calls.append({"messages": messages, "model": model, "tools": tools})
         if not self._responses:
             raise AssertionError("unexpected LLM call")
         return self._responses.pop(0)
@@ -268,10 +268,133 @@ def test_single_segment_exceeding_cap_fails(monkeypatch):
             include_agui_tools=False,
         )
         assert res["success"] is False
+        assert res["error_code"] == "MAX_TOOL_CALLS"
         assert "Maximum tool calls" in res["error"]
         assert res["segment_tool_calls_made"] == 2
         assert res["tool_calls_made"] == 2
         assert len(fake.mcp_executed) == 2
+
+    asyncio.run(run())
+
+
+def test_single_segment_reaching_cap_at_loop_exit_has_structured_error(monkeypatch):
+    monkeypatch.setattr(Config, "MAX_TOOL_CALLS", 2)
+
+    async def run():
+        mcp = [
+            MCPTool(
+                name="sync_tool",
+                description="sync",
+                input_schema={},
+                server_url="http://x",
+                server_name="srv",
+                original_name="sync_tool",
+            )
+        ]
+        fake = FakeMCPService(
+            [
+                _llm_tool_calls([
+                    ("sync_tool", {}, "a"),
+                    ("sync_tool", {}, "b"),
+                ]),
+            ],
+            mcp_tools=mcp,
+        )
+        res = await _hub(fake).process_request(
+            request="go",
+            include_agui_tools=False,
+        )
+        assert res["success"] is False
+        assert res["error_code"] == "MAX_TOOL_CALLS"
+        assert res["segment_tool_calls_made"] == 2
+        assert len(fake.mcp_executed) == 2
+
+    asyncio.run(run())
+
+
+def test_resume_explicit_options_override_snapshot_and_persist():
+    async def run():
+        frontend = [{
+            "name": "Ask",
+            "description": "Ask",
+            "parameters": {"type": "object", "properties": {}},
+            "extensions": {"awaitsResponse": True},
+        }]
+        ask_name = agui_service.build_records(frontend)[0].prefixed_name
+        ctx = AGUIRunContext(thread_id="t-override", run_id="r-override")
+
+        first_fake = FakeMCPService([
+            _llm_tool_calls([(ask_name, {}, "ask-first")]),
+        ])
+        first = await _hub(first_fake).process_request(
+            request="go",
+            model="snapshot-model",
+            max_tool_calls=2,
+            include_agui_tools=True,
+            frontend_tools=frontend,
+            agui_context=ctx,
+        )
+
+        second_fake = FakeMCPService([
+            _llm_tool_calls([(ask_name, {}, "ask-second")]),
+        ])
+        second = await _hub(second_fake).process_request(
+            request="go",
+            model="request-model",
+            max_tool_calls=7,
+            resume_state=first["state"],
+            resume_tool_results=[
+                {"tool_call_id": "ask-first", "result": {"answer": "continue"}}
+            ],
+            include_agui_tools=True,
+            frontend_tools=frontend,
+            agui_context=ctx,
+        )
+
+        assert second_fake.calls[0]["model"] == "request-model"
+        assert second["state"]["model"] == "request-model"
+        assert second["state"]["max_calls"] == 7
+
+    asyncio.run(run())
+
+
+def test_resume_without_explicit_budget_uses_snapshot():
+    async def run():
+        frontend = [{
+            "name": "Ask",
+            "description": "Ask",
+            "parameters": {"type": "object", "properties": {}},
+            "extensions": {"awaitsResponse": True},
+        }]
+        ask_name = agui_service.build_records(frontend)[0].prefixed_name
+        ctx = AGUIRunContext(thread_id="t-snapshot", run_id="r-snapshot")
+        first_fake = FakeMCPService([
+            _llm_tool_calls([(ask_name, {}, "ask-first")]),
+        ])
+        first = await _hub(first_fake).process_request(
+            request="go",
+            max_tool_calls=2,
+            include_agui_tools=True,
+            frontend_tools=frontend,
+            agui_context=ctx,
+        )
+        first["state"]["max_calls"] = 0
+
+        resumed_fake = FakeMCPService([])
+        resumed = await _hub(resumed_fake).process_request(
+            request="go",
+            resume_state=first["state"],
+            resume_tool_results=[
+                {"tool_call_id": "ask-first", "result": {"answer": "continue"}}
+            ],
+            include_agui_tools=True,
+            frontend_tools=frontend,
+            agui_context=ctx,
+        )
+
+        assert resumed["success"] is False
+        assert resumed["error_code"] == "MAX_TOOL_CALLS"
+        assert resumed_fake.calls == []
 
     asyncio.run(run())
 

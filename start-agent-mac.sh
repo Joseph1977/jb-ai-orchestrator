@@ -24,6 +24,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Runs before any compose command: the stack overlay requires
+# LITELLM_MASTER_KEY, so even `down` and `logs` need .env to exist.
+./scripts/ensure-compose-env.sh
+
 ENSURE_SHARED=0
 USE_SHARED=1
 ARGS=()

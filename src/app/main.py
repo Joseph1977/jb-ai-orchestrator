@@ -19,6 +19,7 @@ from app.services.binding_contract import (
     stable_binding_validation_error,
 )
 from app.utils.logger import logger, initialize_logger
+from app.utils.config_logging import redact_url
 
 
 @asynccontextmanager
@@ -28,11 +29,9 @@ async def lifespan(app: FastAPI):
         initialize_logger()
         Config.validate_config()
         logger.info(f"Starting {Config.SERVICE_NAME} in {Config.ENVIRONMENT} environment")
-        logger.info(f"Configured {len(Config.MCP_SERVER_URLS)} MCP servers:")
-        for i, url in enumerate(Config.MCP_SERVER_URLS):
-            logger.info(f"  - mcp{i+1}: {url}")
-        logger.info(f"LiteLLM Server URL: {Config.LITELLM_BASE_URL}")
-        
+        # validate_config() above already listed the MCP servers, redacted.
+        logger.info("LiteLLM Server URL: %s", redact_url(Config.LITELLM_BASE_URL))
+
         # Initialize MCP service after configuration is loaded
         await init_db()
         from app.controllers.agent_controller import initialize_mcp_service
@@ -41,9 +40,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to start service: {str(e)}")
         raise
-    
+
     yield
-    
+
     # Shutdown (if needed)
     logger.info(f"Shutting down {Config.SERVICE_NAME}")
 
@@ -53,9 +52,12 @@ app = FastAPI(
     description="AI Agent service with MCP tools integration",
     version="1.0.0",
     # Use /swagger instead of /docs
-    docs_url="/swagger",
+    docs_url="/swagger" if Config.DOCS_ENABLED else None,
     # Disable ReDoc as we only want Swagger
     redoc_url=None,
+    # Withdrawing the schema too, so DOCS_ENABLED=false leaves no route that
+    # still describes the API.
+    openapi_url="/openapi.json" if Config.DOCS_ENABLED else None,
     root_path=Config.SWAGGER_BASE_PATH,
     lifespan=lifespan
 )
@@ -83,11 +85,12 @@ async def sanitized_request_validation_handler(
     )
 
 
-# Add CORS middleware
+# Add CORS middleware. With no configured origins the middleware matches
+# nothing and emits no headers, which is the intended default-deny.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=Config.CORS_ALLOWED_ORIGINS,
+    allow_credentials=Config.CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

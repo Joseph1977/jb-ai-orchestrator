@@ -614,6 +614,43 @@ async def _write_output(args: Dict[str, Any], ctx: LocalToolContext) -> Dict[str
     return {"path": path, "bytesWritten": count, "durable": True}
 
 
+async def _edit_output(args: Dict[str, Any], ctx: LocalToolContext) -> Dict[str, Any]:
+    """Exact string replacement in a bound durable-output file."""
+    if ctx.output_backend is None:
+        return {"error": "No durable output store is bound"}
+    path = args.get("path")
+    old = args.get("old_string")
+    new = args.get("new_string")
+    if not path:
+        return {"error": "path is required"}
+    if old is None or old == "":
+        return {"error": "old_string is required and must be non-empty"}
+    if new is None:
+        return {"error": "new_string is required"}
+    replace_all = bool(args.get("replace_all", False))
+
+    original = await ctx.output_backend.read_text(str(path))
+    count = original.count(old)
+    if count == 0:
+        return {"error": f"old_string not found in {path}"}
+    if count > 1 and not replace_all:
+        return {
+            "error": (
+                f"old_string matched {count} times in {path}; "
+                "pass replace_all=true or provide a more unique string"
+            )
+        }
+
+    updated = original.replace(old, new) if replace_all else original.replace(old, new, 1)
+    bytes_written = await ctx.output_backend.write_text(str(path), updated)
+    return {
+        "path": path,
+        "replacements": count if replace_all else 1,
+        "bytesWritten": bytes_written,
+        "durable": True,
+    }
+
+
 async def _read_output(args: Dict[str, Any], ctx: LocalToolContext) -> Dict[str, Any]:
     if ctx.output_backend is None:
         return {"error": "No durable output store is bound"}
@@ -641,6 +678,10 @@ async def _list_output(args: Dict[str, Any], ctx: LocalToolContext) -> Dict[str,
 # --------------------------------------------------------------------------
 
 _PATH_PROP = {"type": "string", "description": "Workspace-relative path"}
+_OUTPUT_PATH_PROP = {
+    "type": "string",
+    "description": "Path relative to the bound durable output root",
+}
 
 _TOOLS: List[LocalTool] = [
     LocalTool(
@@ -870,17 +911,39 @@ _TOOLS: List[LocalTool] = [
         description="Write UTF-8 text directly to the bound durable output store.",
         parameters={
             "type": "object",
-            "properties": {"path": _PATH_PROP, "content": {"type": "string"}},
+            "properties": {"path": _OUTPUT_PATH_PROP, "content": {"type": "string"}},
             "required": ["path", "content"],
         },
         handler=_write_output,
+    ),
+    LocalTool(
+        base_name="edit_output",
+        description=(
+            "Exact string replacement in a bound durable-output file. Prefer this "
+            "over write_output for targeted edits. Fails if old_string is missing "
+            "or matches multiple times unless replace_all=true."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": _OUTPUT_PATH_PROP,
+                "old_string": {"type": "string", "description": "Exact text to find"},
+                "new_string": {"type": "string", "description": "Replacement text"},
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every occurrence (default false)",
+                },
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+        handler=_edit_output,
     ),
     LocalTool(
         base_name="read_output",
         description="Read UTF-8 text from the bound durable output store.",
         parameters={
             "type": "object",
-            "properties": {"path": _PATH_PROP},
+            "properties": {"path": _OUTPUT_PATH_PROP},
             "required": ["path"],
         },
         handler=_read_output,
@@ -891,7 +954,7 @@ _TOOLS: List[LocalTool] = [
         parameters={
             "type": "object",
             "properties": {
-                "path": _PATH_PROP,
+                "path": _OUTPUT_PATH_PROP,
                 "nextToken": {"type": "string"},
             },
             "required": [],
@@ -988,7 +1051,7 @@ class LocalToolProvider:
         exclude = set(exclude_base or ())
         exclude.update(blocked_local_tools(mode))
         if not output_bound:
-            exclude.update({"write_output", "read_output", "list_output"})
+            exclude.update({"write_output", "edit_output", "read_output", "list_output"})
         tools = []
         for tool in _TOOLS:
             if tool.base_name in exclude:
@@ -1039,6 +1102,14 @@ class LocalToolProvider:
                     key: value for key, value in args.items() if key != "content"
                 }
                 logged_args["contentChars"] = len(str(args.get("content") or ""))
+            elif tool.base_name == "edit_output":
+                logged_args = {
+                    key: value
+                    for key, value in args.items()
+                    if key not in {"old_string", "new_string"}
+                }
+                logged_args["oldStringChars"] = len(str(args.get("old_string") or ""))
+                logged_args["newStringChars"] = len(str(args.get("new_string") or ""))
             logger.info(
                 "Executing local tool %s args=%s",
                 name,

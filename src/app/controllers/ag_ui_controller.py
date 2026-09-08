@@ -78,6 +78,10 @@ from app.services.binding_runtime import (
     segment_output_backend,
 )
 from app.services.local_tool_provider import LocalToolContext
+from app.services.resume_options import (
+    resolve_resume_max_tool_calls,
+    resolve_resume_model,
+)
 from app.services.run_lifecycle import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -100,11 +104,18 @@ from app.utils.logger import logger
 router = APIRouter(prefix="/api/ag-ui", tags=["AG-UI"])
 
 _RUN_CONFLICT = "RUN_CONFLICT"
+# Deliberately generic, caller-safe text: a run failure must not leak workspace
+# paths, provider errors, or prompt content. A front end that surfaces its own
+# copy of these messages should be updated alongside any change here.
 _PUBLIC_RUN_FAILURES = {
     "TIMEOUT": "The workflow run timed out. The session remains available; try again.",
     "OUTPUT_LIMIT": (
         "The model reply was cut off. The session and any pending question remain "
         "available; try again."
+    ),
+    "MAX_TOOL_CALLS": (
+        "The workflow run stopped after reaching its tool limit. The session and "
+        "any pending question remain available; try again."
     ),
     "RUN_LIFECYCLE_FAILED": (
         "Workflow run tracking failed. The session remains available; try again."
@@ -148,7 +159,7 @@ class AGUIRunRequest(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
     run_id: Annotated[Optional[str], Field(default=None, alias="runId")]
     parent_run_id: Annotated[Optional[str], Field(default=None, alias="parentRunId")]
-    model: Optional[str] = "gpt-3.5-turbo"
+    model: Optional[str] = None
     max_tool_calls: Annotated[Optional[int], Field(default=None, alias="maxToolCalls")]
     llm_request_timeout_in_sec: Annotated[Optional[int], Field(default=None, alias="llmRequestTimeoutInSec")]
     messages: List[Message] = Field(default_factory=list)
@@ -1140,6 +1151,8 @@ async def _handle_tool_response(
     frontend_tools: List[dict],
     *,
     request_thread_id: str,
+    requested_model: Optional[str] = None,
+    requested_max_tool_calls: Optional[int] = None,
     requested_input: Optional[LocationBinding] = None,
     requested_workspace_path: Optional[str] = None,
     requested_output: Optional[LocationBinding] = None,
@@ -1329,6 +1342,16 @@ async def _handle_tool_response(
                 resume_state.get("messages") or [],
                 stored_config,
             )
+            resolved_model = resolve_resume_model(
+                requested_model,
+                resume_state.get("model"),
+                stored_config.get("model"),
+            )
+            resolved_max_calls = resolve_resume_max_tool_calls(
+                requested_max_tool_calls,
+                resume_state.get("max_calls"),
+                stored_config.get("maxToolCalls"),
+            )
             local_context = _local_context_from_segment(
                 execution,
                 stored_config,
@@ -1358,7 +1381,7 @@ async def _handle_tool_response(
                     state_payload=updated_payload,
                     resume_tool_results=resume_payloads,
                     local_context=local_context,
-                    model=updated_payload.get("model", "gpt-3.5-turbo"),
+                    model=resolved_model,
                     lite_llm_timeout=updated_payload.get("lite_llm_request_timeout_in_sec"),
                     agui_context=AGUIRunContext(thread_id=state_thread_id, run_id=state_run_id),
                 )
@@ -1367,8 +1390,8 @@ async def _handle_tool_response(
 
             return await hub.process_request(
                 request=updated_payload.get("request", ""),
-                model=updated_payload.get("model", "gpt-3.5-turbo"),
-                max_tool_calls=updated_payload.get("max_calls"),
+                model=resolved_model,
+                max_tool_calls=resolved_max_calls,
                 requested_tools=updated_payload.get("requested_tools"),
                 resume_state=updated_payload,
                 resume_tool_results=resume_payloads,
@@ -1524,6 +1547,8 @@ async def run_agui_session(payload: AGUIRunRequest):
             all_responses,
             frontend_tools,
             request_thread_id=thread_id,
+            requested_model=payload.model,
+            requested_max_tool_calls=payload.max_tool_calls,
             requested_input=payload.input,
             requested_workspace_path=payload.workspace_path,
             requested_output=payload.output,

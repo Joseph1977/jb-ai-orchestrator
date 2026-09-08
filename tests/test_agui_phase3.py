@@ -258,20 +258,38 @@ async def test_fresh_builds_tagged_binding_block_once():
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_db_thread_and_run_ids():
+@pytest.mark.parametrize(
+    ("request_model", "request_max_calls", "expected_model", "expected_max_calls"),
+    [
+        ("request-model", 9, "request-model", 9),
+        (None, None, "snapshot-model", 4),
+    ],
+)
+async def test_resume_uses_db_ids_and_resolves_request_then_snapshot(
+    request_model,
+    request_max_calls,
+    expected_model,
+    expected_max_calls,
+):
     state_id = uuid.uuid4()
     exec_id = uuid.uuid4()
     run_pk = uuid.uuid4()
     state_payload = {
         "request": "prompt",
-        "model": "gpt-4o",
+        "model": "snapshot-model",
+        "max_calls": 4,
         "pending_tools": [{"tool_call_id": "call_a", "function_name": "AskA", "source": "AGUI"}],
         "messages": [{"role": "system", "content": "Persisted harness"}],
     }
     execution = SimpleNamespace(
         id=exec_id,
         workspace_path="/tmp/ws",
-        config={"mode": "workflow", "runtimePath": "/tmp/runtime"},
+        config={
+            "mode": "workflow",
+            "runtimePath": "/tmp/runtime",
+            "model": "segment-model",
+            "maxToolCalls": 3,
+        },
         source=None,
     )
     state = SimpleNamespace(
@@ -309,6 +327,8 @@ async def test_resume_uses_db_thread_and_run_ids():
         payload = AGUIRunRequest.model_validate({
             "threadId": "thread-from-db",
             "runId": "payload-run",
+            "model": request_model,
+            "maxToolCalls": request_max_calls,
             "state": {"toolCallId": "call_a", "result": {"answer": "a"}},
         })
         resp = await run_agui_session(payload)
@@ -323,6 +343,94 @@ async def test_resume_uses_db_thread_and_run_ids():
     ctx = hub.process_request.await_args.kwargs["agui_context"]
     assert ctx.thread_id == "thread-from-db"
     assert ctx.run_id == "run-from-db"
+    assert hub.process_request.await_args.kwargs["model"] == expected_model
+    assert hub.process_request.await_args.kwargs["max_tool_calls"] == expected_max_calls
+
+
+@pytest.mark.asyncio
+async def test_hook_permission_resume_uses_request_model_for_hook_and_segment():
+    state_id = uuid.uuid4()
+    exec_id = uuid.uuid4()
+    state_payload = {
+        "request": "prompt",
+        "model": "snapshot-model",
+        "max_calls": 4,
+        "pending_tools": [
+            {
+                "tool_call_id": "call_hook",
+                "function_name": "permission",
+                "source": "HOOK_ASK",
+            }
+        ],
+        "messages": [],
+    }
+    execution = SimpleNamespace(
+        id=exec_id,
+        workspace_path="/tmp/ws",
+        config={"mode": "workflow", "model": "segment-model", "maxToolCalls": 3},
+        source=None,
+    )
+    state = SimpleNamespace(
+        id=state_id,
+        execution_id=exec_id,
+        state_payload=state_payload,
+        status=LLMStateStatus.AWAITING_RESPONSE,
+        thread_id="thread-hook",
+        run_id="run-hook",
+    )
+    hub = AsyncMock()
+    hub.prepare_hook_permission_resume_events = AsyncMock(
+        return_value=([], state_payload)
+    )
+    hub.process_request = AsyncMock(
+        return_value={"success": True, "response": "done", "tool_calls_info": []}
+    )
+
+    @asynccontextmanager
+    async def fake_get_session():
+        yield object()
+
+    patches = _resume_entry_patches(state, execution, hub=hub)
+    patches.extend([
+        patch("app.controllers.ag_ui_controller.get_session", fake_get_session),
+        patch(
+            "app.controllers.ag_ui_controller.execution_state_service.try_claim_state_for_resume",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "app.controllers.ag_ui_controller.execution_state_service.update_execution",
+            AsyncMock(),
+        ),
+        patch(
+            "app.controllers.ag_ui_controller._ensure_workspace_for_agui_segment",
+            AsyncMock(return_value="/tmp/ws"),
+        ),
+        patch("app.controllers.ag_ui_controller._finalize", AsyncMock()),
+        patch(
+            "app.controllers.ag_ui_controller._complete_claimed_state",
+            AsyncMock(return_value=True),
+        ),
+    ])
+    with _apply_patches(patches):
+        payload = AGUIRunRequest.model_validate(
+            {
+                "threadId": "thread-hook",
+                "model": "request-model",
+                "maxToolCalls": 9,
+                "state": {
+                    "toolCallId": "call_hook",
+                    "result": {"approved": True},
+                },
+            }
+        )
+        response = await run_agui_session(payload)
+        await _read_sse_events(response)
+
+    hook_kwargs = hub.prepare_hook_permission_resume_events.await_args.kwargs
+    segment_kwargs = hub.process_request.await_args.kwargs
+    assert hook_kwargs["model"] == "request-model"
+    assert segment_kwargs["model"] == "request-model"
+    assert segment_kwargs["max_tool_calls"] == 9
 
 
 @pytest.mark.asyncio

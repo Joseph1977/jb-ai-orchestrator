@@ -164,25 +164,32 @@ This policy covers built-in local tools; arbitrary MCP write semantics remain
 the responsibility of each MCP server.
 
 When output is bound, the model receives `write_output_local`,
-`read_output_local`, and `list_output_local`. Paths are logical and relative;
-absolute paths, `..`, and `.agent/**` are rejected. `list_files_local` returns
-separate `input` and `output` partitions. `read_file_local` never silently
-redirects to output: it notes overlaps and points to `read_output_local`, with
-durable output authoritative for workflow state.
+`edit_output_local`, `read_output_local`, and `list_output_local`. Paths are
+logical and relative; absolute paths, `..`, and `.agent/**` are rejected.
+`list_files_local` returns separate `input` and `output` partitions.
+`read_file_local` never silently redirects to output: it notes overlaps and
+points to `read_output_local`, with durable output authoritative for workflow
+state.
 
 The caller's output URI plus `relativePath` is authoritative. The backend applies
 `relativePath` once when it builds the segment-scoped output backend; tool paths
-are relative to that effective root and must not repeat the prefix. Every durable
-write uses `write_output_local`—input-writing tools are never an alternate output
-route. The storage engine can construct an output backend without input, but a
-workspace-free AG-UI run does not create a local tool context and therefore does
-not expose output tools; output-only is not currently a supported caller workflow.
-Unbound workflow sessions cannot invent or claim a persistence location.
+are relative to that effective root and must not repeat the prefix. Durable files
+are created or replaced with `write_output_local`; exact targeted replacements
+in existing files use `edit_output_local`. Input-writing tools are never an
+alternate output route. The storage engine can construct an output backend
+without input, but a workspace-free AG-UI run does not create a local tool
+context and therefore does not expose output tools; output-only is not currently
+a supported caller workflow. Unbound workflow sessions cannot invent or claim a
+persistence location.
 
 Shared-folder writes use a same-directory temporary file followed by
 `os.replace`; concurrent writers are last-writer-wins. A process crash can
 leave a `.output-*` temporary file for operator cleanup. Azure operations are
 asynchronous, bounded, and list results may include `nextToken`.
+`edit_output_local` is a read-modify-write operation on both providers: the
+existing file must fit `OUTPUT_READ_MAX_BYTES`, the replacement must fit
+`OUTPUT_WRITE_MAX_BYTES`, and concurrent edits are last-writer-wins. Azure Blob
+edits do not use ETag preconditions.
 
 Each session also gets a service-owned `runtime_path` under
 `WORKSPACES_ROOT/{id}/runtime` (orchestrator) or
@@ -274,8 +281,9 @@ Returns either a completed result, or when input is required:
 ```
 
 Failed execute/resume results may include a stable `errorCode`. Provider
-failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; raw provider
-response bodies are never returned.
+failures use `QUOTA`, `RATE_LIMIT`, `AUTH`, or `UNAVAILABLE`; exhausting the
+segment tool budget returns `MAX_TOOL_CALLS`. Raw provider response bodies are
+never returned.
 
 Root instruction failures carry two distinct codes, because they send an
 operator to different fixes. `ROOT_INSTRUCTIONS_TOO_LARGE` means the file loaded
@@ -296,9 +304,29 @@ Continue a run that awaited input. Works from **any** instance.
   "stateGuid": "…uuid…",
   "toolCallId": "call_abc",
   "result": { "answer": "yes, proceed" },
-  "error": null
+  "error": null,
+  "model": "gpt-4o",
+  "maxToolCalls": 25
 }
 ```
+
+`model` and `maxToolCalls` are optional per-resume overrides. Resolution is
+compatibility-first: the request value wins, then the persisted await snapshot,
+then the initiated session config. A missing model finally uses
+`gpt-3.5-turbo`; a missing budget is resolved by `MAX_TOOL_CALLS` in the tool
+hub. This preserves existing sessions when callers omit the new fields while
+letting a caller deliberately move a resumed segment to another LiteLLM model
+or provider. Provider changes replay the existing message/tool-call history
+without translation.
+
+The effective model and budget are written into any next await snapshot, so an
+override remains in effect for later resumes until another request overrides
+it. A zero `maxToolCalls` value is valid, matches execute semantics, and causes
+immediate structured `MAX_TOOL_CALLS` exhaustion without executing a tool.
+AG-UI accepts the same `model` / `maxToolCalls` fields on the resume request and
+uses one resolved model for both hook-permission replay and the resumed segment.
+The legacy `/v1/agent/resumeRun` endpoint uses `model` / `max_tool_calls`; it has
+no initiated-session config tier.
 
 ### `GET /v1/orchestrator/{orchestratorGuid}`
 
@@ -699,6 +727,10 @@ Prefixed names below assume the default namespace `local` (e.g. `read_file` → 
 | `grep` | `grep_local` | Regex search over file contents (optional `glob` filter, context lines). |
 | `execute` | `execute_local` | Run a shell command with `cwd` = workspace (see shell notes). |
 | `write_todos` | `write_todos_local` | Replace structured todo list (persists `.agent/todos.json`). |
+| `write_output` | `write_output_local` | Create or fully replace UTF-8 text in the bound durable output store. |
+| `edit_output` | `edit_output_local` | Exact replacement in an existing durable-output file; rejects an empty or missing needle and ambiguous matches unless `replace_all=true`. |
+| `read_output` | `read_output_local` | Read UTF-8 text from the bound durable output store. |
+| `list_output` | `list_output_local` | List logical paths in the bound durable output store. |
 | `task` | `task_local` | Spawn an isolated subagent; returns a summary (see §7). |
 | `git_status` | `git_status_local` | `git status --porcelain`. |
 | `git_diff` | `git_diff_local` | `git diff` (optional staged / path). |
@@ -711,6 +743,15 @@ Prefixed names below assume the default namespace `local` (e.g. `read_file` → 
 File tools resolve paths through `workspace_manager.resolve_within` so `..` /
 absolute escapes are rejected. `execute` is **not** a full OS jail: it only sets
 `cwd` to the workspace (see below).
+
+Durable-output tools are exposed only when an output binding and local tool
+context are active. Their paths are relative to the output binding and reject
+absolute paths, `..`, and reserved `.agent/**` runtime paths. `edit_output_local`
+first reads the complete existing UTF-8 file, then writes the complete
+replacement. It fails without changing the file when the target is missing, the
+needle is empty or absent, the needle is ambiguous without `replace_all=true`,
+or either storage size limit is exceeded. The read-modify-write sequence is not
+an optimistic-concurrency transaction; concurrent edits are last-writer-wins.
 
 ### Shell tool (`execute_local`)
 
@@ -843,11 +884,13 @@ instance can retry.
 ### Resume contracts
 
 - **AG-UI:** canonical `resume[]` can resolve or cancel several interrupts in one
-  request. Unresolved entries remain in `pending_tools`.
+  request. Unresolved entries remain in `pending_tools`; optional `model` /
+  `maxToolCalls` values override the await snapshot.
 - **Orchestrator:** `/v1/orchestrator/resume` accepts one `toolCallId` and result
-  per request.
+  per request, plus optional `model` / `maxToolCalls` overrides.
 - **Direct agent API:** `/v1/agent/resumeRun` uses
-  `executionGuid`/`stateGuid`/`toolCallId`.
+  `executionGuid`/`stateGuid`/`toolCallId` and optional snake-case `model` /
+  `max_tool_calls`.
 - **Hook permission:** the response targets the interrupt's permission ID; an
   approval executes the deferred tool exactly once.
 - **Thread reset:** a fresh executable AG-UI run discards stale awaiting holds
@@ -1088,9 +1131,10 @@ connection remain open until that worker returns. The service emits
 this condition persists; operators must investigate the blocked work rather
 than release its claim by elapsed time.
 Model and segment expiry return `TIMEOUT`; truncated model output returns
-`OUTPUT_LIMIT`. Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than
-being mislabeled as a timeout. These codes describe and safely report the
-attempt; they never decide whether a session is terminal.
+`OUTPUT_LIMIT`; exhausting the segment tool budget returns `MAX_TOOL_CALLS`.
+Heartbeat failure returns `RUN_LIFECYCLE_FAILED` rather than being mislabeled as
+a timeout. These codes describe and safely report the attempt; they never decide
+whether a session is terminal.
 
 #### Claim, state, and retry contract
 

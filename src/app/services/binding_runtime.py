@@ -80,6 +80,7 @@ def binding_system_prompt(config: dict[str, Any]) -> str:
             output_type=str(output.get("type")),
             logical_prefix=str(output.get("relativePath") or "."),
             write_output_tool="write_output_local",
+            edit_output_tool="edit_output_local",
             read_output_tool="read_output_local",
             list_output_tool="list_output_local",
             read_file_tool="read_file_local",

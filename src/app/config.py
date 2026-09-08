@@ -2,11 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import tempfile
 from dotenv import load_dotenv
 from pathlib import Path
 from app.utils.logger import logger
-from app.utils.config_logging import log_safe_configuration
+from app.utils.config_logging import (
+    describe_malformed_value,
+    log_safe_configuration,
+    redact_url,
+)
+
+# Deploy-time substitution markers, e.g. __LITELLM_API_KEY__.
+_PLACEHOLDER_PATTERN = re.compile(r'__[A-Z0-9_]+__')
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -15,6 +23,12 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_list(name: str, default: str = '') -> list:
+    """Parse a comma-separated environment variable into a trimmed list."""
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(',') if item.strip()]
 
 
 def is_running_in_kubernetes():
@@ -73,7 +87,11 @@ class Config:
                         cls.MCP_SERVER_URLS = parsed_urls
                         return
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON format for MCP_SERVER_URLS: {mcp_urls_str}")
+                logger.warning(
+                    "Invalid JSON format for MCP_SERVER_URLS (%s); expected a "
+                    "JSON array of {\"name\", \"url\"} objects",
+                    describe_malformed_value(mcp_urls_str),
+                )
 
         # Option 2: Check for individual numbered URLs (MCP_SERVER_URL_1, MCP_SERVER_URL_2, etc.)
         # These should be JSON objects: {"name": "...", "url": "..."}
@@ -94,7 +112,12 @@ class Config:
                         logger.warning(f"MCP_SERVER_URL_{i} must be a JSON object with 'name' and 'url' properties")
                     i += 1
                 except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON format for MCP_SERVER_URL_{i}: {url_config}")
+                    logger.warning(
+                        "Invalid JSON format for MCP_SERVER_URL_%s (%s); "
+                        "expected a JSON object with 'name' and 'url'",
+                        i,
+                        describe_malformed_value(url_config),
+                    )
                     i += 1
             else:
                 break
@@ -108,7 +131,10 @@ class Config:
 
     # LiteLLM Configuration
     LITELLM_BASE_URL = os.getenv('LITELLM_BASE_URL', 'http://localhost:4000')
-    LITELLM_API_KEY = os.getenv('LITELLM_API_KEY', 'sk-1234')
+    # No default: a shipped key would be the same known credential on every
+    # deployment, and silently falling back to one lets the service start
+    # against an unintended gateway.
+    LITELLM_API_KEY = os.getenv('LITELLM_API_KEY', '')
     LITELLM_REQUEST_TIMEOUT_IN_SEC = int(os.getenv('LITELLM_REQUEST_TIMEOUT_IN_SEC', 300))
     LITELLM_DROP_PARAMS = os.getenv('LITELLM_DROP_PARAMS', 'True')
     # Absolute wall-clock budget for one LiteLLM call (streaming or not).
@@ -125,6 +151,15 @@ class Config:
 
     # Swagger Configuration
     SWAGGER_BASE_PATH = os.getenv('SwaggerBasePath', '')
+    # Interactive API documentation. False withdraws /swagger, /redoc and the
+    # /openapi.json schema together, so the surface is not merely unlinked.
+    DOCS_ENABLED = _env_bool('DOCS_ENABLED', True)
+
+    # CORS. An empty list sends no cross-origin headers, so browsers refuse
+    # cross-site calls; every deployment states its own origins. "*" is an
+    # explicit opt-in and cannot be combined with credentials.
+    CORS_ALLOWED_ORIGINS = _env_list('CORS_ALLOWED_ORIGINS')
+    CORS_ALLOW_CREDENTIALS = _env_bool('CORS_ALLOW_CREDENTIALS', False)
 
     # Agent Configuration
     MAX_TOOL_CALLS = int(os.getenv('MAX_TOOL_CALLS', '10'))
@@ -177,7 +212,9 @@ class Config:
     )
 
     # Local shell tool (execute_local). Runs with cwd=workspace; not a full OS jail.
-    LOCAL_SHELL_ENABLED = _env_bool('LOCAL_SHELL_ENABLED', True)
+    # Off by default: the service has no native authentication, so enabling this
+    # grants command execution to anyone who can reach the API.
+    LOCAL_SHELL_ENABLED = _env_bool('LOCAL_SHELL_ENABLED', False)
     LOCAL_SHELL_TIMEOUT_SEC = int(os.getenv('LOCAL_SHELL_TIMEOUT_SEC', '60'))
     LOCAL_SHELL_MAX_OUTPUT_BYTES = int(os.getenv('LOCAL_SHELL_MAX_OUTPUT_BYTES', '100000'))
 
@@ -206,7 +243,10 @@ class Config:
     LLM_STREAMING_ENABLED = _env_bool('LLM_STREAMING_ENABLED', True)
 
     # Cursor / Claude project hooks (.cursor/hooks.json, .claude/hooks|settings).
-    HOOKS_ENABLED = _env_bool('HOOKS_ENABLED', True)
+    # Off by default for the same reason as LOCAL_SHELL_ENABLED: hooks are shell
+    # commands supplied by the bound workspace, so a caller who controls the
+    # workspace controls what runs.
+    HOOKS_ENABLED = _env_bool('HOOKS_ENABLED', False)
     HOOKS_FAIL_CLOSED = _env_bool('HOOKS_FAIL_CLOSED', False)
     HOOKS_TIMEOUT_SEC = int(os.getenv('HOOKS_TIMEOUT_SEC', '30'))
     HOOKS_MAX_OUTPUT_BYTES = int(os.getenv('HOOKS_MAX_OUTPUT_BYTES', '100000'))
@@ -245,6 +285,24 @@ class Config:
     )
 
     @classmethod
+    def _unfilled_placeholders(cls):
+        """Names of settings whose value still carries an example placeholder.
+
+        The pattern is searched anywhere in the value, not anchored, because
+        placeholders are embedded in composite values such as
+        ``DATABASE_URL=postgresql+asyncpg://user:__POSTGRES_PASSWORD__@host/db``.
+        Only names are returned; values are never surfaced or logged.
+        """
+        found = []
+        for name in dir(cls):
+            if name.startswith('_') or not name.isupper():
+                continue
+            value = getattr(cls, name, None)
+            if isinstance(value, str) and _PLACEHOLDER_PATTERN.search(value):
+                found.append(name)
+        return sorted(found)
+
+    @classmethod
     def validate_config(cls):
         """Validate required configuration values"""
         # Parse MCP servers first
@@ -261,7 +319,7 @@ class Config:
         if cls.RUN_CANCELLATION_WARN_SEC <= 0:
             raise ValueError("RUN_CANCELLATION_WARN_SEC must be greater than zero")
 
-        required_configs = ['DATABASE_URL']
+        required_configs = ['DATABASE_URL', 'LITELLM_API_KEY']
         missing_configs = []
 
         for config in required_configs:
@@ -269,7 +327,39 @@ class Config:
                 missing_configs.append(config)
 
         if missing_configs:
-            raise ValueError(f"Missing required configuration: {', '.join(missing_configs)}")
+            env_name = os.getenv('ENV', 'localhost')
+            raise ValueError(
+                f"Missing required configuration: {', '.join(missing_configs)}. "
+                f"Set them in src/.env/{env_name}/.env or in the deployment "
+                "environment. LITELLM_API_KEY has no default on purpose: it "
+                "must match the key your LiteLLM gateway expects, and the "
+                "launchers generate one into ./.env for the bundled stack."
+            )
+
+        unfilled = cls._unfilled_placeholders()
+        if unfilled:
+            env_name = os.getenv('ENV', 'localhost')
+            raise ValueError(
+                "Configuration still holds example placeholders: "
+                f"{', '.join(unfilled)}. Replace them with real values in "
+                f"src/.env/{env_name}/.env, or supply them from your "
+                "deployment environment."
+            )
+
+        if cls.ALLOW_INPLACE_WORKSPACE and not cls.WORKSPACE_ALLOWED_ROOTS.strip():
+            raise ValueError(
+                "ALLOW_INPLACE_WORKSPACE=true requires WORKSPACE_ALLOWED_ROOTS "
+                "to list the absolute container paths callers may bind. Leaving "
+                "it empty permits binding any path on the filesystem."
+            )
+
+        if '*' in cls.CORS_ALLOWED_ORIGINS and cls.CORS_ALLOW_CREDENTIALS:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS='*' cannot be combined with "
+                "CORS_ALLOW_CREDENTIALS=true: it would let any site issue "
+                "credentialed cross-origin requests. List explicit origins "
+                "instead."
+            )
 
         # Validate MCP servers
         if not cls.MCP_SERVER_URLS or len(cls.MCP_SERVER_URLS) == 0:
@@ -286,7 +376,7 @@ class Config:
         logger.info("Configuration validation passed")
         logger.info(f"Configured {len(cls.MCP_SERVER_URLS)} MCP servers:")
         for server in cls.MCP_SERVER_URLS:
-            logger.info(f"  - {server['name']}: {server['url']}")
+            logger.info("  - %s: %s", server['name'], redact_url(server['url']))
 
 # Dynamically load environment variables into Config (never log raw env).
 for key, value in os.environ.items():

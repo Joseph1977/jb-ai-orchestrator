@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Joseph1977/jb-ai-orchestrator/security/advisories/new
+    about: Report privately. Please do not open a public issue for a vulnerability.
+  - name: Harness and lifecycle behaviour
+    url: https://github.com/Joseph1977/jb-ai-orchestrator/blob/master/docs/ORCHESTRATOR.md
+    about: The source of truth for workspace loading, the tool loop, resume and close.
+  - name: Caller-facing API
+    url: https://github.com/Joseph1977/jb-ai-orchestrator/blob/master/readme.md
+    about: Endpoints, request shapes, configuration and the quick start.

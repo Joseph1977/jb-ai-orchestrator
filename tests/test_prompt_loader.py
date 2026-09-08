@@ -17,12 +17,14 @@ def test_load_output_binding_template():
         output_type="azure_blob",
         logical_prefix="projects/demo",
         write_output_tool="write_output",
+        edit_output_tool="edit_output",
         read_output_tool="read_output",
         list_output_tool="list_output",
         read_file_tool="read_file_local",
     )
     assert "azure_blob" in filled["system"]
     assert "run-binding:start" in filled["system"]
+    assert "edit_output" in filled["system"]
     assert "https://" not in filled["system"]
     assert "sas" not in filled["system"].lower()
 

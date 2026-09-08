@@ -30,11 +30,13 @@ services:
     container_name: jb-ai-shared-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # No fallback: this database is reachable from the host, so a default
+      # password would be a known credential on every deployment.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in ./.env — run ./start-shared-mac.sh or start-shared-windows.bat to generate one}
       # Neutral admin DB; the agent creates its own (pyagent) on first boot.
       POSTGRES_DB: ${SHARED_POSTGRES_DB:-postgres}
     ports:
-      - "${SHARED_PG_PORT:-5432}:5432"
+      - "${BIND_ADDR:-127.0.0.1}:${SHARED_PG_PORT:-5432}:5432"
     volumes:
       - shared_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -51,17 +53,21 @@ services:
     container_name: jb-ai-shared-litellm
     command: ["--config", "/app/config.yaml", "--port", "4000"]
     ports:
-      - "${LITELLM_PORT:-4000}:4000"
+      - "${BIND_ADDR:-127.0.0.1}:${LITELLM_PORT:-4000}:4000"
     environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-1234}
+      # No fallback: a published default key would be a known credential on
+      # every deployment. The launchers write a generated key into ./.env.
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in ./.env — run ./start-shared-mac.sh or start-shared-windows.bat to generate one}
       # Admin UI (models/keys/spend/logs) is DB-backed. Points at the shared
       # Postgres over the network; the `litellm` DB is created by the launcher.
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${LITELLM_DB:-litellm}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in ./.env}@postgres:5432/${LITELLM_DB:-litellm}
       # Surface config.yaml models in the UI and allow adding more from there.
       STORE_MODEL_IN_DB: "true"
       # UI login: use these, or the master key above.
       UI_USERNAME: ${LITELLM_UI_USERNAME:-admin}
-      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-${LITELLM_MASTER_KEY:-sk-1234}}
+      # Falls back to the generated master key, never to a literal. The inner
+      # :? makes an unset key a startup failure rather than a known password.
+      UI_PASSWORD: ${LITELLM_UI_PASSWORD:-${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in ./.env — run ./start-shared-mac.sh or start-shared-windows.bat to generate one}}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

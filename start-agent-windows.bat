@@ -24,6 +24,11 @@ REM Anything left after our own flags is forwarded to `docker compose`.
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+REM Runs before any compose command: the stack overlay requires
+REM LITELLM_MASTER_KEY, so even 'down' and 'logs' need .env to exist.
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\ensure-compose-env.ps1"
+if not %errorlevel%==0 exit /b %errorlevel%
+
 set "ENSURE_SHARED=0"
 set "USE_SHARED=1"
 set "ARGS="

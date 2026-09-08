@@ -1,0 +1,26 @@
+# Text files are stored with LF in the repository regardless of the platform
+# they were authored on. Without this, files committed from Windows arrive with
+# CRLF and later edits on another machine rewrite whole files, burying real
+# changes in line-ending noise.
+* text=auto eol=lf
+
+# Pinned to CRLF: the Windows shell parses these itself, and cmd.exe can
+# mishandle LF-only batch files around labels and `goto`.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Never transform these, and do not attempt to diff them as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary
