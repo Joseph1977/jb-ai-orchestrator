@@ -54,7 +54,14 @@ behaviour; `readme.md` is the source of truth for the caller-facing API.
 - Pull the latest `on-going-dev` into your branch and resolve conflicts locally
   before opening or updating a pull request.
 - Update `master` only through a pull request from `on-going-dev`.
+- Never push directly to `master` or `on-going-dev`.
 - Do not merge your own pull request.
+- An urgent fix to what is released branches from `origin/master` as
+  `hotfix/<something>` and reaches `master` by pull request. Immediately after
+  it merges, apply the same fix on a branch cut from the current
+  `origin/on-going-dev` and open a second pull request there. Until that lands,
+  `on-going-dev` lacks the fix and the next promotion would undo it. See
+  `CONTRIBUTING.md` §Fixing production.
 - Never commit real credentials. Application settings live in
   `src/.env/{ENV}/.env` and secrets there are placeholders of the form
   `__VARIABLE_NAME__`, substituted at deploy time. `.env` files holding real

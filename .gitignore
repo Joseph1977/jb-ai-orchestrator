@@ -134,6 +134,16 @@ src/.env/localhost/.env
 src/.env/docker/.env
 # Compose-layer secrets for the shared stack (see .env.example).
 /.env
+
+# Certificate and key material — never commit private keys. Listed so a stray
+# key in the tree cannot be added by accident; nothing here is tracked.
+*.pem
+*.crt
+*.cer
+*.key
+*.p12
+*.pfx
+
 .venv
 env/
 venv/

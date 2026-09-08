@@ -74,6 +74,25 @@ a local run.
 5. Rebase or merge the latest `on-going-dev` into your branch and resolve
    conflicts locally before opening or updating a pull request.
 
+Never push directly to `master` or `on-going-dev`. Both advance only by pull
+request.
+
+## Fixing production
+
+An urgent fix to what is released cannot wait behind everything queued on
+`on-going-dev`, so it takes a shorter route — and then has to be paid back, or
+the next promotion silently reverts it.
+
+1. Branch from `origin/master`, named `hotfix/<something>`.
+2. Open a pull request into `master`. That is the only way the fix reaches it.
+3. Once merged, apply the same fix on a branch cut from the current
+   `origin/on-going-dev` and open a second pull request into `on-going-dev`.
+
+Do the third step immediately, not later. Until it lands, `on-going-dev` is
+missing the fix, and the next `on-going-dev` → `master` promotion would undo
+it. Resolving the conflict there — while the fix is fresh — is the point of
+doing it straight away.
+
 ## House style
 
 - Match the surrounding code. This codebase favours explicit, readable
