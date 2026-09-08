@@ -1,0 +1,10 @@
+# Commits that changed formatting only. `git blame` should look straight
+# through these to the commit that last changed the actual code.
+#
+# Activate once per clone:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub applies this file automatically in its blame view.
+
+# Normalize stored line endings to LF
+490da5822d3371485634d768e6d4a7abeaa3f33b
