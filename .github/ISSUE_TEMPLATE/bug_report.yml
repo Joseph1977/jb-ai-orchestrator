@@ -1,0 +1,76 @@
+name: Bug report
+description: Something behaves differently from how it is documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not report security vulnerabilities here — see
+        [SECURITY.md](https://github.com/Joseph1977/jb-ai-orchestrator/blob/master/SECURITY.md)
+        for private reporting.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest sequence that shows the problem. Request bodies and the
+        endpoints you called are more useful than a prose description.
+      placeholder: |
+        1. POST /v1/orchestrator/initiate with { "folder": "..." }
+        2. POST /v1/orchestrator/execute with { "prompt": "..." }
+        3. Response is ... instead of ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Commit SHA or tag.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-run
+    attributes:
+      label: How are you running it
+      options:
+        - Docker with the shared stack
+        - Docker against my own Postgres and LiteLLM
+        - Locally without Docker
+        - Something else (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant configuration
+      description: >
+        The settings that bear on the problem — for example ALLOW_INPLACE_WORKSPACE,
+        WORKSPACE_ALLOWED_ROOTS, LOCAL_SHELL_ENABLED, HOOKS_ENABLED,
+        OUTPUT_BINDINGS_ENABLED, CORS_ALLOWED_ORIGINS.
+        **Redact keys, passwords and connection strings.**
+      render: shell
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Service logs around the failure, with credentials removed.
+      render: shell
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and provider
+      description: Which model string, reached through which LiteLLM provider.

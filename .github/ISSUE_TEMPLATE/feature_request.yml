@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a capability or change to the engine
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The orchestrator is a generic execution engine: it should run any
+        workflow, authored by any tool, against any provider. Proposals that
+        move workflow-specific policy into the engine are usually better solved
+        in a workflow's own rules — see
+        [CONTRIBUTING.md](https://github.com/Joseph1977/jb-ai-orchestrator/blob/master/CONTRIBUTING.md#what-belongs-in-the-engine).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What are you unable to do today? Describe the situation rather than the
+        solution, so the design stays open.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: What you think should happen, and roughly where it belongs.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: engine-or-workflow
+    attributes:
+      label: Why does this belong in the engine
+      description: >
+        Engine rules exist so one run cannot damage the system or interfere with
+        another run. Which is this?
+      options:
+        - It prevents one run from damaging the system
+        - It prevents one run from interfering with another run
+        - It is a caller-facing capability that no workflow can provide itself
+        - It is a new harness or provider adapter
+        - I am not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: default
+    attributes:
+      label: Default behaviour
+      description: >
+        If this introduces a setting, what is its default? Behavioural and
+        operator limits must default to off; only infrastructure limits are
+        enforced globally.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including whether a workflow's own rules could achieve it today.

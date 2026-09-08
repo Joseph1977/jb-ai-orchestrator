@@ -15,6 +15,7 @@ Designed and built by [Joseph Benraz](https://www.linkedin.com/in/josephbenraz)
 
 - [What makes it different](#what-makes-it-different)
 - [Quick start](#quick-start)
+- [Security model](#security-model)
 - [How it works](#how-it-works)
 - [Features](#features)
 - [How it compares](#how-it-compares)
@@ -195,6 +196,43 @@ issues `create_all`, so an empty database works without a manual step. The
 migrations additionally adopt databases that were first created by `create_all`.
 See [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) §12 for migration and backfill
 detail, and §13 for the schema itself.
+
+## Security model
+
+**This service authenticates no one.** Every endpoint is open to anyone who can
+reach the port. That is deliberate — it is a component designed to sit behind a
+gateway that authenticates callers, terminates TLS and enforces tenancy — but it
+means the deployment topology is the security boundary, and the defaults assume
+you have not built that gateway yet.
+
+So the shipped defaults are closed. Published Compose ports bind to
+`127.0.0.1`, no cross-origin browser call is accepted until you name an origin,
+and the two capabilities that execute commands — the local shell and
+workspace-supplied hooks — are off until you turn them on:
+
+| Setting | Default |
+|---|---|
+| `BIND_ADDR` | `127.0.0.1` |
+| `CORS_ALLOWED_ORIGINS` | empty — no cross-origin call accepted |
+| `LOCAL_SHELL_ENABLED` | `false` |
+| `HOOKS_ENABLED` | `false` |
+| `OUTPUT_BINDINGS_ENABLED` | `false` |
+| `DOCS_ENABLED` | `true` — set `false` off your own machine |
+
+Startup refuses three configurations outright rather than running them: a
+wildcard CORS origin combined with credentials, in-place workspaces with no
+`WORKSPACE_ALLOWED_ROOTS` to confine them, and any value still holding an
+unreplaced `__PLACEHOLDER__`.
+
+The one thing to internalise before pointing this at anything real: **a playbook
+is executable input.** The rules, skills and hooks found in a bound workspace
+shape the system prompt, and hooks run as shell commands. Binding a workspace
+you do not trust is equivalent to running its code, and no harness — this one
+included — solves prompt injection. Constrain what a run can reach instead of
+relying on the model to refuse.
+
+[SECURITY.md](SECURITY.md) has the hardening checklist for a real deployment,
+the full threat model, and how to report a vulnerability privately.
 
 ## How it works
 
@@ -539,8 +577,15 @@ name and URL. See
 | `Environment` | `DEV` | Environment name |
 | `Region` | `USC1` | Region |
 | `SwaggerBasePath` | empty | Base path when served behind a gateway |
+| `DOCS_ENABLED` | `true` | Serves `/swagger` and `/openapi.json`. `false` withdraws both, leaving no route that describes the API |
+| `CORS_ALLOWED_ORIGINS` | empty | Comma-separated origins allowed to call the API from a browser. Empty sends no CORS headers, so cross-origin calls are refused. `*` is accepted, but startup fails if combined with credentials |
+| `CORS_ALLOW_CREDENTIALS` | `false` | Whether cross-origin requests may carry cookies and authorization headers |
 | `General_LogFolder` | `./Logs` | Log directory |
 | `Logging_LogLevel_Default` | `Information` | Log level |
+
+`BIND_ADDR` is not read by the service: it belongs to the Compose layer in
+`./.env` and decides which host interface each published port binds to. It
+defaults to `127.0.0.1` — see [Security model](#security-model).
 
 ### Harness
 
@@ -846,6 +891,11 @@ importing the LiteLLM SDK. `src/requirements.txt` is the authoritative list.
   multiple MCP servers and universal tool attribution
 - **[docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)** — navigation
 - **[ag-ui-demo/README.md](ag-ui-demo/README.md)** — protocol sandbox caller
+- **[SECURITY.md](SECURITY.md)** — threat model, hardening checklist, and how to
+  report a vulnerability privately
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — what belongs in the engine, the branch
+  and review flow, and the local test recipe
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — community expectations
 - `changes/` — what shipped, per change
 
 ## License
