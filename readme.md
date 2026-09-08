@@ -7,7 +7,11 @@ runs a full tool loop against any model LiteLLM can reach. It is an HTTP
 microservice, so one deployment serves many callers, and a paused run can be
 resumed by a different replica.
 
-Python 3.11 · FastAPI · Apache-2.0
+[![tests](https://github.com/Joseph1977/jb-ai-orchestrator/actions/workflows/tests.yml/badge.svg)](https://github.com/Joseph1977/jb-ai-orchestrator/actions/workflows/tests.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Python 3.11 · FastAPI · Postgres · Apache-2.0
 
 Designed and built by [Joseph Benraz](https://www.linkedin.com/in/josephbenraz)
 
@@ -15,6 +19,8 @@ Designed and built by [Joseph Benraz](https://www.linkedin.com/in/josephbenraz)
 
 - [What makes it different](#what-makes-it-different)
 - [Quick start](#quick-start)
+  - [What the shipped defaults allow](#what-the-shipped-defaults-allow)
+- [Security model](#security-model)
 - [How it works](#how-it-works)
 - [Features](#features)
 - [How it compares](#how-it-compares)
@@ -75,13 +81,20 @@ The shared stack deploys what the agent depends on — Postgres, LiteLLM and Oll
 carrying it. Copy the compose-layer example, then start both:
 
 ```bash
-cp .env.example .env      # host ports, POSTGRES_*, LITELLM_MASTER_KEY, provider keys
 ./start-shared-mac.sh     # macOS: Ollama stays on the host for the Metal GPU
 ./start-agent-mac.sh      # or ./start-agent-mac.sh --ensure-shared to do both
 ```
 
 On Windows use `start-shared-windows.bat` and `start-agent-windows.bat`; there
 Ollama runs in a container and the default model is pulled for you.
+
+There is no file to copy first. On their first run the launchers create both
+git-ignored environment files from the tracked examples, and generate this
+machine's `LITELLM_MASTER_KEY` and `POSTGRES_PASSWORD` into `.env`. Nothing is
+overwritten afterwards, so the credentials keep matching the data volumes
+already created from them, and no two clones share a password. Running
+`docker compose` directly instead of the launchers fails with the name of the
+variable to set rather than falling back to a well-known default.
 
 The launcher never deploys infrastructure. It joins a running `jb-ai-shared`
 stack, and if that is not up it stops and prints the command to run.
@@ -113,10 +126,12 @@ docker compose up --build -d
 exactly this, skipping shared-stack detection — the mode to use when Postgres and
 LiteLLM are managed elsewhere.
 
-> `src/.env/docker/.env` is currently tracked in this repository and ships with
-> populated values. Treat it as your own local configuration, replace those
-> values, and do not commit your credentials. It is being converted to a
-> placeholder example.
+> Only `src/.env/docker/.env.example` is tracked. The launchers copy it to
+> `src/.env/docker/.env`, which is git-ignored and is where your own values
+> belong. Standalone mode reaches Postgres and LiteLLM directly, so you must
+> replace the `__POSTGRES_PASSWORD__` and `__LITELLM_API_KEY__` placeholders —
+> the service refuses to start while any placeholder remains, naming the
+> variables it found. The shared-stack path supplies both for you.
 
 ### 1c. Local, without Docker
 
@@ -157,8 +172,10 @@ configured. [MCP servers](#mcp-servers) below covers each malformed shape.
 curl http://localhost:8000/isalive
 ```
 
-Interactive API docs are at [http://localhost:8000/swagger](http://localhost:8000/swagger).
-List the tools your MCP servers actually exposed, then run a request:
+Interactive API docs are at [http://localhost:8000/swagger](http://localhost:8000/swagger),
+unless you set `DOCS_ENABLED=false`, which removes both `/swagger` and
+`/openapi.json`. List the tools your MCP servers actually exposed, then run a
+request:
 
 ```bash
 curl http://localhost:8000/v1/agent/getTools
@@ -178,6 +195,36 @@ curl -X POST "http://localhost:8000/v1/agent/executeRequest" \
 > replace the `tools` above with names from `/getTools`. Omit `tools` entirely to
 > let the agent use everything available.
 
+### What the shipped defaults allow
+
+The service authenticates no one, so what you just started is deliberately the
+least capable version of it. Each item below is off until you turn it on, and
+[Security model](#security-model) explains what changes when you do.
+
+| Out of the box | To change it |
+|---|---|
+| Every port binds to `127.0.0.1`, so nothing is reachable from the network | `BIND_ADDR=0.0.0.0`, once something in front of it authenticates callers |
+| No browser origin can call the API; requests from a page are refused | `CORS_ALLOWED_ORIGINS=https://your.app` |
+| `/swagger` and `/openapi.json` are served | `DOCS_ENABLED=false` |
+| `execute_local` is absent — the agent cannot run shell commands | `LOCAL_SHELL_ENABLED=true`, ideally with `SHELL_COMMAND_ALLOWLIST` naming what may run |
+| Workspace hooks do not run | `HOOKS_ENABLED=true`, remembering that hooks are shell commands the bound workspace supplies |
+| `LITELLM_MASTER_KEY` and `POSTGRES_PASSWORD` are generated on this machine's first launcher run | supply your own in `.env` before that first run |
+
+Two of those the Docker quickstart relaxes for you, both confined to this
+machine. It sets `ALLOW_INPLACE_WORKSPACE=true` so a bind-mounted folder can be
+edited in place, with `WORKSPACE_ALLOWED_ROOTS` restricting that to the folder
+you mounted — startup refuses in-place access with an empty allowlist. And it
+lists `http://localhost:5173` and `http://127.0.0.1:5173` in
+`CORS_ALLOWED_ORIGINS`, the origins the bundled [ag-ui-demo](ag-ui-demo/README.md)
+runs on, so the demo works without editing configuration first. Both are
+relaxations of `src/.env/docker/.env.example` only; the code defaults stay
+closed, so anything not built from that file starts with no origin allowed.
+Remove both from your copy for any deployment that is not the local demo.
+
+Skipping the launchers and running `docker compose` directly is supported, but
+then nothing has generated the secrets: Compose stops and names the variable to
+set rather than falling back to a default that would be identical everywhere.
+
 ### Database schema
 
 The container image runs `alembic upgrade head` before serving, which is why the
@@ -193,6 +240,43 @@ issues `create_all`, so an empty database works without a manual step. The
 migrations additionally adopt databases that were first created by `create_all`.
 See [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) §12 for migration and backfill
 detail, and §13 for the schema itself.
+
+## Security model
+
+**This service authenticates no one.** Every endpoint is open to anyone who can
+reach the port. That is deliberate — it is a component designed to sit behind a
+gateway that authenticates callers, terminates TLS and enforces tenancy — but it
+means the deployment topology is the security boundary, and the defaults assume
+you have not built that gateway yet.
+
+So the shipped defaults are closed. Published Compose ports bind to
+`127.0.0.1`, no cross-origin browser call is accepted until you name an origin,
+and the two capabilities that execute commands — the local shell and
+workspace-supplied hooks — are off until you turn them on:
+
+| Setting | Default |
+|---|---|
+| `BIND_ADDR` | `127.0.0.1` |
+| `CORS_ALLOWED_ORIGINS` | empty — no cross-origin call accepted |
+| `LOCAL_SHELL_ENABLED` | `false` |
+| `HOOKS_ENABLED` | `false` |
+| `OUTPUT_BINDINGS_ENABLED` | `false` |
+| `DOCS_ENABLED` | `true` — set `false` off your own machine |
+
+Startup refuses three configurations outright rather than running them: a
+wildcard CORS origin combined with credentials, in-place workspaces with no
+`WORKSPACE_ALLOWED_ROOTS` to confine them, and any value still holding an
+unreplaced `__PLACEHOLDER__`.
+
+The one thing to internalise before pointing this at anything real: **a playbook
+is executable input.** The rules, skills and hooks found in a bound workspace
+shape the system prompt, and hooks run as shell commands. Binding a workspace
+you do not trust is equivalent to running its code, and no harness — this one
+included — solves prompt injection. Constrain what a run can reach instead of
+relying on the model to refuse.
+
+[SECURITY.md](SECURITY.md) has the hardening checklist for a real deployment,
+the full threat model, and how to report a vulnerability privately.
 
 ## How it works
 
@@ -216,6 +300,23 @@ history is summarized and compacted as the context grows. If a tool needs user
 input the loop persists and returns rather than blocking.
 [docs/ORCHESTRATOR.md](docs/ORCHESTRATOR.md) is the source of truth for every
 step.
+
+### Vocabulary
+
+A few words carry precise meanings throughout the API, and the distinctions
+matter when reading the lifecycle rules:
+
+| Term | Meaning |
+|---|---|
+| **Playbook** | The instructions a caller points the service at: a `.cursor/` or `.claude/` directory, or a plain `AGENTS.md`. It is input, never baked into the image. |
+| **Session** | A bound folder you can execute against repeatedly. Created by `initiate`, identified by `orchestratorGuid`. A **thread** is the AG-UI equivalent. |
+| **Run** | One request executing against a session. Recorded as an `ExecutionRun` so a failed attempt is visible without disabling the session it belonged to. |
+| **Segment** | The bounded slice of a run between two pauses — one tool loop plus its model calls, governed by `RUN_SEGMENT_DEADLINE_SEC`. A run that pauses for input resumes as a new segment, possibly on a different replica. |
+| **Interrupt** | A pause needing a human: a frontend tool, the built-in `ask_user`, or a hook asking permission. Surfaces as `awaitsResponse` with a `stateGuid`. |
+| **Binding** | Where a run reads input and writes durable output. Input can be bound in place or copied into a sandbox; durable output survives the session. |
+
+The harness-side concepts — adapters, primitives, loading policy, compaction —
+are defined in [docs/ORCHESTRATOR.md §1](docs/ORCHESTRATOR.md#1-concepts).
 
 ## Features
 
@@ -283,7 +384,9 @@ projects move quickly; check their own documentation for current behaviour.
 
 ## API reference
 
-Interactive documentation is served at `/swagger`.
+Interactive documentation is served at `/swagger` while `DOCS_ENABLED` is true,
+which is the default; setting it false withdraws both `/swagger` and
+`/openapi.json`.
 
 ### Health
 
@@ -376,6 +479,22 @@ tool that is not present, the request fails with a "Requested tools not found"
 error.
 
 ### Execution lifecycle (`awaitsResponse`)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Running: execute
+    Running --> AwaitingResponse: a tool needs a human
+    AwaitingResponse --> Running: resume, on any replica
+    Running --> Completed: run finishes
+    Running --> Failed: segment fails
+    Failed --> Running: execute again
+    AwaitingResponse --> AwaitingResponse: claim goes stale, restored for retry
+    Completed --> [*]
+```
+
+A failed segment is recorded against that attempt and leaves the session
+runnable — only an explicit close makes it terminal. That is why `Failed` above
+returns to `Running` rather than ending the diagram.
 
 When a tool pauses a run, `/v1/agent/executeRequest` responds with:
 
@@ -527,7 +646,7 @@ name and URL. See
 |---|---|---|
 | `DATABASE_URL` | — | Required. Async SQLAlchemy URL, e.g. `postgresql+asyncpg://pyagent:pyagent@localhost:5432/pyagent` |
 | `LITELLM_BASE_URL` | `http://localhost:4000` | LiteLLM endpoint |
-| `LITELLM_API_KEY` | `sk-1234` | LiteLLM key |
+| `LITELLM_API_KEY` | — | Required. LiteLLM key. No default: it must match what your gateway expects, and a shipped one would be the same known credential everywhere. The launchers generate one for the bundled stack |
 | `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network timeout for each LiteLLM request |
 | `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute wall-clock deadline for one complete LiteLLM call, including streamed response consumption |
 | `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard; when positive, sends a completion-token cap and accepts possible truncation |
@@ -537,8 +656,15 @@ name and URL. See
 | `Environment` | `DEV` | Environment name |
 | `Region` | `USC1` | Region |
 | `SwaggerBasePath` | empty | Base path when served behind a gateway |
+| `DOCS_ENABLED` | `true` | Serves `/swagger` and `/openapi.json`. `false` withdraws both, leaving no route that describes the API |
+| `CORS_ALLOWED_ORIGINS` | empty | Comma-separated origins allowed to call the API from a browser. Empty sends no CORS headers, so cross-origin calls are refused. `*` is accepted, but startup fails if combined with credentials |
+| `CORS_ALLOW_CREDENTIALS` | `false` | Whether cross-origin requests may carry cookies and authorization headers |
 | `General_LogFolder` | `./Logs` | Log directory |
 | `Logging_LogLevel_Default` | `Information` | Log level |
+
+`BIND_ADDR` is not read by the service: it belongs to the Compose layer in
+`./.env` and decides which host interface each published port binds to. It
+defaults to `127.0.0.1` — see [Security model](#security-model).
 
 ### Harness
 
@@ -592,7 +718,7 @@ returns to its real runnable state unless the caller explicitly closed it.
 | `LOCAL_TOOLS_ENABLED` | `true` | Expose the built-in local coding tools |
 | `LOCAL_TOOLS_NAMESPACE` | `local` | Suffix marking local tools, e.g. `read_file_local` |
 | `FILTER_MCP_TOOLS_CONFLICTING_WITH_LOCAL` | `true` | Drop remote MCP tools whose base name collides with a built-in |
-| `LOCAL_SHELL_ENABLED` | `true` | Expose `execute_local`; when `false` the tool is hidden |
+| `LOCAL_SHELL_ENABLED` | `false` | Expose `execute_local`. Off by default: the service authenticates no one, so this grants a shell to anyone who can reach the API |
 | `LOCAL_SHELL_TIMEOUT_SEC` | `60` | Default shell timeout |
 | `LOCAL_SHELL_MAX_OUTPUT_BYTES` | `100000` | Captured bytes per output stream |
 | `SUBAGENT_ENABLED` | `true` | Expose the `task_local` subagent tool |
@@ -617,7 +743,7 @@ returns to its real runnable state unless the caller explicitly closed it.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HOOKS_ENABLED` | `true` | Run project Cursor/Claude hooks |
+| `HOOKS_ENABLED` | `false` | Run project Cursor/Claude hooks. Off by default: hooks are shell commands supplied by the bound workspace |
 | `HOOKS_FAIL_CLOSED` | `false` | Block the action when a hook errors or times out |
 | `HOOKS_TIMEOUT_SEC` | `30` | Per-hook subprocess timeout |
 | `HOOKS_MAX_OUTPUT_BYTES` | `100000` | Cap on hook output |
@@ -741,6 +867,9 @@ env-driven bindings on fresh AG-UI runs and thread close with bounded **202**
 retry; see [ag-ui-demo/README.md](ag-ui-demo/README.md). Production integration
 belongs in the calling application; this service stays a generic orchestrator.
 
+An end-to-end web application built on this orchestrator will be released soon:
+[jb-web-code](https://github.com/Joseph1977/jb-web-code).
+
 ## Running many instances
 
 Interactive state is durable, so the service scales horizontally without sticky
@@ -844,6 +973,11 @@ importing the LiteLLM SDK. `src/requirements.txt` is the authoritative list.
   multiple MCP servers and universal tool attribution
 - **[docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)** — navigation
 - **[ag-ui-demo/README.md](ag-ui-demo/README.md)** — protocol sandbox caller
+- **[SECURITY.md](SECURITY.md)** — threat model, hardening checklist, and how to
+  report a vulnerability privately
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — what belongs in the engine, the branch
+  and review flow, and the local test recipe
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** — community expectations
 - `changes/` — what shipped, per change
 
 ## License

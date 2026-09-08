@@ -350,7 +350,7 @@ async def get_execution_status(execution_guid: UUID):
 async def get_tools():
     """
     Get all available MCP tools
-    
+
     Returns:
         GetToolsResponse: Response with list of available tools and their schemas
     """
@@ -358,12 +358,12 @@ async def get_tools():
         global mcp_service
         if mcp_service is None:
             raise HTTPException(status_code=500, detail="MCP service not initialized")
-            
+
         logger.info("Fetching available MCP tools")
-        
+
         # Fetch tools from the MCP server
         mcp_tools = await mcp_service.fetch_mcp_tools()
-        
+
         # Convert to response format (MCP tools)
         tools = [
             ToolInfo(
@@ -390,15 +390,15 @@ async def get_tools():
                     original_name=tool.original_name
                 )
             )
-        
+
         response = GetToolsResponse(
             success=True,
             tools=tools
         )
-        
+
         logger.info(f"Successfully fetched {len(tools)} tools")
         return response
-        
+
     except Exception as e:
         logger.error(f"Failed to fetch tools: {str(e)}")
         return GetToolsResponse(

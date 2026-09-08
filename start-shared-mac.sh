@@ -16,6 +16,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Runs before any compose command: the overlays require LITELLM_MASTER_KEY and
+# POSTGRES_PASSWORD, so even `down` and `logs` need .env to exist and carry
+# both. Existing values are kept, so they keep matching the shared_pgdata volume.
+./scripts/ensure-compose-env.sh
+
 COMPOSE=(docker compose -f docker-compose.shared.yml -f docker-compose.shared.mac.yml)
 
 envget() { [ -f .env ] && grep -E "^$1=" .env | tail -1 | cut -d= -f2- || true; }
