@@ -7,7 +7,11 @@ import tempfile
 from dotenv import load_dotenv
 from pathlib import Path
 from app.utils.logger import logger
-from app.utils.config_logging import log_safe_configuration
+from app.utils.config_logging import (
+    describe_malformed_value,
+    log_safe_configuration,
+    redact_url,
+)
 
 # Deploy-time substitution markers, e.g. __LITELLM_API_KEY__.
 _PLACEHOLDER_PATTERN = re.compile(r'__[A-Z0-9_]+__')
@@ -83,7 +87,11 @@ class Config:
                         cls.MCP_SERVER_URLS = parsed_urls
                         return
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON format for MCP_SERVER_URLS: {mcp_urls_str}")
+                logger.warning(
+                    "Invalid JSON format for MCP_SERVER_URLS (%s); expected a "
+                    "JSON array of {\"name\", \"url\"} objects",
+                    describe_malformed_value(mcp_urls_str),
+                )
 
         # Option 2: Check for individual numbered URLs (MCP_SERVER_URL_1, MCP_SERVER_URL_2, etc.)
         # These should be JSON objects: {"name": "...", "url": "..."}
@@ -104,7 +112,12 @@ class Config:
                         logger.warning(f"MCP_SERVER_URL_{i} must be a JSON object with 'name' and 'url' properties")
                     i += 1
                 except json.JSONDecodeError:
-                    logger.warning(f"Invalid JSON format for MCP_SERVER_URL_{i}: {url_config}")
+                    logger.warning(
+                        "Invalid JSON format for MCP_SERVER_URL_%s (%s); "
+                        "expected a JSON object with 'name' and 'url'",
+                        i,
+                        describe_malformed_value(url_config),
+                    )
                     i += 1
             else:
                 break
@@ -118,7 +131,10 @@ class Config:
 
     # LiteLLM Configuration
     LITELLM_BASE_URL = os.getenv('LITELLM_BASE_URL', 'http://localhost:4000')
-    LITELLM_API_KEY = os.getenv('LITELLM_API_KEY', 'sk-1234')
+    # No default: a shipped key would be the same known credential on every
+    # deployment, and silently falling back to one lets the service start
+    # against an unintended gateway.
+    LITELLM_API_KEY = os.getenv('LITELLM_API_KEY', '')
     LITELLM_REQUEST_TIMEOUT_IN_SEC = int(os.getenv('LITELLM_REQUEST_TIMEOUT_IN_SEC', 300))
     LITELLM_DROP_PARAMS = os.getenv('LITELLM_DROP_PARAMS', 'True')
     # Absolute wall-clock budget for one LiteLLM call (streaming or not).
@@ -303,7 +319,7 @@ class Config:
         if cls.RUN_CANCELLATION_WARN_SEC <= 0:
             raise ValueError("RUN_CANCELLATION_WARN_SEC must be greater than zero")
 
-        required_configs = ['DATABASE_URL']
+        required_configs = ['DATABASE_URL', 'LITELLM_API_KEY']
         missing_configs = []
 
         for config in required_configs:
@@ -311,7 +327,14 @@ class Config:
                 missing_configs.append(config)
 
         if missing_configs:
-            raise ValueError(f"Missing required configuration: {', '.join(missing_configs)}")
+            env_name = os.getenv('ENV', 'localhost')
+            raise ValueError(
+                f"Missing required configuration: {', '.join(missing_configs)}. "
+                f"Set them in src/.env/{env_name}/.env or in the deployment "
+                "environment. LITELLM_API_KEY has no default on purpose: it "
+                "must match the key your LiteLLM gateway expects, and the "
+                "launchers generate one into ./.env for the bundled stack."
+            )
 
         unfilled = cls._unfilled_placeholders()
         if unfilled:
@@ -353,7 +376,7 @@ class Config:
         logger.info("Configuration validation passed")
         logger.info(f"Configured {len(cls.MCP_SERVER_URLS)} MCP servers:")
         for server in cls.MCP_SERVER_URLS:
-            logger.info(f"  - {server['name']}: {server['url']}")
+            logger.info("  - %s: %s", server['name'], redact_url(server['url']))
 
 # Dynamically load environment variables into Config (never log raw env).
 for key, value in os.environ.items():

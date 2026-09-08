@@ -21,7 +21,7 @@ services:
     environment:
       # Override whatever src/.env/docker/.env says: in the stack, infrastructure
       # is reachable by service name over the shared network.
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-pyagent}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in ./.env — run ./start-shared-mac.sh or start-shared-windows.bat to generate one}@postgres:5432/${POSTGRES_DB:-pyagent}
       - LITELLM_BASE_URL=http://litellm:4000
       - LITELLM_API_KEY=${LITELLM_MASTER_KEY:?set LITELLM_MASTER_KEY in ./.env — run ./start-shared-mac.sh or start-shared-windows.bat to generate one}
     # Replaces the base mapping rather than adding to it — two entries publishing

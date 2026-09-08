@@ -65,6 +65,7 @@ def valid_baseline(monkeypatch):
     """Satisfy the unrelated required settings so validation reaches our checks."""
     monkeypatch.setenv("MCP_SERVER_URLS", '[{"name": "a", "url": "http://a/mcp"}]')
     monkeypatch.setattr(Config, "DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+    monkeypatch.setattr(Config, "LITELLM_API_KEY", "sk-test")
 
 
 def test_wildcard_origins_with_credentials_is_refused(monkeypatch, valid_baseline):
@@ -95,6 +96,31 @@ def test_inplace_workspace_with_confined_roots_is_allowed(monkeypatch, valid_bas
     monkeypatch.setattr(Config, "ALLOW_INPLACE_WORKSPACE", True)
     monkeypatch.setattr(Config, "WORKSPACE_ALLOWED_ROOTS", "/workspaces")
     Config.validate_config()
+
+
+# --- Credentials without a shipped default ----------------------------------
+
+
+def test_litellm_api_key_is_required(monkeypatch, valid_baseline):
+    """It once defaulted to sk-1234, so every deployment shared one known key."""
+    monkeypatch.setattr(Config, "LITELLM_API_KEY", "")
+
+    with pytest.raises(ValueError, match="LITELLM_API_KEY"):
+        Config.validate_config()
+
+
+def test_no_shipped_default_stands_in_for_the_litellm_key():
+    """Read from the source: an import-time default would be invisible here."""
+    import re
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "src/app/config.py").read_text()
+    match = re.search(r"LITELLM_API_KEY = os\.getenv\('LITELLM_API_KEY',\s*(.*?)\)", source)
+
+    assert match, "LITELLM_API_KEY is no longer read the way this test assumes"
+    assert match.group(1).strip() in ("''", '""'), (
+        f"LITELLM_API_KEY must have no default, found {match.group(1)!r}"
+    )
 
 
 # --- Unfilled placeholders --------------------------------------------------

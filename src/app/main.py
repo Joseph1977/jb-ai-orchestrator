@@ -19,6 +19,7 @@ from app.services.binding_contract import (
     stable_binding_validation_error,
 )
 from app.utils.logger import logger, initialize_logger
+from app.utils.config_logging import redact_url
 
 
 @asynccontextmanager
@@ -28,10 +29,8 @@ async def lifespan(app: FastAPI):
         initialize_logger()
         Config.validate_config()
         logger.info(f"Starting {Config.SERVICE_NAME} in {Config.ENVIRONMENT} environment")
-        logger.info(f"Configured {len(Config.MCP_SERVER_URLS)} MCP servers:")
-        for i, url in enumerate(Config.MCP_SERVER_URLS):
-            logger.info(f"  - mcp{i+1}: {url}")
-        logger.info(f"LiteLLM Server URL: {Config.LITELLM_BASE_URL}")
+        # validate_config() above already listed the MCP servers, redacted.
+        logger.info("LiteLLM Server URL: %s", redact_url(Config.LITELLM_BASE_URL))
 
         # Initialize MCP service after configuration is loaded
         await init_db()

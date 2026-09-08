@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from app.config import Config
 from app.services.agui_messages import dedupe_litellm_tool_results
 from app.utils.logger import logger
+from app.utils.config_logging import redact_url
 
 
 class LLMUpstreamError(Exception):
@@ -129,8 +130,8 @@ class MCPAgentService:
 
         logger.info(f"Initialized MCPAgentService with {len(self.mcp_server_configs)} MCP servers:")
         for config in self.mcp_server_configs:
-            logger.info(f"  - {config['name']}: {config['url']}")
-        logger.info(f"LiteLLM server: {self.litellm_base_url}")
+            logger.info("  - %s: %s", config['name'], redact_url(config['url']))
+        logger.info("LiteLLM server: %s", redact_url(self.litellm_base_url))
 
     @staticmethod
     def _schema_to_dict(schema: Any) -> dict:
@@ -219,7 +220,9 @@ class MCPAgentService:
         server_url = server_config['url']
 
         try:
-            logger.info(f"Connecting to MCP server '{server_name}' at {server_url}")
+            logger.info(
+                "Connecting to MCP server '%s' at %s", server_name, redact_url(server_url)
+            )
 
             async with streamablehttp_client(server_url) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
@@ -275,7 +278,12 @@ class MCPAgentService:
                     return mcp_tools
 
         except Exception as e:
-            logger.error(f"Failed to fetch MCP tools from '{server_name}' ({server_url}): {e}")
+            logger.error(
+                "Failed to fetch MCP tools from '%s' (%s): %s",
+                server_name,
+                redact_url(server_url),
+                e,
+            )
             return []  # Return empty list instead of raising to allow other servers to work
 
     async def fetch_mcp_tools(self) -> List[MCPTool]:
