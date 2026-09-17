@@ -382,6 +382,10 @@ delivery models rather than feature parity — it consumes the same playbook
 formats (`.cursor/`, `AGENTS.md`) that Cursor users already write. All four
 projects move quickly; check their own documentation for current behaviour.
 
+See the [comprehensive agent harness comparison](docs/comparisons/comprehensive-agent-harness-comparison.md)
+for the wider Claude Code, OpenCode, Cursor, Deep Agents, and JB feature and gap
+analysis.
+
 ## API reference
 
 Interactive documentation is served at `/swagger` while `DOCS_ENABLED` is true,
@@ -854,11 +858,13 @@ Deployments that send non-null output bindings must opt into
 `WORKSPACE_ALLOWED_ROOTS` must cover every workflow **and** output mount. Local
 `shared_folder` output needs no credentials.
 
-> **Private git input (planned).** Fetching a workflow from a git URL is the
-> service's job: as a deploy-once orchestrator serving many teams it would hold
-> its **own** service-level git credential rather than accepting tokens per
-> request. Today `initiate` clones **public** git URLs; private-repo auth and a
-> durable output target for cloned input are planned.
+> **Private git input.** `initiate` can clone a private HTTPS repository when
+> the caller supplies transient `credentials.inputAccessToken`. The token is
+> injected through git's `http.extraHeader`, never placed in clone arguments,
+> and never persisted. Service-level managed git credentials and an explicit
+> SSH/deploy-key authentication contract are not yet shipped. Cloned input can
+> use an independent durable output binding when
+> `OUTPUT_BINDINGS_ENABLED=true`.
 
 ### Caller examples
 

@@ -129,8 +129,11 @@ New-contract request (preferred):
 `uri` is a location only — SAS, auth query parameters, and embedded userinfo
 are rejected (`BINDING_URI_HAS_CREDENTIALS`). Credential fields such as
 `accessToken` are not allowed on `input`/`output` (`BINDING_CREDENTIAL_NOT_ALLOWED`).
-Tokens belong in the per-call `credentials` object on execute/resume/AG-UI and
-are never persisted.
+Tokens belong in the per-call `credentials` object on
+initiate/execute/resume/AG-UI and are never persisted. For private HTTPS git
+input, initiate-time `credentials.inputAccessToken` is passed to git through
+`http.extraHeader` rather than clone arguments. Service-level managed git
+credentials and an explicit SSH/deploy-key contract are not shipped.
 
 `relativePath` is applied **after** clone/copy, inside the materialized
 workspace. It is never appended to a git/url remote. Absolute paths and `..`
@@ -755,8 +758,8 @@ an optimistic-concurrency transaction; concurrent edits are last-writer-wins.
 
 ### Shell tool (`execute_local`)
 
-- Enabled when `LOCAL_SHELL_ENABLED=true` (default). When disabled, the tool is
-  omitted from the LiteLLM tool list entirely.
+- Enabled when `LOCAL_SHELL_ENABLED=true` (default: `false`). When disabled, the
+  tool is omitted from the LiteLLM tool list entirely.
 - Runs via the system shell with `cwd` = the session workspace.
 - Captures stdout/stderr up to `LOCAL_SHELL_MAX_OUTPUT_BYTES`.
 - Times out after `timeoutSec` (per call) or `LOCAL_SHELL_TIMEOUT_SEC` (default).
@@ -949,7 +952,7 @@ instance can retry.
 | `LOCAL_TOOLS_ENABLED` | `true` | Expose the built-in local tools. |
 | `LOCAL_TOOLS_NAMESPACE` | `local` | Suffix marking local tools (`read_file_local`). |
 | `FILTER_MCP_TOOLS_CONFLICTING_WITH_LOCAL` | `true` | Drop remote MCP tools whose base name collides with a local built-in. |
-| `LOCAL_SHELL_ENABLED` | `true` | Expose `execute_local`; when `false`, tool is hidden from the model. |
+| `LOCAL_SHELL_ENABLED` | `false` | Expose `execute_local`; when `false`, tool is hidden from the model. |
 | `LOCAL_SHELL_TIMEOUT_SEC` | `60` | Default shell timeout (seconds). |
 | `LOCAL_SHELL_MAX_OUTPUT_BYTES` | `100000` | Cap on captured stdout/stderr per stream. |
 | `CONTEXT_COMPACTION_ENABLED` | `true` | Enable offload + history compaction. |
@@ -967,7 +970,7 @@ instance can retry.
 | `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network guard for each LiteLLM request. It is not the total stream lifetime. |
 | `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute deadline for one LiteLLM call, including full SSE consumption. |
 | `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard sent to LiteLLM when positive. It is not workflow policy or workflow-configurable. Enabling it accepts that legitimate output may be cut off. A provider `length` finish reason always fails safely with `OUTPUT_LIMIT`. |
-| `HOOKS_ENABLED` | `true` | Run project hooks from `.cursor/hooks.json` / Claude hook files. |
+| `HOOKS_ENABLED` | `false` | Run project hooks from `.cursor/hooks.json` / Claude hook files. |
 | `HOOKS_FAIL_CLOSED` | `false` | If a hook script errors/times out, block the action when `true`. |
 | `HOOKS_TIMEOUT_SEC` | `30` | Default per-hook subprocess timeout. |
 | `HOOKS_MAX_OUTPUT_BYTES` | `100000` | Cap on hook stdout/stderr. |
