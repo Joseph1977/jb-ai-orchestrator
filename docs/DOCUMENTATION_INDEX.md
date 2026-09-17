@@ -31,6 +31,10 @@ This folder contains detailed documentation for the AI Agent / harness microserv
   - Universal tool attribution algorithm (ALL tools get server names)
   - API response format changes with complete server attribution
 
+### Strategy and comparisons
+
+- **[comparisons/comprehensive-agent-harness-comparison.md](./comparisons/comprehensive-agent-harness-comparison.md)** — Architecture, feature, gap, and recommendation matrix across Claude Code, OpenCode, Cursor Agent, Deep Agents, JB Orchestrator, and the JB web layer
+
 ## Main documentation
 
 - **[readme.md](../readme.md)** — Project overview, API surface, env vars, AG-UI flow
