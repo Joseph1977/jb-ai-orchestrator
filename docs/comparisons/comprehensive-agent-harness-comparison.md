@@ -43,12 +43,13 @@ the lifecycle, workspace, tool, or workflow layers.
 
 ## How to read the comparison
 
-- **Shipped** means the capability exists in the product today.
+Unmarked cells describe shipped behaviour. Status labels are used only where a
+qualification is needed:
+
 - **Partial** means it exists with a material limitation described in the cell.
 - **Configurable** means the framework supplies the mechanism but the adopter
   must assemble or operate it.
-- **Out of scope** means the capability belongs to another product layer, not
-  that the product failed to implement its own purpose.
+- **No** means the capability is absent from the named product or layer.
 
 No single “winner” is meaningful across all rows. A local developer tool, an
 embeddable library, and a multi-tenant execution service optimise for different
@@ -93,7 +94,7 @@ jobs.
 | Per-run model selection | Claude aliases/models | Provider/model selection | User-selected supported model or eligible BYOK model in local Chat/Agent | Caller parameter | Optional `model` on execute, resume, AG-UI, and legacy paths; orchestrator sessions use persisted initiate/await defaults when omitted |
 | Exact deployment control | CLI versions can be pinned; hosted harness/model revisions remain vendor-controlled | Operator can pin OpenCode and config; remote provider aliases can still drift | Local Chat/Agent may use customer-owned provider accounts through Cursor's backend; other surfaces use Cursor-supplied/routed models, and product prompt construction remains Cursor-controlled | Adopter pins application dependencies and chosen runtime | Operator pins JB image, LiteLLM version/config, and local model artifacts; remote provider aliases can still drift |
 | Session-enforced execution profile | Session selects a Claude model, but users cannot freeze hosted model/harness internals | Configurable model/provider, without guaranteeing an immutable remote runtime | User-selected for local Chat/Agent, including eligible BYOK models; other surfaces remain product-managed | Caller can persist and validate a profile in graph state | **Partial**: initiate-time `model` and `maxToolCalls` are persisted and await snapshots preserve overrides; JB does not reject drift in provider route, playbook/harness revision, or policy |
-| Replace provider layer without changing workflow contract | Claude-compatible enterprise gateways only | Provider system is part of the harness | **Constrained**: local Chat/Agent can use supported BYOK or compatible customer endpoints routed through Cursor's backend; other surfaces use Cursor-supplied/routed models | Yes, through application composition | **Partial**: config-only for another OpenAI-compatible gateway; a non-compatible direct provider needs LLM-client code, while playbook and lifecycle contracts can remain unchanged |
+| Replace provider layer without changing workflow contract | Claude-compatible enterprise gateways only | Provider system is part of the harness | **Partial**: local Chat/Agent can use supported BYOK or compatible customer endpoints routed through Cursor's backend; other surfaces use Cursor-supplied/routed models | Yes, through application composition | **Partial**: config-only for another OpenAI-compatible gateway; a non-compatible direct provider needs LLM-client code, while playbook and lifecycle contracts can remain unchanged |
 
 ### Correct interpretation
 
@@ -150,7 +151,7 @@ the exact lifecycle transitions remain documented in `docs/ORCHESTRATOR.md`.
 | Context compaction | Tool-result clearing and summarisation; `/compact` and diagnostics | Configurable pruning and summary with disk-backed session data; official docs do not promise an immutable pre-compaction tape | Managed context and file checkpoints | Summarisation and offload middleware | Oversized-result offload, older-turn summarisation, tool-message compaction, and `preCompact` hook |
 | Trigger awareness | Product knows Claude windows | Reads provider metadata | Managed per supported model | Model/profile configuration | Token threshold available; character threshold remains default |
 | Raw history retained outside active prompt | CLI JSONL transcripts and product session records; active context still compacts | Disk-backed session/messages, but immutable pre-compaction retention is not an official guarantee | Managed conversation plus file checkpoints; checkpointing is not a raw message tape | Checkpointer/store can retain state | **Partial**: continuation snapshots are durable but compact over time; no append-only raw tape, though offload files may retain full tool payloads until runtime cleanup |
-| Context diagnostics | `/context` and product diagnostics | Session/server visibility | Product UI | Caller instrumentation | **Missing** `/context`-style endpoint for loaded files, catalog, tools, and budgets |
+| Context diagnostics | `/context` and product diagnostics | Session/server visibility | Product UI | Caller instrumentation | **No** `/context`-style endpoint for loaded files, catalog, tools, and budgets |
 | Prompt-cache layout | Claude-optimised cache structure | Provider-dependent normalisation | Managed model-specific optimisation | Prompt-caching middleware/profile | LiteLLM/provider may cache, but JB does not explicitly segment stable and dynamic prompt sections |
 
 JB's refusal to load user-global instructions outside the bound workspace is an
@@ -172,7 +173,7 @@ than rescanning the workspace.
 | Plugin packaging | Mature packages and marketplaces | npm/local TypeScript modules and community ecosystem | Plugins package rules, skills, agents, commands, MCP, and hooks | Python packaging/application composition | No plugin store; playbook bundles and MCP are the preferred portable boundaries |
 | Subagents | Built-in and custom agents, background work, agent teams | Primary/subagents with inspectable child sessions | Built-in and custom subagents, including background/cloud execution | Synchronous and async subagents with isolated contexts | `task_local` nested loop with role discovery, bounded depth, and summary returned to parent |
 | Subagent persistence | Product-managed | Child sessions are first-class and inspectable | Product-managed | Checkpointer and async facilities are configurable | **Partial**: child transcript is not a first-class durable run |
-| Subagent HITL | Permissions/hooks are available, with product-specific limits | Per-agent permissions/questions, not a documented durable subagent interrupt contract | Local agent environment can prompt; cloud agents run without local Run Mode prompts | Per-subagent `interrupt_on` configuration with a checkpointer | **Missing**: subagents cannot durably pause for human input |
+| Subagent HITL | Permissions/hooks are available, with product-specific limits | Per-agent permissions/questions, not a documented durable subagent interrupt contract | Local agent environment can prompt; cloud agents run without local Run Mode prompts | Per-subagent `interrupt_on` configuration with a checkpointer | **No** durable subagent pause for human input |
 | Parallel tool work | Product supports parallel agents/teams | Subagents and server sessions | Parallel subagents/cloud agents | Async subagents | Model may request a batch, but JB currently executes calls serially |
 
 JB hooks cover session/context events and local-tool execution. Extending one
@@ -199,7 +200,7 @@ governance gap.
 | --- | --- | --- | --- | --- | --- |
 | Filesystem boundary | Local permission rules and protected paths | Project/external-directory permissions | Local sandbox policy or cloud VM | Declarative filesystem permissions and virtual backends | Descriptor-bound, symlink-safe workspace containment with configured allowed roots |
 | Shell isolation | OS-level filesystem/network sandbox available | Parsed permissions; no equivalent native OS jail by default | Local sandbox configuration or isolated cloud VM | Optional sandbox backend; host execution is also possible | **Partial**: shell can be disabled and policy-limited, but `cwd` confinement is not an OS jail |
-| Tool-wide policy | Permissions apply across built-ins and MCP | Permission patterns cover built-ins, custom, and MCP tools | Hooks include MCP and shell events | Middleware can cover caller tools | **Gap**: project hook enforcement currently covers local tools rather than every tool provider |
+| Tool-wide policy | Permissions apply across built-ins and MCP | Permission patterns cover built-ins, custom, and MCP tools | Hooks include MCP and shell events | Middleware can cover caller tools | **Partial**: project hook enforcement currently covers local tools rather than every tool provider |
 | Authentication | Anthropic/product identity | User/provider credentials | Cursor identity and team controls | Application-owned | Deliberately none in the engine; gateway is the trust boundary |
 | End-user tenancy | Managed product | Primarily local user | Managed product/team | Application-owned | Workspace/run isolation exists, but the engine trusts its service caller and does not validate end-user identity on lifecycle IDs |
 | Enterprise web layer | Product supplied | Desktop/server ecosystem | Product supplied | Application-built | `jb-web-code` adds optional Azure AD, gateway-scoped per-user sessions, workflow UI, and CopilotKit/AG-UI; local mode uses a shared development identity |
@@ -220,9 +221,9 @@ allow/deny rules reduce mistakes but cannot replace an OS or container boundary.
 | Queue/scheduler | Product-managed | Local session server | Managed cloud agents/goals | Application-defined | No durable job queue; request-driven bounded segments |
 | Persistence | Product-managed/local transcripts | Disk-backed local session data | Product-managed | Configurable checkpointer/store | Durable Postgres lifecycle and await state, plus service runtime files and optional external output |
 | Cross-process event fan-out | Product-managed | Local server | Product-managed | Application-defined | **Partial**: correctness is durable, but dashboard SSE fan-out is process-local |
-| Metrics/tracing | Product telemetry | Plugin/integration dependent | Product telemetry | LangSmith and application instrumentation available | **Gap**: structured logs and usage fields exist; no first-party metrics/tracing endpoint |
+| Metrics/tracing | Product telemetry | Plugin/integration dependent | Product telemetry | LangSmith and application instrumentation available | **No** first-party metrics/tracing endpoint; structured logs and usage fields exist |
 | Cost accounting | Subscription/API usage | Provider billing | Subscription/usage model | Application/provider | LiteLLM/provider usage; no JB-native allocation ledger |
-| Lifecycle retention | Product policy | Local data controls | Product policy | Backend policy | **Gap (engine)**: no TTL sweeper; callers/operators close sessions. `jb-web-code` separately has an idle web-session cleanup job |
+| Lifecycle retention | Product policy | Local data controls | Product policy | Backend policy | **No (engine)** TTL sweeper; callers/operators close sessions. `jb-web-code` separately has an idle web-session cleanup job |
 
 ## JB capabilities that should remain the centre of gravity
 
