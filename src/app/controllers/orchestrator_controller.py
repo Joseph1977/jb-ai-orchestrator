@@ -778,6 +778,7 @@ async def execute(request: ExecuteOrchestratorInput):
             system_prompt=system_prompt,
             frontend_tools=request.frontendTools,
             cancel_event=cancel_event,
+            mcp_user_access_token=_input_access_token(request.credentials),
         )
 
     try:
@@ -997,6 +998,7 @@ async def resume(request: OrchestratorResumeInput):
             resume_tool_results=[tool_result],
             local_context=local_ctx,
             cancel_event=cancel_event,
+            mcp_user_access_token=_input_access_token(request.credentials),
         )
 
     try:
