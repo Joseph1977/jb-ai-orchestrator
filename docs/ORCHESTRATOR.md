@@ -967,6 +967,8 @@ instance can retry.
 | `SUBAGENT_MAX_TOOL_CALLS` | `8` | Max tool calls inside one subagent run. |
 | `SUBAGENT_MAX_DEPTH` | `2` | Max nesting depth for `task_local`. |
 | `LLM_STREAMING_ENABLED` | `true` | Stream tokens to AG-UI when a UI channel is present. |
+| `MCP_FETCH_TIMEOUT_SEC` | `0` (off) | Seconds allowed for listing one MCP server's tools; a server that misses it contributes no tools. |
+| `MCP_TOOLS_CACHE_SEC` | `0` (off) | Seconds a fetched service-auth MCP tool list is reused. `authType` `user` servers are not cached. |
 | `LITELLM_REQUEST_TIMEOUT_IN_SEC` | `300` | HTTP idle/network guard for each LiteLLM request. It is not the total stream lifetime. |
 | `LITELLM_MODEL_DEADLINE_SEC` | `240` | Absolute deadline for one LiteLLM call, including full SSE consumption. |
 | `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard sent to LiteLLM when positive. It is not workflow policy or workflow-configurable. Enabling it accepts that legitimate output may be cut off. A provider `length` finish reason always fails safely with `OUTPUT_LIMIT`. |
@@ -991,6 +993,10 @@ instance can retry.
 | `MULTIMODAL_MODEL_ALLOWLIST` | _(empty)_ | If set, only model ids containing these substrings get attachments. |
 | `MULTIMODAL_MODEL_DENYLIST` | `gpt-3.5,gpt-3.5-turbo,text-embedding,…` | Model-id substrings that never get attachments. |
 | `MULTIMODAL_VISION_MARKERS` | `gpt-4o,claude-*,gemini,…` | When allowlist is empty, model must match one of these to attach. |
+
+### MCP server authentication
+
+Each MCP server entry has one connection identity. `authType` `user` sends the request `credentials.inputAccessToken` on list and on every tool call, and ignores `serviceToken`. `authType` `service`, or a `serviceToken` with no `authType`, sends the bearer stored in the environment variable named by `serviceToken`. Startup fails if that variable is missing or empty. Omit both fields for an unauthenticated server. The orchestrator does not choose a different bearer per tool. User-auth tool lists are fetched on every request and are not stored in the shared `MCP_TOOLS_CACHE_SEC` cache. Set `MCP_FETCH_TIMEOUT_SEC` when any server uses `authType` `user`, or one slow server holds every execute.
 
 ### Multimodal file reads
 

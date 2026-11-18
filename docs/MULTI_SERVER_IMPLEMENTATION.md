@@ -136,6 +136,21 @@ unsupported variable is silently ignored.
 
 `tests/test_config_mcp_servers.py` pins every row above.
 
+## Connection authentication
+
+Each entry may set `authType` to `service` or `user`. `serviceToken` names the environment variable that holds a service bearer. It is not the secret.
+
+```env
+MCP_TOKEN_PLATFORM=...
+MCP_SERVER_URLS=[{"name": "platform", "url": "https://host/mcp", "authType": "service", "serviceToken": "MCP_TOKEN_PLATFORM"}]
+```
+
+```env
+MCP_SERVER_URLS=[{"name": "gmail", "url": "https://host/mcp", "authType": "user"}]
+```
+
+`authType` `user` ignores `serviceToken`, including null. That connection uses `credentials.inputAccessToken` for listing and for every tool call. A `serviceToken` with no `authType` is treated as `service`. Startup fails if the named environment variable is missing or empty. One connection still has one catalog and one bearer. A tool-specific user authorization, once the connection is open, stays inside the MCP server. User-auth servers are listed on every request and are not cached. Set `MCP_FETCH_TIMEOUT_SEC` when any server uses `authType` `user`, or one slow server holds every execute.
+
 ## Response Format Changes
 
 ### Tool Information Response
