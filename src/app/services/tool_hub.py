@@ -35,7 +35,16 @@ from app.services.agui_interrupt import (
     is_hook_permission_pending,
     tool_response_content,
 )
-from app.services.mcp_agent_service import LLMUpstreamError, MCPAgentService, MCPTool
+from app.services.mcp_agent_service import (
+    LLMUpstreamError,
+    MCPAgentService,
+    MCPTool,
+    bind_mcp_user_token,
+    bind_request_mcp_tools,
+    current_mcp_user_token,
+    reset_mcp_user_token,
+    reset_request_mcp_tools,
+)
 from app.services.multimodal import build_multimodal_user_message
 from app.services.tool_registry import (
     ToolProvider,
@@ -197,6 +206,7 @@ class ToolExecutionHub:
         harness_manifest: Optional[dict] = None,
         cancel_event: Optional[asyncio.Event] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        mcp_user_access_token: Optional[str] = None,
     ) -> dict:
         """Expose local built-in, MCP, and AG-UI tools to LiteLLM.
 
@@ -224,8 +234,11 @@ class ToolExecutionHub:
         )
         requested_tools = resume_state.get("requested_tools", requested_tools)
 
+        token_reset = bind_mcp_user_token(mcp_user_access_token)
+        tools_reset = None
         try:
             all_mcp_tools = await self.mcp_service.fetch_mcp_tools()
+            tools_reset = bind_request_mcp_tools(all_mcp_tools)
             if include_agui_tools:
                 # Prefer per-run frontend tools (isolated) over the legacy global cache.
                 if frontend_tools is not None:
@@ -836,6 +849,10 @@ class ToolExecutionHub:
                 result=err_result,
             )
             return err_result
+        finally:
+            if tools_reset is not None:
+                reset_request_mcp_tools(tools_reset)
+            reset_mcp_user_token(token_reset)
 
     def _build_await_result(
         self,
@@ -1555,6 +1572,7 @@ class ToolExecutionHub:
             system_prompt=system_prompt,
             cancel_event=cancel_event,
             cancel_check=cancel_check,
+            mcp_user_access_token=current_mcp_user_token(),
         )
         summary = result.get("response") or result.get("partial_response") or result.get("error")
         return {

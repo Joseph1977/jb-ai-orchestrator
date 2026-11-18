@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextvars
 import json
 import logging
+import os
+import re
+import time
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -11,7 +15,7 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from app.config import Config
+from app.config import Config, _mcp_auth_type, _mcp_service_token_env
 from app.services.agui_messages import dedupe_litellm_tool_results
 from app.utils.logger import logger
 from app.utils.config_logging import redact_url
@@ -45,6 +49,72 @@ def _check_output_limit(result: dict) -> None:
     finish_reason = choices[0].get("finish_reason")
     if finish_reason == "length":
         raise LLMUpstreamError("OUTPUT_LIMIT", "Model output limit reached")
+
+
+_mcp_user_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "mcp_user_token",
+    default=None,
+)
+_request_mcp_tools: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "mcp_request_tools",
+    default=None,
+)
+
+_BEARER_IN_TEXT = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+
+
+def bind_mcp_user_token(token: Optional[str]):
+    """Bind the caller token for this task. Reset with the returned token."""
+    return _mcp_user_token.set(token)
+
+
+def reset_mcp_user_token(reset_token) -> None:
+    _mcp_user_token.reset(reset_token)
+
+
+def bind_request_mcp_tools(tools: List["MCPTool"]):
+    """Request-local catalog. User-auth tools are not kept on the singleton."""
+    return _request_mcp_tools.set({tool.name: tool for tool in tools})
+
+
+def reset_request_mcp_tools(reset_token) -> None:
+    _request_mcp_tools.reset(reset_token)
+
+
+def _redact_bearer(text: str) -> str:
+    return _BEARER_IN_TEXT.sub("Bearer ***", text)
+
+
+def current_mcp_user_token() -> Optional[str]:
+    return _mcp_user_token.get()
+
+
+def _active_user_token(explicit: Optional[str]) -> Optional[str]:
+    if explicit is not None:
+        return explicit
+    return _mcp_user_token.get()
+
+
+def mcp_auth_headers(server_config: dict, user_access_token: Optional[str]):
+    """Return ``(headers, error)``. ``error`` means do not open a connection.
+
+    One connection uses one identity. ``authType`` ``user`` ignores
+    ``serviceToken``. Any other authenticated server uses the env var named
+    by ``serviceToken``.
+    """
+    kind = _mcp_auth_type(server_config)
+    if kind == "user":
+        token = (user_access_token or "").strip()
+        if not token:
+            return None, "User access token required"
+        return {"Authorization": f"Bearer {token}"}, None
+    if kind == "service":
+        env_name = _mcp_service_token_env(server_config)
+        token = os.environ.get(env_name, "").strip() if env_name else ""
+        if not token:
+            return None, "Service access token is not configured"
+        return {"Authorization": f"Bearer {token}"}, None
+    return None, None
 
 
 def _safe_litellm_exception(exc: Exception) -> Exception:
@@ -127,6 +197,8 @@ class MCPAgentService:
 
         # Tool storage
         self.all_mcp_tools: List[MCPTool] = []
+        self._tools_cache: Optional[tuple[float, List[MCPTool]]] = None
+        self._tools_cache_lock = asyncio.Lock()
 
         logger.info(f"Initialized MCPAgentService with {len(self.mcp_server_configs)} MCP servers:")
         for config in self.mcp_server_configs:
@@ -215,16 +287,43 @@ class MCPAgentService:
         return f"{server_name}-{tool_name}"
 
     async def fetch_mcp_tools_from_server(self, server_config: dict) -> List[MCPTool]:
-        """Fetch available tools from a specific MCP server"""
+        """Fetch available tools from a specific MCP server, within MCP_FETCH_TIMEOUT_SEC when set."""
+        timeout = Config.MCP_FETCH_TIMEOUT_SEC
+        if timeout <= 0:
+            return await self._fetch_mcp_tools_from_server(server_config)
+        try:
+            return await asyncio.wait_for(
+                self._fetch_mcp_tools_from_server(server_config), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "Timed out fetching MCP tools from '%s' (%s) after %.1fs",
+                server_config.get("name", "?"),
+                redact_url(server_config.get("url", "")),
+                timeout,
+            )
+            return []
+
+    async def _fetch_mcp_tools_from_server(self, server_config: dict) -> List[MCPTool]:
         server_name = server_config['name']
         server_url = server_config['url']
+
+        headers, auth_error = mcp_auth_headers(server_config, current_mcp_user_token())
+        if auth_error:
+            logger.info("Skipping MCP server '%s': %s", server_name, auth_error)
+            return []
 
         try:
             logger.info(
                 "Connecting to MCP server '%s' at %s", server_name, redact_url(server_url)
             )
 
-            async with streamablehttp_client(server_url) as (read_stream, write_stream, _):
+            client = (
+                streamablehttp_client(server_url, headers=headers)
+                if headers
+                else streamablehttp_client(server_url)
+            )
+            async with client as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     # Initialize the MCP session
                     logger.info(f"Initializing MCP session for '{server_name}'...")
@@ -282,18 +381,60 @@ class MCPAgentService:
                 "Failed to fetch MCP tools from '%s' (%s): %s",
                 server_name,
                 redact_url(server_url),
-                e,
+                _redact_bearer(str(e)),
             )
             return []  # Return empty list instead of raising to allow other servers to work
 
-    async def fetch_mcp_tools(self) -> List[MCPTool]:
-        """Fetch available tools from all MCP servers"""
-        all_tools = []
+    async def fetch_mcp_tools(self, user_access_token: Optional[str] = None) -> List[MCPTool]:
+        """Fetch tools from all MCP servers.
 
-        # Fetch tools from all servers
-        for server_config in self.mcp_server_configs:
-            tools = await self.fetch_mcp_tools_from_server(server_config)
-            all_tools.extend(tools)
+        Service-auth lists are reused for MCP_TOOLS_CACHE_SEC. User-auth servers
+        are listed with the request token and are not stored in that cache.
+        """
+        token_reset = None
+        if user_access_token is not None:
+            token_reset = bind_mcp_user_token(user_access_token)
+        try:
+            service_tools = await self._fetch_service_tools_cached()
+            user_tools = []
+            token = current_mcp_user_token()
+            for server_config in self.mcp_server_configs:
+                if _mcp_auth_type(server_config) != "user":
+                    continue
+                if not (token or "").strip():
+                    logger.info(
+                        "Skipping MCP server '%s': user access token required",
+                        server_config.get("name", "?"),
+                    )
+                    continue
+                user_tools.extend(await self.fetch_mcp_tools_from_server(server_config))
+            return self._resolve_tool_names(service_tools + user_tools)
+        finally:
+            if token_reset is not None:
+                reset_mcp_user_token(token_reset)
+
+    async def _fetch_service_tools_cached(self) -> List[MCPTool]:
+        """List non-user servers, reused for MCP_TOOLS_CACHE_SEC when set."""
+
+        async def load() -> List[MCPTool]:
+            tools = []
+            for server_config in self.mcp_server_configs:
+                if _mcp_auth_type(server_config) == "user":
+                    continue
+                tools.extend(await self.fetch_mcp_tools_from_server(server_config))
+            return tools
+
+        ttl = Config.MCP_TOOLS_CACHE_SEC
+        if ttl <= 0:
+            return await load()
+        async with self._tools_cache_lock:
+            if self._tools_cache is not None and time.monotonic() - self._tools_cache[0] < ttl:
+                return list(self._tools_cache[1])
+            tools = await load()
+            self._tools_cache = (time.monotonic(), tools)
+            return list(tools)
+
+    def _resolve_tool_names(self, all_tools: List[MCPTool]) -> List[MCPTool]:
 
         # Resolve tool name conflicts
         resolved_tools = []
@@ -325,7 +466,11 @@ class MCPAgentService:
 
             resolved_tools.append(tool)
 
-        self.all_mcp_tools = resolved_tools
+        self.all_mcp_tools = [
+            tool
+            for tool in resolved_tools
+            if _mcp_auth_type(self.server_mapping.get(tool.server_name, {})) != "user"
+        ]
         logger.info(f"✅ Total tools available from all servers: {len(resolved_tools)}")
 
         # Log tool summary by server
@@ -340,6 +485,9 @@ class MCPAgentService:
 
     def find_tool_by_name(self, tool_name: str) -> Optional[MCPTool]:
         """Find a tool by its name (which may include server suffix)"""
+        request_tools = _request_mcp_tools.get()
+        if request_tools and tool_name in request_tools:
+            return request_tools[tool_name]
         for tool in self.all_mcp_tools:
             if tool.name == tool_name:
                 return tool
@@ -360,7 +508,26 @@ class MCPAgentService:
 
             logger.info(f"Executing MCP tool: {tool_name} (original: {tool.original_name}) on '{tool.server_name}' with args: {arguments}")
 
-            async with streamablehttp_client(tool.server_url) as (read_stream, write_stream, _):
+            server_config = self.server_mapping.get(tool.server_name) or {
+                "name": tool.server_name,
+                "url": tool.server_url,
+            }
+            headers, auth_error = mcp_auth_headers(server_config, current_mcp_user_token())
+            if auth_error:
+                logger.info(
+                    "Not calling MCP tool '%s' on '%s': %s",
+                    tool_name,
+                    tool.server_name,
+                    auth_error,
+                )
+                return {"error": auth_error, "isError": True}
+
+            client = (
+                streamablehttp_client(tool.server_url, headers=headers)
+                if headers
+                else streamablehttp_client(tool.server_url)
+            )
+            async with client as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
 
@@ -374,8 +541,17 @@ class MCPAgentService:
                     return response
 
         except Exception as e:
-            logger.error(f"Failed to execute MCP tool {tool_name} on '{tool.server_name if 'tool' in locals() else 'unknown'}': {e}")
-            return {"error": f"Tool execution failed: {str(e)}", "isError": True, "executionFailed": True}
+            logger.error(
+                "Failed to execute MCP tool %s on '%s': %s",
+                tool_name,
+                tool.server_name if "tool" in locals() else "unknown",
+                _redact_bearer(str(e)),
+            )
+            return {
+                "error": f"Tool execution failed: {_redact_bearer(str(e))}",
+                "isError": True,
+                "executionFailed": True,
+            }
 
     def convert_mcp_tools_to_litellm(self, mcp_tools: List[MCPTool]) -> List[dict]:
         """Convert MCP tools to LiteLLM tools format"""

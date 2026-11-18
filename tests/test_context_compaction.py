@@ -189,3 +189,108 @@ async def test_long_tool_loop_proof(tmp_path, monkeypatch):
     assert after < before
     # Proof 4: original system prompt is still present.
     assert out[0]["role"] == "system" and "coding agent" in out[0]["content"]
+
+
+def _history_errors(messages):
+    """Validate that every tool message answers the preceding assistant call
+    and every call is answered before another message. A call still open at the
+    very end is allowed."""
+    errors = []
+    open_ids = None
+    for index, message in enumerate(messages):
+        if message.get("role") == "tool":
+            if not open_ids or message.get("tool_call_id") not in open_ids:
+                errors.append(f"orphaned tool message at {index}")
+            else:
+                open_ids.discard(message.get("tool_call_id"))
+            continue
+        if open_ids:
+            errors.append(f"calls left unanswered before {index}: {sorted(open_ids)}")
+        open_ids = None
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            open_ids = {call["id"] for call in message["tool_calls"]}
+    return errors
+
+
+def _call(call_id, name):
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+
+def _interview_history(rounds):
+    """Each round reads a skill and saves memory, then asks; the answer is a tool result."""
+    messages = [
+        {"role": "system", "content": "You run an interview."},
+        {"role": "user", "content": "hi"},
+    ]
+    for i in range(rounds):
+        messages += [
+            {
+                "role": "assistant",
+                "content": f"Round {i}: reading the next skill. " + ("word " * 30),
+                "tool_calls": [_call(f"r{i}", "read_file_local"), _call(f"w{i}", "write_output_local")],
+            },
+            {"role": "tool", "tool_call_id": f"r{i}", "name": "read_file_local", "content": "skill " * 40},
+            {"role": "tool", "tool_call_id": f"w{i}", "name": "write_output_local", "content": '{"ok": true}'},
+            {"role": "assistant", "content": None, "tool_calls": [_call(f"q{i}", "Ask-Text")]},
+            {"role": "tool", "tool_call_id": f"q{i}", "name": "Ask-Text", "content": f"answer {i}"},
+        ]
+    return messages
+
+
+@pytest.mark.asyncio
+async def test_summarization_never_orphans_a_tool_result(tmp_path, monkeypatch):
+    """The cut lands inside the last round, between a call and its result."""
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_ENABLED", True)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_CHARS", 2000)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_TOKENS", 0)
+    monkeypatch.setattr(Config, "CONTEXT_SUMMARIZATION_ENABLED", True)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_KEEP_RECENT_TURNS", 3)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_KEEP_RECENT_TOOL_MSGS", 2)
+    monkeypatch.setattr(Config, "TOOL_RESULT_OFFLOAD_CHARS", 100000)
+    call_litellm = AsyncMock(
+        return_value={"choices": [{"message": {"content": "Earlier rounds summarized."}}]}
+    )
+    messages = _interview_history(8)
+    assert _history_errors(messages) == []
+    assert messages[-3]["role"] == "tool"
+
+    out = await manage_context_before_llm(
+        messages,
+        local_context=_ctx(tmp_path),
+        model="gpt-4o",
+        lite_llm_timeout=30,
+        call_litellm=call_litellm,
+    )
+
+    assert any("[context_summary]" in (m.get("content") or "") for m in out if m.get("role") == "system")
+    assert _history_errors(out) == []
+    assert out[-1] == {"role": "tool", "tool_call_id": "q7", "name": "Ask-Text", "content": "answer 7"}
+
+
+@pytest.mark.asyncio
+async def test_summarization_drops_a_tool_result_whose_call_is_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_ENABLED", True)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_CHARS", 500)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_TOKENS", 0)
+    monkeypatch.setattr(Config, "CONTEXT_SUMMARIZATION_ENABLED", True)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_KEEP_RECENT_TURNS", 1)
+    monkeypatch.setattr(Config, "CONTEXT_COMPACTION_KEEP_RECENT_TOOL_MSGS", 0)
+    call_litellm = AsyncMock(return_value={"choices": [{"message": {"content": "Summary."}}]})
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "old question " + ("a" * 300)},
+        {"role": "tool", "tool_call_id": "lost", "name": "grep_local", "content": "stray"},
+        {"role": "assistant", "content": "old answer " + ("b" * 300)},
+        {"role": "user", "content": "recent question"},
+    ]
+
+    out = await manage_context_before_llm(
+        messages,
+        local_context=_ctx(tmp_path),
+        model="gpt-4o",
+        lite_llm_timeout=30,
+        call_litellm=call_litellm,
+    )
+
+    assert not any(m.get("tool_call_id") == "lost" for m in out)
+    assert _history_errors(out) == []

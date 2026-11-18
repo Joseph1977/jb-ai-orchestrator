@@ -618,6 +618,33 @@ MCP_SERVER_URL_2={"name": "google", "url": "https://mcp.google.com/mcp"}
 is an object — otherwise parsing falls through to the numbered variables. A blank
 or missing name becomes `default`.
 
+Each server has one connection identity. `authType` is `service` or `user`.
+`serviceToken` is the name of an environment variable that holds the bearer,
+not the secret itself.
+
+```env
+MCP_TOKEN_PLATFORM=...
+MCP_SERVER_URLS=[{"name":"platform","url":"https://host/mcp","authType":"service","serviceToken":"MCP_TOKEN_PLATFORM"}]
+```
+
+```env
+MCP_SERVER_URLS=[{"name":"gmail","url":"https://host/mcp","authType":"user"}]
+```
+
+`authType` `user` ignores `serviceToken`. Omit it, or set it to null. Listing
+and every tool call on that server send `credentials.inputAccessToken`. A
+request without that token does not open the connection. `authType` `service`,
+or a `serviceToken` with no `authType`, sends the bearer from that env var for
+listing and every tool call. Startup fails if that env var is missing or empty,
+whether or not `authType` is set to `service`. Omitting both fields leaves the
+connection unauthenticated. A tool that needs its own user authorization after the
+connection is open is handled by that MCP server. User-auth servers are listed
+on every request and are not cached. Set `MCP_FETCH_TIMEOUT_SEC` when any server
+uses `authType` `user`, or one slow server holds every execute.
+`POST /v1/agent/executeRequest` and `GET /v1/agent/getTools` have no credentials
+field, so `authType` `user` servers stay unavailable there. Resume must send
+`inputAccessToken` again.
+
 The two forms handle bad input differently, so it is worth knowing which one you
 are using:
 
@@ -656,6 +683,8 @@ name and URL. See
 | `LITELLM_MAX_COMPLETION_TOKENS` | `0` (off) | Optional operator resource guard; when positive, sends a completion-token cap and accepts possible truncation |
 | `LITELLM_DROP_PARAMS` | `True` | Drop parameters a model does not accept |
 | `MAX_TOOL_CALLS` | `10` | Tool calls per request |
+| `MCP_FETCH_TIMEOUT_SEC` | `0` (off) | Seconds allowed for listing one MCP server's tools; a server that misses it contributes none |
+| `MCP_TOOLS_CACHE_SEC` | `0` (off) | Seconds a fetched MCP tool list is reused; `0` asks every server on every execute |
 | `ServiceName` | `jb-ai-orchestrator-service` | Service name |
 | `Environment` | `DEV` | Environment name |
 | `Region` | `USC1` | Region |

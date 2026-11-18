@@ -1399,6 +1399,7 @@ async def _handle_tool_response(
                 local_context=local_context,
                 frontend_tools=frontend_tools,
                 cancel_event=cancel_event,
+                mcp_user_access_token=input_access_token,
             )
         except BindingError as exc:
             segment_prep.ready.set()
@@ -1781,6 +1782,7 @@ async def run_agui_session(payload: AGUIRunRequest):
                 local_context=local_context,
                 harness_manifest=harness_manifest_summary,
                 cancel_event=cancel_event,
+                mcp_user_access_token=_input_access_token(payload.credentials),
             )
         except asyncio.CancelledError:
             segment_prep.provisioned = provisioned or segment_prep.provisioned

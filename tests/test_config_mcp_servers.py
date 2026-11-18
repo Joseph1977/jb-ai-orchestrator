@@ -175,8 +175,101 @@ def test_validate_config_accepts_named_servers(monkeypatch):
     assert Config.MCP_SERVER_URLS == [{"name": "general", "url": "http://a/mcp"}]
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MCP_FETCH_TIMEOUT_SEC", -1.0),
+        ("MCP_FETCH_TIMEOUT_SEC", float("nan")),
+        ("MCP_FETCH_TIMEOUT_SEC", float("inf")),
+        ("MCP_TOOLS_CACHE_SEC", -1.0),
+        ("MCP_TOOLS_CACHE_SEC", float("nan")),
+        ("MCP_TOOLS_CACHE_SEC", float("inf")),
+    ],
+)
+def test_validate_config_rejects_invalid_mcp_listing_bounds(monkeypatch, name, value):
+    monkeypatch.setattr("app.config.Config.DATABASE_URL", "postgresql+asyncpg://x/y")
+    monkeypatch.setattr("app.config.Config.LITELLM_API_KEY", "sk-test")
+    monkeypatch.setattr("app.config.Config.MCP_FETCH_TIMEOUT_SEC", 0.0)
+    monkeypatch.setattr("app.config.Config.MCP_TOOLS_CACHE_SEC", 0.0)
+    monkeypatch.setattr(Config, name, value)
+    monkeypatch.setenv("MCP_SERVER_URLS", '[{"name": "general", "url": "http://a/mcp"}]')
+
+    with pytest.raises(ValueError, match=name):
+        Config.validate_config()
+
+
 def test_validate_config_requires_database_url(monkeypatch):
     monkeypatch.setattr("app.config.Config.DATABASE_URL", "")
     monkeypatch.setenv("MCP_SERVER_URLS", '[{"name": "general", "url": "http://a/mcp"}]')
     with pytest.raises(ValueError, match="DATABASE_URL"):
         Config.validate_config()
+
+
+def test_user_auth_omits_service_token(monkeypatch):
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "gmail", "url": "http://g/mcp", "authType": "user"}]',
+    )
+    Config._parse_mcp_servers()
+    Config._validate_mcp_server_auth()
+    assert Config.MCP_SERVER_URLS[0]["authType"] == "user"
+    assert "serviceToken" not in Config.MCP_SERVER_URLS[0]
+
+
+def test_user_auth_ignores_null_service_token(monkeypatch):
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "gmail", "url": "http://g/mcp", "authType": "user", "serviceToken": null}]',
+    )
+    Config._parse_mcp_servers()
+    Config._validate_mcp_server_auth()
+    assert Config.MCP_SERVER_URLS[0]["authType"] == "user"
+    assert Config.MCP_SERVER_URLS[0]["serviceToken"] is None
+
+
+def test_service_token_without_auth_type_requires_the_env(monkeypatch):
+    monkeypatch.delenv("MCP_TOKEN_PLATFORM", raising=False)
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "platform", "url": "http://p/mcp", "serviceToken": "MCP_TOKEN_PLATFORM"}]',
+    )
+    Config._parse_mcp_servers()
+    with pytest.raises(ValueError, match="MCP_TOKEN_PLATFORM"):
+        Config._validate_mcp_server_auth()
+
+
+def test_service_auth_requires_a_set_env_var(monkeypatch):
+    monkeypatch.delenv("MCP_TOKEN_PLATFORM", raising=False)
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "platform", "url": "http://p/mcp", "authType": "service", '
+        '"serviceToken": "MCP_TOKEN_PLATFORM"}]',
+    )
+    Config._parse_mcp_servers()
+    with pytest.raises(ValueError, match="MCP_TOKEN_PLATFORM"):
+        Config._validate_mcp_server_auth()
+
+
+def test_service_auth_keeps_the_secret_in_the_env(monkeypatch):
+    monkeypatch.setenv("MCP_TOKEN_PLATFORM", "service-secret")
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "platform", "url": "http://p/mcp", "authType": "service", '
+        '"serviceToken": "MCP_TOKEN_PLATFORM"}]',
+    )
+    Config._parse_mcp_servers()
+    Config._validate_mcp_server_auth()
+    stored = Config.MCP_SERVER_URLS[0]
+    assert stored["authType"] == "service"
+    assert stored["serviceToken"] == "MCP_TOKEN_PLATFORM"
+    assert "service-secret" not in str(stored)
+
+
+def test_unknown_auth_type_is_rejected(monkeypatch):
+    monkeypatch.setenv(
+        "MCP_SERVER_URLS",
+        '[{"name": "platform", "url": "http://p/mcp", "authType": "both"}]',
+    )
+    Config._parse_mcp_servers()
+    with pytest.raises(ValueError, match="authType"):
+        Config._validate_mcp_server_auth()

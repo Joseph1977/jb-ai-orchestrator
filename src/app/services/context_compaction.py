@@ -386,7 +386,21 @@ async def _summarize_old_turns(
         "role": "system",
         "content": f"{_SUMMARY_MARKER}\n\n{summary}",
     }
-    tool_msgs = [m for m in to_summarize if m.get("role") == "tool"]
+    # A tool result must stay behind the assistant message that requested it.
+    # Providers that validate tool history reject an orphaned role=tool
+    # message, which ends the run.
+    call_ids = {
+        call.get("id")
+        for m in to_summarize
+        if m.get("role") == "assistant"
+        for call in (m.get("tool_calls") or [])
+    }
+    tool_msgs = [
+        m
+        for m in to_summarize
+        if (m.get("role") == "assistant" and m.get("tool_calls"))
+        or (m.get("role") == "tool" and m.get("tool_call_id") in call_ids)
+    ]
     rebuilt = system_msgs + [summary_msg] + tool_msgs + recent
     logger.info(
         "Summarized %d older turns into one block (~%d chars); kept %d recent turns",

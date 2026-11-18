@@ -8,6 +8,7 @@
 └── docs/
     ├── DOCUMENTATION_INDEX.md         # Navigation index
     ├── ORCHESTRATOR.md                # Folder harness / coding tools (source of truth)
+    ├── PLUGGABLE_EXECUTION_ENGINES.md # Execution-engine architecture and rollout plan
     ├── MULTI_SERVER_IMPLEMENTATION.md # Multi-MCP servers
     └── DOCS_ORGANIZATION_SUMMARY.md   # This file
 ```
@@ -20,4 +21,5 @@
 | New local tool or shell/compaction behavior | `docs/ORCHESTRATOR.md` (§5–§6 tools, §8 context management) + `readme.md` §Configuration |
 | New orchestrator env var | `docs/ORCHESTRATOR.md` §11, `readme.md` §Configuration, `src/.env/localhost/.env.example` |
 | MCP multi-server behavior | `docs/MULTI_SERVER_IMPLEMENTATION.md` + `readme.md` MCP sections |
+| Execution-engine boundary or OpenCode rollout | `docs/PLUGGABLE_EXECUTION_ENGINES.md` |
 | New top-level doc | Add a link in `docs/DOCUMENTATION_INDEX.md` |

@@ -33,6 +33,7 @@ This folder contains detailed documentation for the AI Agent / harness microserv
 
 ### Strategy and comparisons
 
+- **[PLUGGABLE_EXECUTION_ENGINES.md](./PLUGGABLE_EXECUTION_ENGINES.md)** — Why and how the orchestrator keeps its control plane while making internal and OpenCode execution engines replaceable
 - **[comparisons/comprehensive-agent-harness-comparison.md](./comparisons/comprehensive-agent-harness-comparison.md)** — Architecture, feature, gap, and recommendation matrix across Claude Code, OpenCode, Cursor Agent, Deep Agents, JB Orchestrator, and the JB web layer
 
 ## Main documentation
