@@ -1,6 +1,7 @@
 # Copyright 2025-2026 Joseph Benraz <4public@benraz.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import os
 import re
 import tempfile
@@ -29,6 +30,39 @@ def _env_list(name: str, default: str = '') -> list:
     """Parse a comma-separated environment variable into a trimmed list."""
     raw = os.getenv(name, default)
     return [item.strip() for item in raw.split(',') if item.strip()]
+
+
+def _mcp_auth_type(server: dict) -> str:
+    """Return 'user', 'service', 'none', or 'invalid' for one MCP server entry.
+
+    ``serviceToken`` names an environment variable. It is ignored when
+    ``authType`` is ``user``, including when the value is null.
+    """
+    raw = server.get("authType", None)
+    if raw is None or raw == "":
+        auth = None
+    elif isinstance(raw, str):
+        auth = raw.strip().lower()
+    else:
+        return "invalid"
+    if auth not in (None, "user", "service"):
+        return "invalid"
+    if auth == "user":
+        return "user"
+    if auth == "service" or _mcp_service_token_env(server):
+        return "service"
+    return "none"
+
+
+def _mcp_service_token_env(server: dict):
+    """Env var name holding the service bearer, or None when omitted or null."""
+    raw = server.get("serviceToken", None)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    name = raw.strip()
+    return name or None
 
 
 def is_running_in_kubernetes():
@@ -62,6 +96,12 @@ class Config:
 
     # MCP Configuration - Support multiple servers
     MCP_SERVER_URLS = None  # Will be set in _parse_mcp_servers()
+    # Seconds allowed for listing one server's tools; 0 waits as long as the
+    # transport does. An unreachable server then costs this, not a connect timeout.
+    MCP_FETCH_TIMEOUT_SEC = float(os.getenv('MCP_FETCH_TIMEOUT_SEC', '0'))
+    # Seconds a fetched tool list is reused before servers are asked again;
+    # 0 asks on every execute.
+    MCP_TOOLS_CACHE_SEC = float(os.getenv('MCP_TOOLS_CACHE_SEC', '0'))
 
     @classmethod
     def _parse_mcp_servers(cls):
@@ -303,10 +343,53 @@ class Config:
         return sorted(found)
 
     @classmethod
+    def _validate_mcp_server_auth(cls):
+        """One identity per MCP server. The secret stays in the named env var."""
+        for i, server in enumerate(cls.MCP_SERVER_URLS or []):
+            if not isinstance(server, dict):
+                continue
+            name = server.get("name") or f"index {i}"
+            if (
+                "serviceToken" in server
+                and server.get("serviceToken") is not None
+                and not isinstance(server.get("serviceToken"), str)
+            ):
+                raise ValueError(
+                    f"MCP server '{name}' serviceToken must be an environment "
+                    "variable name or null"
+                )
+            auth_type = _mcp_auth_type(server)
+            if auth_type == "invalid":
+                raise ValueError(
+                    f"MCP server '{name}' authType must be 'user' or 'service'"
+                )
+            if auth_type == "user":
+                server["authType"] = "user"
+                continue
+            token_env = _mcp_service_token_env(server)
+            if auth_type == "service" and not token_env:
+                raise ValueError(
+                    f"MCP server '{name}' authType service requires serviceToken"
+                )
+            if not token_env:
+                continue
+            server["authType"] = "service"
+            if not os.environ.get(token_env, "").strip():
+                raise ValueError(
+                    f"MCP server '{name}' serviceToken env var '{token_env}' "
+                    "is empty or unset"
+                )
+
+    @classmethod
     def validate_config(cls):
         """Validate required configuration values"""
         # Parse MCP servers first
         cls._parse_mcp_servers()
+
+        for name in ("MCP_FETCH_TIMEOUT_SEC", "MCP_TOOLS_CACHE_SEC"):
+            value = getattr(cls, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a finite non-negative number")
 
         if cls.LITELLM_MODEL_DEADLINE_SEC <= 0:
             raise ValueError("LITELLM_MODEL_DEADLINE_SEC must be greater than zero")
@@ -369,6 +452,7 @@ class Config:
         for i, server in enumerate(cls.MCP_SERVER_URLS):
             if not isinstance(server, dict) or 'name' not in server or 'url' not in server:
                 raise ValueError(f"MCP server at index {i} must be an object with 'name' and 'url' properties")
+        cls._validate_mcp_server_auth()
 
         server_names = [server['name'] for server in cls.MCP_SERVER_URLS]
         server_urls = [server['url'] for server in cls.MCP_SERVER_URLS]
