@@ -13,4 +13,4 @@ Trend: v1=6
 Next point ID: P007
 Retired point IDs: none
 Stop reason: none
-Next action: reviewer subagent writes review v2
+Next action: reviewer retry 1 of 1 for review v2 (prior output failed format: assessments for non-pushback points)
