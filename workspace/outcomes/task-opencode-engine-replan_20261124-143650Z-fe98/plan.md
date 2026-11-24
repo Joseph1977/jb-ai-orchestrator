@@ -1,13 +1,11 @@
 # Plan — OpenCodeExecutionEngine implementation plan (replan)
-Version: 2
+Version: 3
 Model: claude-opus-5-5-medium
 
-## Response to review v1
+## Response to review v2
 | Point ID | Decision | Reason / change made |
 |---|---|---|
-| P001 | pushed back | P007's cause (pre-claim tool resolution I/O) moved in-segment in v1. Remaining gates are sync, pure request/Config checks; other pre-claim prep is today's internal path (C-6). D11 now pins this; a test enforces it. Evidence: src/app/controllers/ag_ui_controller.py#1570-1632 \| brief C-6 |
-| P002 | accepted | The in-segment hook check is removed. `validate_config` now refuses `ORCHESTRATOR_ENGINE=opencode` with `HOOKS_ENABLED=true`, so no request reaches a claim or hook discovery (D11, D20, In-5 tests, readme Configuration). |
-| P003 | partly accepted | v1 already listed DOCUMENTATION_INDEX.md under Docs. Now added to Slice 2 exit and validation with the §12 head and §15 code-map row. Evidence: docs/DOCUMENTATION_INDEX.md#27 \| plan v1 Files/Docs |
+| P001 | pushed back | Gates are sync and add no time. AG-UI I/O prep (provision ~1681, workspace ~1702) already runs in _run_fresh_segment under manage_run; pre-claim mkdir/insert is unchanged internal behaviour. Slice 1 test pins it. Evidence: src/app/controllers/ag_ui_controller.py#1662-1702 \| brief C-6 |
 
 ## Plan
 
@@ -16,7 +14,8 @@ Add an `ExecutionEngine` seam at the six controller calls of `ToolExecutionHub.p
 
 Changes from the input draft (v4), verified in the repo:
 - Tool resolution runs inside the managed segment under the existing `manage_run` watchdog, so the draft's `SegmentDeadline` / `manage_run(deadline_sec=)` and the P007 double deadline are gone; pre-claim gates do no I/O (D11).
-- P004 kept: AG-UI gates sit at the start of the fresh branch (~1560), before binding resolution, `ensure_runtime`, `_create_agui_execution` (~1621) and the claim (~1632); legacy gate before `_create_execution_record()` (~158).
+- Deadline coverage (§12) already holds where it matters: AG-UI fresh `workspace_manager.provision` (~1681) and `_ensure_workspace_for_agui_segment` (~1702) run inside `_run_fresh_segment`, i.e. after `manage_run` starts its watchdog (~856). Pre-claim work (binding parse ~1570, `ensure_runtime` mkdir ~1609, `_create_agui_execution` ~1621, claim ~1632) is identical on both engines and stays as today (C-6, C-7).
+- P004 kept: AG-UI gates sit at the start of the fresh branch (~1560), before binding resolution, `ensure_runtime`, `_create_agui_execution` and the claim; legacy gate before `_create_execution_record()` (~158).
 - Hooks under opencode are refused at config load, not discovered per segment (D20).
 - Bridge MCP calls rebind `bind_mcp_user_token` / `bind_request_mcp_tools`, since the bridge HTTP handler does not inherit segment context. Adds A13 history seeding and a single-worker constraint.
 
@@ -42,7 +41,7 @@ Changes from the input draft (v4), verified in the repo:
   - A fresh OpenCode AG-UI run discarding an internal stale hold (`_discard_stale_awaiting_and_cleanup_orphans`) is the existing thread-reset rule, not a resume.
 - D9 (C-2) One loopback sidecar per orchestrator process, no workspace mount; each session rooted in an empty sidecar-side scratch dir (A1); orchestrator-composed system prompt is the session system prompt (A4); built-in tools, subagents, compaction disabled (A2, A8).
 - D10 (Q4, In-4) `engines/capabilities.py` reports `headless_segment, workspace_file_ops, mcp_tools, streaming_output, agui_frontend_interrupts, durable_resume, hooks, permission_asks, subagents, context_compaction, workspace_free`. Internal: all true. OpenCode: `headless_segment`, `workspace_file_ops`, `streaming_output` true, `mcp_tools=subset`, rest false; `hooks` is enforced at config load (D20).
-- D11 (Q4, In-4, P004) `require_capabilities(engine, needs)` rejects with 400 `{"success":false,"errorCode":"ENGINE_CAPABILITY_UNSUPPORTED","error":"<capability> is not supported by engine '<e>'"}` or the AG-UI `RunErrorEvent`, logging `engine_capability_denied`. Internal is never gated. Gates are synchronous pure functions of the request and `Config` (no await, DB, filesystem or network), so they need no deadline and leave all existing pre-claim work unchanged:
+- D11 (Q4, In-4, P004) `require_capabilities(engine, needs)` rejects with 400 `{"success":false,"errorCode":"ENGINE_CAPABILITY_UNSUPPORTED","error":"<capability> is not supported by engine '<e>'"}` or the AG-UI `RunErrorEvent`, logging `engine_capability_denied`. Internal is never gated. Gates are synchronous pure functions of the request and `Config` (no await, DB, filesystem or network), so they consume no deadline budget and leave all existing pre-claim work unchanged; every awaited or network preparation step stays inside `manage_run`:
   - Orchestrator `execute`, after `_segment_config` (~707), before the claim session (~710): `agui_frontend_interrupts` when `frontendTools` is set.
   - AG-UI fresh, at the start of the fresh branch (~1560): `agui_frontend_interrupts` for non-empty `frontend_tools`; `workspace_free` when no `input` and no `workspacePath`. `ensure_thread_session` (~1449), `_prepare_thread_claims` (~1474) and global `refresh_frontend_tools` (~1430) are unchanged.
   - Legacy `executeRequest`, before `_create_execution_record()` (~158): `workspace_free`, so every legacy execute is rejected under opencode.
@@ -94,6 +93,7 @@ Changes from the input draft (v4), verified in the repo:
 ### Test matrix (Q6; no DB, no network)
 - In-1: `test_engine_contract.py`: result keys equal hub keys, envelope round-trip, unknown version rejected.
 - In-2: `test_engine_characterization.py` (Slice 1): orchestrator complete, await, fail, `MAX_TOOL_CALLS`, `TIMEOUT`; AG-UI `text_streamed`; legacy execute and resume; snapshot keys; in-segment "Requested tools not found".
+  - Same file: AG-UI fresh with `input` and with `workspacePath` calls `workspace_manager.provision` / `_ensure_workspace_for_agui_segment` only after `manage_run` entry, and a provision outlasting a small `RUN_SEGMENT_DEADLINE_SEC` ends `TIMEOUT` with the run row terminalized.
   - `test_engine_resolver.py`: fresh follows env, resume follows persisted; on all three paths `ENGINE_MISMATCH` makes no claim and keeps `AWAITING_RESPONSE`; internal state resumes under opencode.
   - `test_engine_identity_persistence.py` (columns, defaults, revision chain); `test_engine_architecture.py` (engine imports stay behind `engines/`).
   - Unchanged and green: `test_claim_lifecycle`, `test_stale_claim_recovery`, `test_bounded_run_lifecycle`, `test_agui_cancellation`, `test_resume_idempotency`, `test_orchestrator_claim_lifecycle`, `test_agui_await_resume`, `test_llm_error_contract`, `test_run_lifecycle_phase3`.
@@ -119,6 +119,7 @@ Changes from the input draft (v4), verified in the repo:
 
 ### Risks
 - AG-UI closures are large; Slice 2 swaps only call expressions, guarded by Slice 1 tests.
+- Pre-claim AG-UI work (local `ensure_runtime` mkdir, `_create_agui_execution` insert, claim) sits outside the watchdog on both engines today; the plan neither adds to it nor moves it (C-6). A slow DB there is bounded by DB timeouts, not the segment deadline; tightening it is a separate internal change.
 - Bridge tokens live in process memory: a bridge request routed to another worker gets 401, failing closed. Multi-worker processes and shared sidecars are unsupported under opencode (hard constraint).
 - Existing in-segment `collect_manifest` scan keeps the §12 synchronous-discovery Known issue on both engines; opencode adds no new synchronous discovery and the fix stays a separate change.
 - Refusing `HOOKS_ENABLED=true` blocks opencode on hosts that enable hooks for internal runs; this is fail-closed and documented, and Phase 5 hook parity lifts it (Out-3).
@@ -128,6 +129,7 @@ Changes from the input draft (v4), verified in the repo:
 
 ### Validation
 - Per slice: `python -m pytest` passes with no DB or network; new tests fail before the change where applicable.
+- Slice 1: the AG-UI provisioning-under-watchdog characterization passes on unchanged code, confirming §12 deadline coverage before any seam lands.
 - Slice 2: `alembic upgrade head` and `downgrade -1` on a disposable Postgres; `scripts/smoke_service.py` and `scripts/smoke_agui.py` under internal; search for `20250816_phase3_lifecycle` finds it only as historical or `down_revision`, never as the stated head.
 - Slice 4: boot fails with opencode plus `HOOKS_ENABLED=true` and succeeds with internal plus `HOOKS_ENABLED=true`.
 - Slice 6: manual headless execute against the pinned sidecar, both provider modes.
