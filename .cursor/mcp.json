@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mcp-ui": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/mcp-ui/dist/index.js", "--stdio"],
+      "env": {
+        "CURSOR_API_KEY": "${env:CURSOR_API_KEY}"
+      }
+    }
+  }
+}

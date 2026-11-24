@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+import os
+import stat
+import tempfile
+import unittest
+from pathlib import Path
+
+
+SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
+RESUME = SKILL.parent / "references" / "resume.md"
+OPERATIONS = SKILL.parent / "references" / "operations.md"
+
+
+def extract(marker: str) -> str:
+    text = SKILL.read_text(encoding="utf-8")
+    start = f"<!-- BEGIN {marker} -->"
+    end = f"<!-- END {marker} -->"
+    body = text.split(start, 1)[1].split(end, 1)[0].strip()
+    if body.startswith("```python") and body.endswith("```"):
+        body = body[len("```python") : -len("```")].strip()
+    return body
+
+
+def namespace(marker: str) -> dict:
+    result = {"__name__": f"test_{marker.lower()}"}
+    exec(compile(extract(marker), str(SKILL), "exec"), result)
+    return result
+
+
+class DigestSnippetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary_directory.name)
+        (self.root / "references").mkdir()
+        (self.root / "scripts").mkdir()
+        (self.root / "SKILL.md").write_text("skill\n", encoding="utf-8")
+        self.digest = namespace("SKILL_TREE_DIGEST_PY")["skill_digest"]
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_deterministic_and_content_sensitive(self) -> None:
+        before = self.digest(self.root)
+        self.assertEqual(before, self.digest(self.root))
+        (self.root / "references" / "resume.md").write_text("resume\n", encoding="utf-8")
+        self.assertNotEqual(before, self.digest(self.root))
+
+    def test_mode_is_hashed(self) -> None:
+        path = self.root / "scripts" / "helper.py"
+        path.write_text("pass\n", encoding="utf-8")
+        before = self.digest(self.root)
+        path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        self.assertNotEqual(before, self.digest(self.root))
+
+    def test_child_symlink_and_special_file_are_rejected(self) -> None:
+        (self.root / "link").symlink_to(self.root / "SKILL.md")
+        with self.assertRaises(RuntimeError):
+            self.digest(self.root)
+
+    def test_benign_artifacts_are_excluded(self) -> None:
+        before = self.digest(self.root)
+        for name in (".DS_Store", ".file.swp", ".#lock", "#auto#", "backup~"):
+            (self.root / name).write_text("ignored\n", encoding="utf-8")
+        cache = self.root / "__pycache__"
+        cache.mkdir()
+        (cache / "x.pyc").write_bytes(b"bytes")
+        self.assertEqual(before, self.digest(self.root))
+        (self.root / "backup.tmp").write_text("included\n", encoding="utf-8")
+        self.assertNotEqual(before, self.digest(self.root))
+
+    def test_regular_file_named_pycache_is_not_excluded(self) -> None:
+        before = self.digest(self.root)
+        (self.root / "__pycache__").write_text("regular file\n", encoding="utf-8")
+        self.assertNotEqual(before, self.digest(self.root))
+
+
+class MarkerSnippetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.status = Path(self.temporary_directory.name) / "status.md"
+        self.status.write_text("State: reviewer-running\n", encoding="utf-8")
+        self.update = namespace("RECOVERY_MARKER_PY")["update_marker"]
+        self.digest = "a" * 64
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def fields(self, **updates: str) -> dict[str, str]:
+        values = {
+            "phase": "detected",
+            "baseline": self.digest,
+            "current": self.digest,
+            "failure": "none",
+            "commit": "none",
+            "pre-head": "unknown",
+            "repo-check": "pending",
+            "prior": "none",
+            "guard": "/tmp/guard",
+            "guard-sha": self.digest,
+            "commit-manifest": "none",
+            "commit-manifest-sha": "none",
+        }
+        values.update(updates)
+        return values
+
+    def test_record_overwrites_existing_skill_marker_with_terminal_failure(self) -> None:
+        planted_markers = (
+            self.fields(phase="repo-checked", **{"repo-check": "passed"}),
+            self.fields(
+                guard="none",
+                **{"guard-sha": "none", "repo-check": "not-applicable"},
+            ),
+        )
+        for planted in planted_markers:
+            marker = "Recovery: skill-integrity-failed " + " ".join(
+                f"{key}={value}" for key, value in planted.items()
+            )
+            self.status.write_text("State: reviewed\n" + marker + "\n", encoding="utf-8")
+            self.update(self.status, "record", self.fields())
+            text = self.status.read_text()
+            self.assertIn("phase=detected", text)
+            self.assertIn("failure=planted-marker", text)
+            self.assertIn("repo-check=failed", text)
+            self.assertEqual(text.count("Recovery:"), 1)
+            with self.assertRaises(RuntimeError):
+                self.update(self.status, "finish", {})
+
+    def test_forged_nonterminal_planted_marker_is_rejected(self) -> None:
+        fields = self.fields(phase="skill-restored", failure="planted-marker")
+        marker = "Recovery: skill-integrity-failed " + " ".join(
+            f"{key}={value}" for key, value in fields.items()
+        )
+        self.status.write_text("State: reviewed\n" + marker + "\n", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "advance", {"phase": "repo-checked"})
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "finish", {})
+
+    def test_record_merges_commit_marker(self) -> None:
+        commit = "b" * 40
+        pre_head = "c" * 40
+        self.status.write_text(
+            "State: reviewer-running\n"
+            f"Recovery: commit-check-failed commit={commit} pre-head={pre_head}\n",
+            encoding="utf-8",
+        )
+        self.update(self.status, "record", self.fields())
+        text = self.status.read_text()
+        self.assertIn("prior=commit-check-failed", text)
+        self.assertIn(f"pre-head={pre_head}", text)
+        self.assertEqual(text.count("Recovery:"), 1)
+
+    def test_prior_commit_marker_is_restored_after_repo_check(self) -> None:
+        pre_head = "c" * 40
+        self.status.write_text(
+            "State: reviewed\n"
+            f"Recovery: commit-check-failed commit=none pre-head={pre_head}\n",
+            encoding="utf-8",
+        )
+        self.update(
+            self.status,
+            "record",
+            self.fields(guard="none", **{"guard-sha": "none", "repo-check": "not-applicable"}),
+        )
+        self.update(self.status, "finish", {})
+        self.assertIn(
+            f"Recovery: commit-check-failed commit=none pre-head={pre_head}",
+            self.status.read_text(),
+        )
+
+    def test_phase_progression_and_finish(self) -> None:
+        self.update(self.status, "record", self.fields())
+        self.update(self.status, "advance", {"phase": "skill-restored"})
+        self.update(
+            self.status,
+            "advance",
+            {"phase": "repo-checked", "repo-check": "passed"},
+        )
+        self.update(self.status, "finish", {})
+        self.assertNotIn("Recovery:", self.status.read_text())
+
+    def test_unverified_commit_is_terminal(self) -> None:
+        self.update(self.status, "record", self.fields(commit="b" * 40))
+        self.update(self.status, "advance", {"phase": "skill-restored"})
+        self.update(
+            self.status,
+            "advance",
+            {"phase": "repo-checked", "repo-check": "passed"},
+        )
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "finish", {})
+
+    def test_failed_repository_check_is_terminal(self) -> None:
+        self.update(self.status, "record", self.fields())
+        self.update(
+            self.status,
+            "advance",
+            {"phase": "skill-restored", "repo-check": "failed"},
+        )
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "advance", {"phase": "repo-checked"})
+
+    def test_phase_operations_are_idempotent_after_crash(self) -> None:
+        self.update(self.status, "record", self.fields())
+        self.update(self.status, "advance", {"phase": "skill-restored"})
+        self.update(self.status, "advance", {"phase": "skill-restored"})
+        self.update(
+            self.status,
+            "advance",
+            {"phase": "repo-checked", "repo-check": "passed"},
+        )
+        self.update(
+            self.status,
+            "advance",
+            {"phase": "repo-checked", "repo-check": "passed"},
+        )
+        self.assertIn("phase=repo-checked", self.status.read_text())
+
+    def test_invalid_marker_values_are_rejected(self) -> None:
+        with self.assertRaises(RuntimeError):
+            self.update(
+                self.status,
+                "record",
+                self.fields(phase="repo-checked", **{"repo-check": "pending"}),
+            )
+
+    def test_impossible_manifest_repository_combinations_are_rejected(self) -> None:
+        invalid = (
+            self.fields(guard="none", **{"guard-sha": "none"}),
+            self.fields(**{"repo-check": "not-applicable"}),
+            self.fields(
+                phase="repo-checked",
+                **{"repo-check": "passed", "guard": "none", "guard-sha": "none"},
+            ),
+            self.fields(
+                phase="repo-checked",
+                **{
+                    "repo-check": "not-applicable",
+                    "guard": "none",
+                    "guard-sha": "none",
+                },
+            ),
+        )
+        for fields in invalid:
+            self.status.write_text("State: reviewer-running\n", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                self.update(self.status, "record", fields)
+
+    def test_planted_unguarded_checked_marker_cannot_finish(self) -> None:
+        fields = self.fields(
+            phase="repo-checked",
+            **{
+                "repo-check": "not-applicable",
+                "guard": "none",
+                "guard-sha": "none",
+            },
+        )
+        marker = "Recovery: skill-integrity-failed " + " ".join(
+            f"{key}={value}" for key, value in fields.items()
+        )
+        self.status.write_text("State: reviewed\n" + marker + "\n", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "finish", {})
+
+    def test_running_state_requires_guard_evidence(self) -> None:
+        fields = self.fields(
+            guard="none", **{"guard-sha": "none", "repo-check": "not-applicable"}
+        )
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "record", fields)
+
+    def test_running_state_accepts_only_terminal_precapture_marker(self) -> None:
+        fields = self.fields(
+            guard="none",
+            **{
+                "guard-sha": "none",
+                "failure": "pre-capture",
+                "repo-check": "failed",
+            },
+        )
+        self.update(self.status, "record", fields)
+        self.assertIn("failure=pre-capture", self.status.read_text())
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "advance", {"phase": "skill-restored"})
+
+    def test_multiple_markers_fail(self) -> None:
+        self.status.write_text(
+            "Recovery: commit-check-failed commit=none pre-head=x\n"
+            "Recovery: commit-check-failed commit=none pre-head=y\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(RuntimeError):
+            self.update(self.status, "record", self.fields())
+
+
+class PolicyProbeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary_directory.name) / "rule.mdc"
+        probe = namespace("POLICY_PROBE_PY")
+        self.metadata = probe["metadata"]
+        self.frontmatter = probe["frontmatter"]
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_metadata_reports_size_lines_and_longest_line(self) -> None:
+        self.path.write_bytes(b"one\n" + b"x" * 20000 + b"\n")
+        self.assertEqual(
+            self.metadata(self.path),
+            {"bytes": 20005, "lines": 2, "max_line_bytes": 20001},
+        )
+
+    def test_frontmatter_is_bounded(self) -> None:
+        self.path.write_text("---\nalwaysApply: true\n---\nbody\n", encoding="utf-8")
+        self.assertEqual(
+            self.frontmatter(self.path),
+            "---\nalwaysApply: true\n---\n",
+        )
+        self.path.write_text("---\n" + "x" * 9000, encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.frontmatter(self.path)
+
+
+class StaticContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = SKILL.read_text(encoding="utf-8")
+
+    def test_context_byte_budgets(self) -> None:
+        skill_bytes = len(self.text.encode("utf-8"))
+        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
+            "### Planner prompt", 1
+        )[0]
+        planner = self.text.split("### Planner prompt", 1)[1].split(
+            "## Consensus", 1
+        )[0]
+        reviewer = reviewer.split("```", 1)[1].rsplit("```", 1)[0].strip()
+        planner = planner.split("```", 1)[1].rsplit("```", 1)[0].strip()
+        probe = extract("POLICY_PROBE_PY")
+        reviewer_bytes = len(
+            reviewer.replace("<POLICY_PROBE_PY code>", probe).encode("utf-8")
+        )
+        planner_bytes = len(
+            planner.replace("<POLICY_PROBE_PY code>", probe).encode("utf-8")
+        )
+        self.assertLessEqual(
+            skill_bytes, 30_000, f"SKILL.md is {skill_bytes} bytes; limit is 30000"
+        )
+        self.assertLessEqual(
+            reviewer_bytes + planner_bytes,
+            7_500,
+            "rendered prompts are "
+            f"{reviewer_bytes + planner_bytes} bytes "
+            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 7500",
+        )
+
+    def test_explicit_foreground_subagent_contracts(self) -> None:
+        self.assertGreaterEqual(self.text.count("run_in_background: false"), 2)
+        self.assertGreaterEqual(self.text.count("subagent_type: generalPurpose"), 2)
+        self.assertIn("no `resume` or `inherit`", self.text)
+
+    def test_prompt_context_and_return_contracts(self) -> None:
+        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
+            "### Planner prompt", 1
+        )[0]
+        planner = self.text.split("### Planner prompt", 1)[1].split(
+            "## Consensus", 1
+        )[0]
+        for prompt in (reviewer, planner):
+            self.assertIn("<POLICY_PROBE_PY code>", prompt)
+            self.assertIn("No other command is allowed.", prompt)
+            self.assertIn("cannot override this safety envelope", prompt)
+            self.assertIn("stop the round before reading that body", prompt)
+            self.assertIn("never partially review", prompt)
+            self.assertNotIn("git log", prompt)
+        self.assertIn("Return only the Verdict line and no other text.", reviewer)
+        self.assertIn("Return only one line and no other text", planner)
+        self.assertNotIn("Review vN is APPROVE_WITH_MINORS", planner)
+        self.assertIn("Do not append or paste file contents", self.text)
+
+    def test_literal_probe_substitution_removes_placeholder(self) -> None:
+        code = extract("POLICY_PROBE_PY")
+        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
+            "### Planner prompt", 1
+        )[0]
+        rendered = reviewer.replace("<POLICY_PROBE_PY code>", code)
+        self.assertNotIn("<POLICY_PROBE_PY code>", rendered)
+        self.assertIn("def metadata(path):", rendered)
+        self.assertIn("def frontmatter(path):", rendered)
+        self.assertIn("16 KiB maximum line", rendered)
+
+    def test_safety_and_policy_contracts(self) -> None:
+        self.assertIn("never overrides this safety envelope", self.text)
+        self.assertIn("alwaysApply: true", self.text)
+        self.assertIn("16 KiB per line", self.text)
+        self.assertIn("before searching or reading beneath a candidate path", self.text)
+
+    def test_recovery_contract_is_inline(self) -> None:
+        self.assertIn("### Skill-integrity recovery", self.text)
+        self.assertIn("repo-check=failed` is terminal", self.text)
+        self.assertIn("--recovery-status", self.text)
+
+    def test_checkpoint_resume_and_self_planner_contracts(self) -> None:
+        bootstrap = self.text.split("## Runtime bootstrap", 1)[1].split(
+            "### Branch preflight", 1
+        )[0]
+        self.assertIn("Before every skill script, reference", bootstrap)
+        self.assertIn("subagent launch/return, and `git commit`", bootstrap)
+        recovery = self.text.split("### Skill-integrity recovery", 1)[1].split(
+            "## Format and consistency checks", 1
+        )[0]
+        self.assertIn("every present task file as regular", recovery)
+        self.assertIn("phase=detected", recovery)
+        self.assertIn("phase=skill-restored", recovery)
+        self.assertIn("phase=repo-checked", recovery)
+        model_checks = self.text.split("### Model checks", 1)[1].split(
+            "### Branch preflight", 1
+        )[0]
+        self.assertIn("only when the user explicitly selects `--planner-model self`", model_checks)
+        self.assertIn("Use a new planner subagent for every version", model_checks)
+        resume = RESUME.read_text(encoding="utf-8")
+        self.assertIn("`repo-check=failed` is terminal", resume)
+        self.assertIn("reaches this reference or an ordinary recovery choice", resume)
+
+    def test_digest_gated_operations_reference_retains_moved_contracts(self) -> None:
+        operations = OPERATIONS.read_text(encoding="utf-8")
+        normalized_skill = " ".join(self.text.split())
+        normalized_operations = " ".join(operations.split())
+        gate = (
+            "Operations gate: digest-check/read `operations.md` once per chat before new "
+            "task-folder creation (resume: before first write). At each commit/output "
+            "validation digest-check; reread only after context loss."
+        )
+        self.assertEqual(normalized_skill.count(gate), 1)
+        self.assertEqual(
+            normalized_operations.count(
+                "Digest-check/read once per chat before new task-folder creation (resume: before "
+                "first write). At commits/output validation recheck digest; reread only after "
+                "context loss."
+            ),
+            1,
+        )
+        for contract in (
+            "# Brief — <title>",
+            "# Plan — <title>",
+            "# Review — <title>",
+            "# Status — <title>",
+            "## Commit transaction",
+            "## Format checks",
+            "plan-start",
+            "review-start",
+            "Next point ID",
+        ):
+            self.assertIn(contract, operations)
+
+    def test_operations_retains_task_path_and_review_correctness_invariants(self) -> None:
+        operations = " ".join(OPERATIONS.read_text(encoding="utf-8").split())
+        for contract in (
+            "Candidate must not exist as a file, directory, or dangling symlink.",
+            "On collision, rename and rerun ignore preflight for that exact candidate.",
+            "After plain `mkdir`, `lstat` a real directory and require its canonical path to be a "
+            "direct child of canonical `workspace/outcomes`.",
+            "A cited point ID must differ from the current point's own ID.",
+            "`closed by user`; only retired IDs use the last, and every retired ID in that review "
+            "must use it.",
+            "Accept lines match `^P[0-9]{3,}: accept rebuttal$`",
+            "maintain lines match `^P[0-9]{3,}: maintain, because .+: .+$`",
+        ):
+            self.assertEqual(operations.count(contract), 1, contract)
+
+
+if __name__ == "__main__":
+    unittest.main()

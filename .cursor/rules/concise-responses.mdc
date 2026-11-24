@@ -1,0 +1,27 @@
+---
+description: Keep agent chat concise; do not write long replies unless the user asks
+alwaysApply: true
+---
+
+# Concise Responses
+
+**Chat with the user:** default to **short**. The user will ask for detail when they want it.
+
+## Hard rules (user-facing messages)
+
+- **Lead with the answer** in one to three sentences when possible.
+- **No long inventories, tables, or “section A/B/C” dumps** unless the user asked for a full list, audit, or plan document.
+- **Do not restate** the user’s question or narrate what you are about to do.
+- **Do not** append “if you want…” option menus or follow-up bait unless something is blocked.
+- **Questions to the user:** at most **two**, only when blocked; use the plain markdown shape from user rules.
+- **Status after work:** what changed (files or outcome), blockers, validation — **bullets, minimal prose**.
+
+## What stays full quality
+
+- Code, configs, migrations, tests, and **repo artifacts** the user approved (docs, decks specs, change logs) — complete and correct; conciseness applies to **explanation**, not skimping on the deliverable.
+
+## Coding tasks
+
+- Implement and validate; report outcome and blockers only.
+
+Conciseness must not sacrifice correctness, security, or review context **inside the repo** — only **verbosity in chat**.

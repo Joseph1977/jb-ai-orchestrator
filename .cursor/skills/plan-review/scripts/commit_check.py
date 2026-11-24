@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""Verify plan-review task commits: one commit at a time (pre/post) and the whole history."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+MANIFEST_VERSION = 2
+
+
+class CheckError(RuntimeError):
+    """Raised when the commit state cannot be proven."""
+
+
+def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if check and result.returncode != 0:
+        message = result.stderr.decode("utf-8", "replace").strip()
+        raise CheckError(f"git {' '.join(args)} failed: {message}")
+    return result
+
+
+def _out(repo: Path, *args: str) -> str:
+    return _git(repo, *args).stdout.decode().strip()
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _normalize(repo: Path, value: str) -> str:
+    candidate = Path(value)
+    absolute = Path(os.path.abspath(candidate if candidate.is_absolute() else repo / candidate))
+    try:
+        relative = absolute.relative_to(repo)
+    except ValueError as exc:
+        raise CheckError(f"path is outside repository: {value}") from exc
+    if relative == Path("."):
+        raise CheckError("repository root cannot be an allowed path")
+    return relative.as_posix()
+
+
+def _index_entries(repo: Path) -> dict[str, str]:
+    """Map path to '<mode> <blob> <stage>' for every index entry."""
+    entries: dict[str, str] = {}
+    data = _git(repo, "ls-files", "--stage", "-z").stdout.decode("utf-8", "surrogateescape")
+    for record in filter(None, data.split("\0")):
+        meta, path = record.split("\t", 1)
+        key = path if path not in entries else f"{path}\0{meta}"
+        entries[key] = meta
+    return entries
+
+
+def _staged(entries: dict[str, str], path: str) -> list[str] | None:
+    """Return [mode, blob] for a stage-0 index entry."""
+    meta = entries.get(path)
+    if meta is None:
+        return None
+    mode, blob, stage = meta.split()
+    if stage != "0":
+        raise CheckError(f"{path} has an unmerged index entry")
+    return [mode, blob]
+
+
+def _tree(repo: Path, commit: str, path: str) -> list[str] | None:
+    output = _git(repo, "ls-tree", "-z", commit, "--", path).stdout.decode()
+    record = output.split("\0", 1)[0]
+    if not record:
+        return None
+    mode, _kind, blob = record.split("\t", 1)[0].split()
+    return [mode, blob]
+
+
+def _file_mode_tracked(repo: Path) -> bool:
+    result = _git(repo, "config", "--type=bool", "--get", "core.fileMode", check=False)
+    return result.stdout.decode().strip() != "false"
+
+
+def _worktree(repo: Path, path: str, index_mode: str | None) -> list[str] | None:
+    """Return [mode, blob] as Git would stage the worktree file, applying its attributes."""
+    absolute = repo / path
+    try:
+        details = absolute.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(details.st_mode):
+        raise CheckError(f"{path} is not a regular file")
+    if _file_mode_tracked(repo):
+        mode = "100755" if details.st_mode & 0o111 else "100644"
+    else:
+        mode = index_mode or "100644"
+    return [mode, _out(repo, "hash-object", f"--path={path}", "--", path)]
+
+
+def _branch(repo: Path) -> str:
+    result = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if result.returncode != 0:
+        raise CheckError("HEAD is detached")
+    return result.stdout.decode().strip()
+
+
+def pre(repo_value: str, paths: list[str]) -> dict[str, Any]:
+    repo = Path(repo_value).resolve(strict=True)
+    allowed = sorted({_normalize(repo, value) for value in paths})
+    if not allowed:
+        raise CheckError("at least one allowed path is required")
+
+    head = _out(repo, "rev-parse", "--verify", "HEAD")
+    entries = _index_entries(repo)
+    files: dict[str, dict[str, Any]] = {}
+    expected_changed: list[str] = []
+    for path in allowed:
+        staged = _staged(entries, path)
+        if staged is None:
+            raise CheckError(f"{path} is not staged")
+        worktree = _worktree(repo, path, staged[0])
+        if _git(repo, "diff", "--quiet", "--", path, check=False).returncode != 0 or worktree != staged:
+            raise CheckError(f"{path}: worktree mode/content differs from staged mode/content")
+        head_entry = _tree(repo, head, path)
+        if head_entry != staged:
+            expected_changed.append(path)
+        files[path] = {"entry": staged, "head_entry": head_entry}
+    if not expected_changed:
+        raise CheckError("no allowed path differs from HEAD")
+
+    unrelated = {key: value for key, value in entries.items() if key.split("\0", 1)[0] not in allowed}
+    return {
+        "version": MANIFEST_VERSION,
+        "repo": str(repo),
+        "pre_head": head,
+        "branch": _branch(repo),
+        "files": files,
+        "expected_changed": expected_changed,
+        "unrelated_index": unrelated,
+    }
+
+
+def post(manifest: dict[str, Any]) -> dict[str, Any]:
+    repo = Path(manifest["repo"])
+    pre_head = manifest["pre_head"]
+    head = _out(repo, "rev-parse", "--verify", "HEAD")
+    failures: list[str] = []
+
+    if head == pre_head:
+        failures.append("HEAD did not move; no commit was created")
+        return {"ok": False, "pre_head": pre_head, "commit": head, "failures": failures}
+
+    parents = _out(repo, "rev-list", "--parents", "-n", "1", head).split()[1:]
+    if parents != [pre_head]:
+        failures.append(f"commit parents {parents} are not exactly [{pre_head}]")
+    try:
+        branch = _branch(repo)
+    except CheckError as exc:
+        branch = str(exc)
+    if branch != manifest["branch"]:
+        failures.append(f"branch changed from {manifest['branch']} to {branch}")
+
+    changed_output = _git(
+        repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", pre_head, head
+    ).stdout.decode("utf-8", "surrogateescape")
+    changed = sorted(filter(None, changed_output.split("\0")))
+    if changed != manifest["expected_changed"]:
+        failures.append(
+            f"committed paths {changed} differ from expected {manifest['expected_changed']}"
+        )
+
+    entries = _index_entries(repo)
+    for path, recorded in manifest["files"].items():
+        expected = recorded["entry"]
+        committed = _tree(repo, head, path)
+        if committed != expected:
+            failures.append(f"{path}: committed entry {committed} differs from inspected {expected}")
+        try:
+            staged = _staged(entries, path)
+        except CheckError as exc:
+            staged = str(exc)
+        if staged != expected:
+            failures.append(f"{path}: index entry {staged} differs from inspected {expected}")
+        try:
+            worktree = _worktree(repo, path, expected[0])
+        except CheckError as exc:
+            worktree = str(exc)
+        if worktree != expected:
+            failures.append(f"{path}: worktree entry {worktree} differs from inspected {expected}")
+
+    allowed = set(manifest["files"])
+    unrelated = {key: value for key, value in entries.items() if key.split("\0", 1)[0] not in allowed}
+    if unrelated != manifest["unrelated_index"]:
+        before = manifest["unrelated_index"]
+        delta = sorted(
+            key.split("\0", 1)[0]
+            for key in set(before) | set(unrelated)
+            if before.get(key) != unrelated.get(key)
+        )
+        failures.append(f"unrelated index entries changed: {delta}")
+
+    return {"ok": not failures, "pre_head": pre_head, "commit": head, "failures": failures}
+
+
+TASK_NAME = re.compile(r"^task-([a-z0-9]+(?:-[a-z0-9]+){1,4})_[0-9]{8}-[0-9]{6}Z-[0-9a-f]{4}$")
+SUBJECT = re.compile(
+    r"^plan-review\(([a-z0-9-]+)\): (brief|feedback|plan-start|review-start|plan|review|"
+    r"minors|consensus|approved|limit-reached|stopped) v([0-9]+)$"
+)
+TASK_FILES = {"brief.md", "plan.md", "review.md", "status.md"}
+STEP_FILES = {
+    "brief": {"brief.md", "status.md"},
+    "feedback": {"brief.md", "status.md"},
+    "plan": {"plan.md", "status.md"},
+    "minors": {"plan.md", "status.md"},
+    "review": {"review.md", "status.md"},
+}
+STEP_REQUIRED = {
+    "brief": {"brief.md", "status.md"},
+    "plan": {"plan.md", "status.md"},
+    "minors": {"plan.md", "status.md"},
+    "review": {"review.md", "status.md"},
+}
+STEP_STATE = {
+    "brief": "planning",
+    "feedback": "planning",
+    "plan-start": "planner-running",
+    "plan": "reviewing",
+    "minors": "awaiting-user",
+    "review-start": "reviewer-running",
+    "review": "reviewed",
+    "consensus": "awaiting-user",
+    "approved": "approved",
+    "limit-reached": "limit-reached",
+    "stopped": "stopped",
+}
+STEP_PREVIOUS = {
+    "brief": {None},
+    "feedback": {"awaiting-user", "limit-reached", "stopped"},
+    "plan-start": {"planning", "planner-running", "reviewed", "stopped"},
+    "plan": {"planning", "planner-running", "reviewed"},
+    "minors": {"reviewed", "planner-running"},
+    "review-start": {"reviewing", "reviewer-running", "stopped"},
+    "review": {"reviewer-running"},
+    "consensus": {"reviewed"},
+    "approved": {"awaiting-user"},
+    "limit-reached": {"reviewed"},
+    "stopped": {"planner-running", "reviewer-running", "reviewed", "limit-reached"},
+}
+RECOVERY_PREFIX = "Recovery:"
+COMMIT_RECOVERY = re.compile(
+    r"Recovery: commit-check-failed commit=([0-9a-f]{40,64}|none) "
+    r"pre-head=([0-9a-f]{40,64}|unknown)$"
+)
+SKILL_RECOVERY = re.compile(
+    r"Recovery: skill-integrity-failed "
+    r"phase=(detected|skill-restored|repo-checked) "
+    r"baseline=[0-9a-f]{64} "
+    r"current=([0-9a-f]{64}|unavailable) "
+    r"failure=(none|symlink|special|unreadable|traversal|digest|pre-capture|planted-marker) "
+    r"commit=([0-9a-f]{40,64}|none) "
+    r"pre-head=([0-9a-f]{40,64}|unknown) "
+    r"repo-check=(not-applicable|pending|passed|failed) "
+    r"prior=(none|commit-check-failed) "
+    r"guard=\S+ guard-sha=([0-9a-f]{64}|none) "
+    r"commit-manifest=\S+ commit-manifest-sha=([0-9a-f]{64}|none)$"
+)
+
+
+def _valid_skill_recovery(marker: str) -> bool:
+    if not SKILL_RECOVERY.fullmatch(marker):
+        return False
+    values = dict(token.split("=", 1) for token in marker.split()[2:])
+    if (values["guard"] == "none") != (values["guard-sha"] == "none"):
+        return False
+    if (values["commit-manifest"] == "none") != (
+        values["commit-manifest-sha"] == "none"
+    ):
+        return False
+    if values["current"] == "unavailable" and values["failure"] == "none":
+        return False
+    guarded = values["guard"] != "none"
+    terminal_record = (
+        values["phase"] == "detected"
+        and values["failure"] in {"pre-capture", "planted-marker"}
+        and values["repo-check"] == "failed"
+    )
+    if values["failure"] in {"pre-capture", "planted-marker"} and not terminal_record:
+        return False
+    if not guarded and values["phase"] != "detected":
+        return False
+    expected = (
+        {"failed"} if terminal_record
+        else {"pending"} if guarded and values["phase"] == "detected"
+        else {"pending", "failed"} if guarded and values["phase"] == "skill-restored"
+        else {"passed"} if guarded
+        else {"not-applicable"}
+    )
+    return values["repo-check"] in expected
+
+
+def _header(text: str, name: str) -> str | None:
+    values = [line[len(name) + 2:] for line in text.splitlines() if line.startswith(f"{name}: ")]
+    return values[0] if len(values) == 1 else None
+
+
+def _show(repo: Path, commit: str, path: str) -> str | None:
+    result = _git(repo, "show", f"{commit}:{path}", check=False)
+    return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
+
+
+def _task_relative(repo: Path, task_value: str) -> tuple[str, str]:
+    task = _normalize(repo, task_value)
+    parent, _, name = task.rpartition("/")
+    match = TASK_NAME.match(name)
+    if parent != "workspace/outcomes" or not match:
+        raise CheckError(f"not a plan-review task folder: {task_value}")
+    return task, match.group(1)
+
+
+def recovery_marker(repo: Path, task: str) -> str | None:
+    """Return the sole uncommitted recovery marker; reject ambiguous marker state."""
+    path = repo / task / "status.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CheckError(f"cannot read {path}: {exc}") from exc
+    markers = [line for line in text.splitlines() if line.startswith(RECOVERY_PREFIX)]
+    if len(markers) > 1:
+        raise CheckError(f"{path} contains multiple recovery markers")
+    if not markers:
+        return None
+    marker = markers[0]
+    if not (COMMIT_RECOVERY.fullmatch(marker) or _valid_skill_recovery(marker)):
+        raise CheckError(f"{path} contains a malformed recovery marker")
+    return marker
+
+
+def write_recovery_marker(repo: Path, status_value: str, commit: str, pre_head: str) -> str:
+    status_path = _normalize(repo, status_value)
+    task, _ = _task_relative(repo, status_path.rpartition("/")[0])
+    if status_path != f"{task}/status.md":
+        raise CheckError(f"recovery marker target is not a task status.md: {status_value}")
+    absolute = repo / status_path
+    if not stat.S_ISREG(absolute.lstat().st_mode):
+        raise CheckError(f"{status_path} is not a regular file")
+    data = absolute.read_bytes()
+    if any(line.startswith(RECOVERY_PREFIX.encode()) for line in data.splitlines()):
+        raise CheckError(f"{status_path} already contains a recovery marker")
+    newline = b"\r\n" if b"\r\n" in data else b"\n"
+    if data and not data.endswith(b"\n"):
+        data += newline
+    line = f"{RECOVERY_PREFIX} commit-check-failed commit={commit} pre-head={pre_head}"
+    absolute.write_bytes(data + line.encode("utf-8") + newline)
+    return line
+
+
+def history(repo_value: str, task_value: str) -> dict[str, Any]:
+    """Validate every commit touching a task folder from Git history alone."""
+    repo = Path(repo_value).resolve(strict=True)
+    task, slug = _task_relative(repo, task_value)
+    commits = _out(repo, "log", "--reverse", "--full-history", "--format=%H", "--", task).split()
+    failures: list[str] = []
+    state: str | None = None
+    previous_versions: dict[str, int] = {}
+    previous_step: str | None = None
+    previous_subject_version: int | None = None
+    review_verdict: str | None = None
+    closed_plan = 0
+    feedback_unblocks_plan = False
+
+    if not commits:
+        failures.append("no task commits found")
+    for index, commit in enumerate(commits):
+        short = commit[:12]
+        subject = _out(repo, "log", "-1", "--format=%s", commit)
+        match = SUBJECT.match(subject)
+        if not match:
+            failures.append(f"{short}: subject {subject!r} is not a plan-review step")
+            state = None
+            continue
+        subject_slug, step, version_text = match.groups()
+        version = int(version_text)
+        if subject_slug != slug:
+            failures.append(f"{short}: subject slug {subject_slug} does not match task slug {slug}")
+        if index == 0 and (step != "brief" or version != 1):
+            failures.append(f"{short}: first task commit must be brief v1, got {step} v{version}")
+        if previous_subject_version is None:
+            expected_version = 1
+        elif step in {"plan-start", "plan", "minors"}:
+            latest_plan = previous_versions.get("plan.md", 0)
+            latest_review = previous_versions.get("review.md", 0)
+            ceiling = max(latest_review, closed_plan)
+            expected_version = latest_plan if latest_plan > ceiling else ceiling + 1
+        else:
+            expected_version = previous_subject_version
+        if version != expected_version:
+            failures.append(
+                f"{short}: {step} v{version} must be v{expected_version} after "
+                f"{previous_step or 'the start of history'}"
+            )
+
+        parents = _out(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+        if len(parents) != 1:
+            failures.append(f"{short}: task commits must have exactly one parent, got {len(parents)}")
+            continue
+        changed_output = _git(
+            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", parents[0], commit
+        ).stdout.decode("utf-8", "surrogateescape")
+        changed = set(filter(None, changed_output.split("\0")))
+        allowed = {f"{task}/{name}" for name in STEP_FILES.get(step, {"status.md"})}
+        required = {f"{task}/{name}" for name in STEP_REQUIRED.get(step, {"status.md"})}
+        if changed - allowed:
+            failures.append(f"{short}: {step} changed disallowed paths {sorted(changed - allowed)}")
+        if required - changed:
+            failures.append(f"{short}: {step} did not change required paths {sorted(required - changed)}")
+
+        tree = _git(repo, "ls-tree", "-r", "-z", commit, "--", f"{task}/").stdout.decode(
+            "utf-8", "surrogateescape"
+        )
+        present_files: set[str] = set()
+        for record in filter(None, tree.split("\0")):
+            meta, path = record.split("\t", 1)
+            mode, kind, _blob = meta.split()
+            name = path[len(task) + 1:]
+            if name not in TASK_FILES or "/" in name:
+                failures.append(f"{short}: unexpected task file {path}")
+            elif mode != "100644" or kind != "blob":
+                failures.append(f"{short}: {path} has mode {mode} {kind}, expected 100644 blob")
+            else:
+                present_files.add(name)
+        missing_persistent = {"brief.md", "status.md"} - present_files
+        if missing_persistent:
+            failures.append(
+                f"{short}: persistent task files are missing {sorted(missing_persistent)}"
+            )
+
+        status = _show(repo, commit, f"{task}/status.md")
+        if status is None:
+            failures.append(f"{short}: status.md is missing")
+            state = None
+            continue
+        if any(line.startswith(RECOVERY_PREFIX) for line in status.splitlines()):
+            failures.append(f"{short}: committed status.md contains a recovery marker")
+        new_state = _header(status, "State")
+        if new_state != STEP_STATE[step]:
+            failures.append(f"{short}: {step} must set State {STEP_STATE[step]}, got {new_state}")
+        if state not in STEP_PREVIOUS[step]:
+            failures.append(f"{short}: {step} is not allowed after State {state}")
+        iteration = re.fullmatch(r"([0-9]+) of ([0-9]+)", _header(status, "Iteration") or "")
+        if not iteration or int(iteration.group(1)) != version:
+            failures.append(f"{short}: status.md Iteration does not match v{version}")
+        elif int(iteration.group(1)) > int(iteration.group(2)):
+            failures.append(f"{short}: Iteration exceeds its limit")
+        shown: dict[str, str] = {}
+        for name, steps in (("plan.md", {"plan", "minors"}), ("review.md", {"review"})):
+            if step in steps:
+                text = _show(repo, commit, f"{task}/{name}") or ""
+                shown[name] = text
+                if _header(text, "Version") != str(version):
+                    failures.append(f"{short}: {name} Version does not match v{version}")
+                previous_versions[name] = version
+        if step == "review":
+            review_verdict = _header(shown.get("review.md", ""), "Verdict")
+            feedback_unblocks_plan = False
+            if previous_versions.get("plan.md") != version:
+                failures.append(f"{short}: review v{version} has no committed plan v{version}")
+        if (
+            step == "feedback"
+            and review_verdict == "APPROVE_WITH_MINORS"
+            and closed_plan < previous_versions.get("review.md", 0)
+        ):
+            feedback_unblocks_plan = True
+        if step == "minors":
+            review_version = previous_versions.get("review.md")
+            if (
+                review_version is None
+                or review_verdict != "APPROVE_WITH_MINORS"
+                or review_version != version - 1
+            ):
+                got = "none" if review_version is None else f"v{review_version} {review_verdict}"
+                failures.append(
+                    f"{short}: minors requires the latest committed review at version "
+                    f"{version - 1} with Verdict APPROVE_WITH_MINORS, got {got}"
+                )
+            else:
+                closed_plan = version
+        if (
+            step in {"consensus", "limit-reached", "plan"}
+            and review_verdict == "APPROVE_WITH_MINORS"
+            and closed_plan < previous_versions.get("review.md", 0)
+            and not (step == "plan" and feedback_unblocks_plan)
+        ):
+            failures.append(
+                f"{short}: {step} is rejected after Verdict APPROVE_WITH_MINORS until minors commits"
+            )
+        state = new_state
+        previous_step = step
+        previous_subject_version = version
+
+    return {
+        "ok": not failures,
+        "task": task,
+        "commits": len(commits),
+        "last_commit": commits[-1] if commits else None,
+        "last_state": state,
+        "recovery": recovery_marker(repo, task),
+        "failures": failures,
+    }
+
+
+def _canonical_json(manifest: dict[str, Any]) -> bytes:
+    return (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def write_manifest(manifest: dict[str, Any], output_value: str) -> str:
+    data = _canonical_json(manifest)
+    try:
+        Path(output_value).write_bytes(data)
+    except OSError as exc:
+        raise CheckError(f"cannot write manifest {output_value}: {exc}") from exc
+    return _sha256_bytes(data)
+
+
+def load_manifest(path_value: str, expected_sha256: str) -> dict[str, Any]:
+    try:
+        data = Path(path_value).read_bytes()
+    except OSError as exc:
+        raise CheckError(f"cannot read manifest {path_value}: {exc}") from exc
+    actual = _sha256_bytes(data)
+    if actual != expected_sha256:
+        raise CheckError(f"manifest integrity failure: expected {expected_sha256}, got {actual}")
+    manifest = json.loads(data)
+    if manifest.get("version") != MANIFEST_VERSION:
+        raise CheckError(f"unsupported manifest version: {manifest.get('version')}")
+    return manifest
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    pre_parser = subparsers.add_parser("pre")
+    pre_parser.add_argument("--repo", required=True)
+    pre_parser.add_argument("--output", required=True)
+    pre_parser.add_argument("paths", nargs="+")
+
+    post_parser = subparsers.add_parser("post")
+    post_parser.add_argument("--repo", required=True)
+    post_parser.add_argument("--baseline", required=True)
+    post_parser.add_argument("--baseline-sha256", required=True)
+    post_parser.add_argument("--status-file", required=True)
+
+    history_parser = subparsers.add_parser("history")
+    history_parser.add_argument("--repo", required=True)
+    history_parser.add_argument("--task", required=True)
+    return parser
+
+
+def _post_command(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve(strict=True)
+    pre_head = "unknown"
+    try:
+        manifest = load_manifest(args.baseline, args.baseline_sha256)
+        pre_head = manifest["pre_head"]
+        if manifest["repo"] != str(repo):
+            raise CheckError("manifest repository does not match --repo")
+        if _normalize(repo, args.status_file) not in manifest["files"]:
+            raise CheckError("--status-file is not one of the committed allowed paths")
+        result = post(manifest)
+        code = 0 if result["ok"] else 1
+    except CheckError as exc:
+        print(f"commit_check: {exc}", file=sys.stderr)
+        result, code = None, 2
+    if code != 0:
+        head = _out(repo, "rev-parse", "--verify", "HEAD")
+        commit = "none" if head == pre_head else head
+        try:
+            marker = write_recovery_marker(repo, args.status_file, commit, pre_head)
+            print(f"commit_check: wrote uncommitted marker: {marker}", file=sys.stderr)
+        except (CheckError, OSError) as exc:
+            print(f"commit_check: could not write recovery marker: {exc}", file=sys.stderr)
+            code = 2
+    if result is not None:
+        print(json.dumps(result, indent=2, sort_keys=True))
+    return code
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    try:
+        if args.command == "pre":
+            print(write_manifest(pre(args.repo, args.paths), args.output))
+            return 0
+        if args.command == "post":
+            return _post_command(args)
+        result = history(args.repo, args.task)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["ok"] and result["recovery"] is None else 1
+    except CheckError as exc:
+        print(f"commit_check: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
