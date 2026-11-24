@@ -13,4 +13,4 @@ Trend: none
 Next point ID: P001
 Retired point IDs: none
 Stop reason: none
-Next action: planner subagent writes plan v1
+Next action: planner retry 1 of 1 for plan v1 (prior output failed format: Version header)
