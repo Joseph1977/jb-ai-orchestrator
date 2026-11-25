@@ -2,7 +2,7 @@
 Model: Auto
 Iteration: 7 of 11
 Length caps: plan 150, review 50
-State: reviewed
+State: awaiting-user
 Working branch: feature/opencode-engine-plan
 Branch authorization: approved-current@36408c332c27675db2e730ba9855262f5ccfd108
 Planner mode: subagent
@@ -13,4 +13,4 @@ Trend: v1=2, v2=2, v3=2, v4=1, v5=1, v6=1, v7=0
 Next point ID: P008
 Retired point IDs: P005
 Stop reason: none
-Next action: decide after review v7 (NO_FURTHER_COMMENTS, 7 of 8: consensus)
+Next action: user gives explicit go on plan v7 (consensus at iteration 7 of 8, open points 0/0/0)
