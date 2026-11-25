@@ -93,4 +93,4 @@ Done means a reviewed plan a developer can execute that removes the convergence-
   `workspace/outcomes/task-opencode-engine-replan_20261124-143650Z-fe98/`.
 
 ## User feedback
-None
+- 2026-11-25 09:46 (UTC+2), after plan v4 minors close: the user raised the limit from 4 to 5 so that open pushback P005 (the `Model:` header question) is reviewed. Plan v5 must keep or revise P005 with Evidence; review v5 must assess it under Pushback assessment. No other scope change.
