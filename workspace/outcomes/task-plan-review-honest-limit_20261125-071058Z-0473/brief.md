@@ -94,3 +94,4 @@ Done means a reviewed plan a developer can execute that removes the convergence-
 
 ## User feedback
 - 2026-11-25 09:46 (UTC+2), after plan v4 minors close: the user raised the limit from 4 to 5 so that open pushback P005 (the `Model:` header question) is reviewed. Plan v5 must keep or revise P005 with Evidence; review v5 must assess it under Pushback assessment. No other scope change.
+- 2026-11-25 10:01 (UTC+2), after review v5 (limit 5 of 5, open 0/0/1): the user granted 3 more iterations (limit 5 → 8). The user decided P005 (whether `Model:` headers in task files are attribution): they are NOT attribution. They stay as the model-family audit record. P005 is retired and is closed by user in plan v6's Response to review. Do not reopen or restate it.
