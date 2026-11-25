@@ -1,8 +1,8 @@
 # Review — Plan-review skill: honest rounds and a real iteration limit
-Version: 1
+Version: 2
 Model: gpt-5.6-sol-medium
 Verdict: CHANGES_REQUESTED
 
 ## Points
-1. P001 [major] Step 4 rejects any `<...>` after rendering, but the moved templates retain literal metavariables (`<metadata|frontmatter>`, `<path>`, `<ordinal>`, `<issue>`), so every build fails → use distinct scalar syntax or rewrite/escape literals, and test a successful shipped-template render.
-2. P002 [major] Steps 2–4 still inject `VERSION`/`Version: <VERSION>`, and Risks admits this exposes the version that equals the iteration number, contradicting In-3 and M4 → remove current-version scalars from prompts and specify blind derivation of the required file Version, with a contract test.
+1. P003 [major] Caused by P002: M4 requires brief/plan/review to contain no “limit”, but this feature’s required plan must discuss the iteration limit, making the manual check impossible → check only configured-budget disclosure such as `Iteration: N of L` or the active maximum, while allowing semantic scope text.
+2. P004 [minor] Step 5 defines “consensus after minors close” with nonzero pushed-back minors, so unresolved findings can still be labeled consensus contrary to In-5’s 0/0/0 outcome → require Minors close to reach 0/0/0 or return unresolved pushbacks to review/limit gating under a non-consensus state.
