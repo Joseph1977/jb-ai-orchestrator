@@ -1,6 +1,11 @@
 # Plan — OpenCodeExecutionEngine implementation plan
-Version: 1
+Version: 2
 Model: claude-opus-5-5-medium
+
+## Response to review
+| Point | Decision | Response |
+|---|---|---|
+| P001 | accepted | D10 adds pre-claim `subagents` (`SUBAGENT_ENABLED`, default true) and `context_compaction` (`CONTEXT_COMPACTION_ENABLED`, default true) gates; D12 lists `task` only when flag-off; flagless `ask_user` dropped, logged, documented; D18 logs flags; In-4 tests. |
 
 ## Plan
 
@@ -31,11 +36,13 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   - AG-UI fresh: frontend-tool gate before binding resolution (1569); binding-dependent gates right after `except BindingError` (1597), before `sanitize_execution_config` (1601) and `_create_agui_execution` (1621, which inserts a RUNNING `Execution`, 569).
   - Legacy `executeRequest`: before `_create_execution_record()` (158), so rejection leaves no `Execution` row (new; baseline omitted this placement).
   - Earlier `ensure_thread_session` (1449), `_prepare_thread_claims` (1474) and the input-branch `ensure_runtime` (1582) run before gates as they do for binding errors; they create no `Execution`/`ExecutionRun` and the thread stays runnable.
-  - Gates: non-empty `frontendTools`; `workspace_free` when AG-UI `input_binding is None` and always on legacy `executeRequest`; `HOOKS_ENABLED` with non-empty `load_hooks_for_workspace` (`hooks/loader.py` 256) when the path is known; then D22 tool resolution, last.
+  - Gates: non-empty `frontendTools`; `subagents` when `Config.SUBAGENT_ENABLED` (`config.py` 278, default true; exposes `task`, `local_tool_provider.py` 1061); `context_compaction` when `Config.CONTEXT_COMPACTION_ENABLED` (272, default true; drives offload and compaction, `context_compaction.py` 161/185/424); `workspace_free` when AG-UI `input_binding is None` and always on legacy `executeRequest`; `HOOKS_ENABLED` with non-empty `load_hooks_for_workspace` (`hooks/loader.py` 256, covers `preCompact`) when the path is known; then D22 tool resolution, last.
+  - Both flags are process-global with no per-request field (controllers never read them), so an OpenCode deployment must set them `false` to run; the error names the capability and the flag. No new setting or default (C-4); internal unaffected (C-6).
+  - `ask_user` is always listed headless with no flag and requires a durable await (D8): OpenCode omits it, logged `opencode_tool_unmapped` and documented in `readme.md` Tool selection; gating it would reject every run with no operator remedy.
   - In-segment re-checks fail as an attempt (§12): `local_context is None` (e.g. `workspacePath` ignored when `ALLOW_INPLACE_WORKSPACE=false`, 387), hooks found after `ensure_input_workspace`.
 - D11 (C-2) One loopback sidecar per orchestrator process, no workspace mount; each session rooted in an empty per-run scratch dir; orchestrator-composed system prompt sent as session system prompt (A4).
 - D12 (C-2) `engines/opencode/bridge.py`: internal MCP route mounted in `main.py` (99–102) only when engine=opencode.
-  - Exposes registry local tools + `resolved_tools.mapped`, minus `task_local`, `ask_user_local`, AG-UI tools.
+  - Exposes `list_litellm_tools(exclude_base={"task","ask_user"}, mode, output_bound)` + `resolved_tools.mapped`, no AG-UI tools; `task` is reachable only with `SUBAGENT_ENABLED=false` (D10), so the exclusion is belt-and-braces, never a silent drop.
   - Per-run 256-bit in-memory bearer bound to `(run_pk, LocalToolContext, registry, budget, user MCP token)`; bad token → 401.
   - Local calls via `LocalToolProvider.execute` (1083): tool policy, `resolve_within`, path policy, workspace opener. The user MCP token never reaches the sidecar; OpenCode built-ins disabled (A2).
 - D13 (C-4) `maxToolCalls`: request → segment config → `MAX_TOOL_CALLS`, counted in the bridge. `OPENCODE_REQUEST_TIMEOUT_SEC` is an infrastructure guard per sidecar request; the segment deadline (D24) still caps the whole run. `OPENCODE_MODEL`/`OPENCODE_PROVIDER` inert unless engine=opencode.
@@ -48,7 +55,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 - D15 (C-1) Crash orphans: stale-claim recovery (`mark_stale_runs_failed` in `try_create_active_run`, 368) unchanged; token and scope die with the process; startup `sweep.py` aborts and deletes tagged sidecar sessions (A1).
 - D16 (Q5, C-3) Every in-segment failure runs D14 then returns `success: False`; controllers apply the §12 table unchanged; raw sidecar bodies never returned. Codes: `UNAVAILABLE` (down, health/version fail); `TIMEOUT` (request timeout, segment deadline); `ENGINE_PROTOCOL_ERROR` (malformed event, partial stream); `QUOTA`/`RATE_LIMIT`/`AUTH`/`UNAVAILABLE` for provider errors (A10); `RUN_LIFECYCLE_FAILED` on lost ownership (D20). `ENGINE_TOOL_UNSUPPORTED` only pre-claim (D22).
 - D17 (In-3) Sidecar stream supplies text, usage, completion; the bridge supplies authoritative `TOOL_CALL_*` events, `tool_calls_info` and counters. `event_sink` publishes via `agui_event_service` and sets `text_streamed`.
-- D18 (In-5) `config.py`: `ORCHESTRATOR_ENGINE` (default `internal`), `OPENCODE_BASE_URL`, `OPENCODE_REQUEST_TIMEOUT_SEC=300`, `OPENCODE_MODEL`, `OPENCODE_PROVIDER=litellm|native`, infra `OPENCODE_TOOL_BRIDGE_URL` (default `http://127.0.0.1:8000`). `validate_config` (384) checks the engine value; only when opencode: base URL without userinfo/query, positive timeout, valid provider, non-empty `OPENCODE_MODEL` for native.
+- D18 (In-5) `config.py`: `ORCHESTRATOR_ENGINE` (default `internal`), `OPENCODE_BASE_URL`, `OPENCODE_REQUEST_TIMEOUT_SEC=300`, `OPENCODE_MODEL`, `OPENCODE_PROVIDER=litellm|native`, infra `OPENCODE_TOOL_BRIDGE_URL` (default `http://127.0.0.1:8000`). `validate_config` (384) checks the engine value; only when opencode: base URL without userinfo/query, positive timeout, valid provider, non-empty `OPENCODE_MODEL` for native. When opencode and `SUBAGENT_ENABLED` or `CONTEXT_COMPACTION_ENABLED` is true, log `opencode_capability_flag_enabled` naming the flag (boot continues; D10 rejects runs).
 - D19 OpenCode does not depend on `ModelClient` (Out-1); no discovery adapter needed (Out-2) because discovery stays orchestrator-side.
 - D20 (C-1) New `RunLifecycleService.is_run_live(session, run_pk)`: the `heartbeat_run` predicate (408) narrowed from `_ACTIVE_RUN_STATUSES` (32) to `status == active`. Bridge checks before each call; not live → deny, mark scope `ownership_lost`, run D14, return `RUN_LIFECYCLE_FAILED`. Residual: a call already running at reclaim completes, as on internal (§12).
 - D21 (C-2) Primary: per-session MCP config with per-session credential (A3). Fallback if A3 fails: process `asyncio.Lock`, one session per sidecar, secret set at sidecar start routes calls only to the lock holder; released after D14 step 5; wait time counts against D24 (`TIMEOUT`).
@@ -77,7 +84,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 3. Spike (A1–A12). Entry: Slice 2 merged. Exit: pinned version; `tests/fixtures/opencode/<version>/` for litellm and native; findings in `docs/PLUGGABLE_EXECUTION_ENGINES.md`; no runtime code.
 4. Config and gating (D9, D10, D18, D23 validation). Entry: no stopping failure in Slice 3. Exit: engine=opencode boots; every run rejected `ENGINE_CAPABILITY_UNSUPPORTED` (`headless_segment` still off).
 5. Bridge, pre-claim tool gate, deadline (D12, D13, D20–D22, D24). Entry: Slice 4 merged. Exit: security, fence, scope, isolation, tool-gate, cumulative-deadline tests pass with a fake engine reporting `headless_segment`; bridge route absent under internal.
-6. Engine (D11, D14–D17, D23). Entry: Slice 5 merged. Exit: fixture-replay and failure tests pass; `headless_segment` on; a headless execute completes.
+6. Engine (D11, D14–D17, D23). Entry: Slice 5 merged. Exit: fixture-replay and failure tests pass; `headless_segment` on; a headless execute completes with `SUBAGENT_ENABLED=false`, `CONTEXT_COMPACTION_ENABLED=false`.
 - Follow-ups only (Out-3): Phase 5 parity per capability, Phase 6 rollout. Out-1/Out-2 ship independently.
 
 ### Test matrix (Q6; no DB, no network)
@@ -95,11 +102,12 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   - `test_opencode_startup_sweep.py`.
 - In-4 `test_engine_capabilities.py`:
   - Every D10 gate (orchestrator, each AG-UI fresh rejection, legacy `executeRequest`) leaves no `Execution` and no `ExecutionRun` row (`create_execution`, `_create_execution_record`, `try_create_active_run` never called); orchestrator `Execution` status unchanged; internal never gated.
+  - `subagents` and `context_compaction`: with each flag true (others satisfied) every OpenCode entry (orchestrator, AG-UI fresh, legacy) returns `ENGINE_CAPABILITY_UNSUPPORTED` naming capability and flag, no rows; both false → pass; internal with both true never gated; bridge listing never contains `task`/`ask_user`.
   - AG-UI `input` (shared_folder) and in-place `workspacePath` pass gates; ignored `workspacePath` fails in-segment with the thread open.
   - D22: requested missing/unmapped → `ENGINE_TOOL_UNSUPPORTED`, no rows, no sidecar contact; unrequested unmapped dropped and logged; engine receives exactly the resolved set; `fetch_mcp_tools` once per request with the request token.
   - D24 (small `RUN_SEGMENT_DEADLINE_SEC`, fake clock): resolution outlasting the deadline → pre-claim `TIMEOUT`, no rows; resolution at 60% then a blocking fake engine → `TIMEOUT` at 100% total, not 160%.
   - Extend `test_bounded_run_lifecycle.py`: `manage_run(deadline_sec=x)` fires at x; omitted keeps `segment_deadline_sec`.
-- In-5 `test_engine_config.py` (D18, incl. native without `OPENCODE_MODEL`; internal valid with no OpenCode vars); extend `test_public_surface_config.py` (default `internal`, keys in both `.env.example`) and `test_log_url_redaction.py` (`OPENCODE_BASE_URL`).
+- In-5 `test_engine_config.py` (D18, incl. native without `OPENCODE_MODEL`; internal valid with no OpenCode vars; flag-enabled startup log under opencode only); extend `test_public_surface_config.py` (default `internal`, keys in both `.env.example`) and `test_log_url_redaction.py` (`OPENCODE_BASE_URL`).
 - In-6: docs and `changes/` entries reviewed in each slice PR.
 
 ### Files
@@ -109,7 +117,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   - Services/persistence: `session_close_service.py` (`manage_run` `deadline_sec`); `models/execution_models.py`; `execution_state_service.py` (`create_state`); `run_lifecycle.py` (`try_create_active_run` engine params, `is_run_live`).
   - Wiring: `src/app/main.py` (bridge mount, sweep in `lifespan`); `config.py`; `src/.env/{localhost,docker}/.env.example`.
 - Docs:
-  - `readme.md`: Configuration "Execution engine"; Lifecycle note that under opencode `RUN_SEGMENT_DEADLINE_SEC` also covers pre-claim tool resolution; Error codes `ENGINE_MISMATCH`, `ENGINE_CAPABILITY_UNSUPPORTED`, `ENGINE_PROTOCOL_ERROR`, `ENGINE_TOOL_UNSUPPORTED`; Tool selection; Running many instances (one sidecar per process, D21 capacity).
+  - `readme.md`: Configuration "Execution engine" (opencode requires `SUBAGENT_ENABLED=false`, `CONTEXT_COMPACTION_ENABLED=false`; `ask_user` unavailable); Lifecycle note that under opencode `RUN_SEGMENT_DEADLINE_SEC` also covers pre-claim tool resolution; Error codes `ENGINE_MISMATCH`, `ENGINE_CAPABILITY_UNSUPPORTED`, `ENGINE_PROTOCOL_ERROR`, `ENGINE_TOOL_UNSUPPORTED`; Tool selection; Running many instances (one sidecar per process, D21 capacity).
   - `docs/ORCHESTRATOR.md` §5, §10, §11, §12 (stop sequence, fence, pre-claim gates, single deadline, migration head `20261124_engine_identity`), §13, §15; status in `docs/PLUGGABLE_EXECUTION_ENGINES.md`.
   - `changes/README.md`: add an "Engine Phase" row to the series table (required by its "Naming phases" rule); one `changes/YYYY-MM-DD-<slug>.md` per slice.
 
