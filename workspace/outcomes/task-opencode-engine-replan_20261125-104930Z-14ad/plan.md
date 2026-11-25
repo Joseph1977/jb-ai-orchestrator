@@ -1,11 +1,11 @@
 # Plan — OpenCodeExecutionEngine implementation plan
-Version: 6
+Version: 7
 Model: claude-opus-5-5-medium
 
 ## Response to review
 | Point | Decision | Response |
 |---|---|---|
-| P011 | accepted | D20: `heartbeat_run` (408) unchanged, still active+closing; fence is a separate read-only `is_run_live`. Closing denies calls as "run stopping", not lost ownership. Close regression test: heartbeat continues, stale recovery skips it. |
+| P012 | accepted | D25: exact match to code-pinned `OPENCODE_PINNED_VERSION`, checked first each segment and in the sweep; mismatch/missing/malformed → `UNAVAILABLE` before scope, session or prompt. Tests: match, mismatch, missing, malformed, timeout, upgrade between segments, sweep. |
 
 ## Plan
 
@@ -57,7 +57,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   4. Poll the sidecar until idle (A6).  5. Revoke the token, then return or re-raise.
   - The worker lives until step 5, so heartbeat stays fresh and `worker_cancellation_slow` fires; nothing released on elapsed time. Only loopback connection-refused counts as "sidecar stopped" (A7); D18 guarantees the URL is loopback.
 - D15 (C-1) Crash orphans: stale-claim recovery (`mark_stale_runs_failed` in `try_create_active_run`, 368) unchanged; token and scope die with the process; startup `sweep.py` aborts and deletes tagged sidecar sessions on the process's own loopback sidecar (A1).
-- D16 (Q5, C-3) Every in-segment failure runs D14 then returns `success: False`; controllers apply the §12 table unchanged; raw sidecar bodies never returned. Codes: `UNAVAILABLE` (down, health/version fail); `TIMEOUT` (request timeout, segment deadline); `ENGINE_PROTOCOL_ERROR` (malformed event, partial stream); `QUOTA`/`RATE_LIMIT`/`AUTH`/`UNAVAILABLE` for provider errors (A10); `RUN_LIFECYCLE_FAILED` on lost ownership (D20). `ENGINE_TOOL_UNSUPPORTED` only pre-claim (D22).
+- D16 (Q5, C-3) Every in-segment failure runs D14 then returns `success: False`; controllers apply the §12 table unchanged; raw sidecar bodies never returned. Codes: `UNAVAILABLE` (down, health fail, version mismatch per D25); `TIMEOUT` (request timeout, segment deadline); `ENGINE_PROTOCOL_ERROR` (malformed event, partial stream); `QUOTA`/`RATE_LIMIT`/`AUTH`/`UNAVAILABLE` for provider errors (A10); `RUN_LIFECYCLE_FAILED` on lost ownership (D20). `ENGINE_TOOL_UNSUPPORTED` only pre-claim (D22).
 - D17 (In-3) Sidecar stream supplies text, usage, completion; the bridge supplies authoritative `TOOL_CALL_*` events, `tool_calls_info` and counters. `event_sink` publishes via `agui_event_service` and sets `text_streamed`.
 - D18 (In-5) `config.py`: `ORCHESTRATOR_ENGINE` (default `internal`), `OPENCODE_BASE_URL`, `OPENCODE_REQUEST_TIMEOUT_SEC=300`, `OPENCODE_MODEL`, `OPENCODE_PROVIDER=litellm|native`, infra `OPENCODE_TOOL_BRIDGE_URL` (default `http://127.0.0.1:8000`). `validate_config` (384) checks the engine value; only when opencode:
   - `_require_loopback_url(name, value)` for both URLs: scheme `http`, no userinfo/query/fragment, `urlparse().hostname` equal to `localhost` or `ipaddress.ip_address(host).is_loopback`; else `ValueError` naming the variable. Rejected: other hostnames (`localhost.example.com`, `host.docker.internal`), `0.0.0.0`, `::`, IPv4-mapped IPv6, private/public IPs.
@@ -74,9 +74,13 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 - D24 (C-1, C-4) `engines/deadline.py` `SegmentDeadline(at=loop.time() + RUN_SEGMENT_DEADLINE_SEC)`, `remaining()`. Created on OpenCode fresh paths before the first gate: orchestrator `execute` entry (697); AG-UI fresh before 1569 (§12: deadline covers preparation).
   - `manage_run(..., deadline_sec: float | None = None)`: when set, the watchdog sleeps that instead of `segment_deadline_sec` (186); `_managed_hub_process`/`_stream_run` pass it through; their existing test callers omit it.
   - Controller passes `deadline.remaining()` right before `manage_run`. `<= 0` before claim → `TIMEOUT`, no rows; after claim → `TIMEOUT` attempt (§12). Internal never passes `deadline_sec` (C-6); no new setting (C-4).
+- D25 (C-1, C-3) `engines/opencode/client.py` `OPENCODE_PINNED_VERSION` (code constant set in Slice 3, not a setting, C-4) and `check_version()` on the A1 health/version endpoint, bounded by `min(OPENCODE_REQUEST_TIMEOUT_SEC, deadline.remaining())`; exact string equality.
+  - `run_segment` order: `check_version` → mint D12 scope/token → session create → prompt. Checked every segment, so a sidecar upgraded under a running process is caught at the next segment.
+  - Mismatch, missing or unparseable version → `success: False`, `UNAVAILABLE`, error names pinned and observed version only (no raw body, D16); health timeout → `TIMEOUT`. No scope, token, session or prompt exists, so D14 has nothing to abort; recorded as a §12 attempt; log `opencode_version_mismatch{expected, observed}`.
+  - `sweep.py` runs `check_version` first; on failure logs and issues no list/abort/delete. Boot never blocks on the sidecar (operator-launched, D11).
 
 ### Unverified OpenCode assumptions (gated by Slice 3 spike, pinned version, fixtures)
-- A1 HTTP API: health/version, session create (directory, system prompt, model/provider, tag), prompt, events, abort, status, list, delete; the scratch directory path is visible to the sidecar. A2 Built-in tools can be disabled per session via the API.
+- A1 HTTP API: health exposing a version string (D25), session create (directory, system prompt, model/provider, tag), prompt, events, abort, status, list, delete; the scratch directory path is visible to the sidecar. A2 Built-in tools can be disabled per session via the API.
 - A3 Per-session remote MCP config with per-session header/URL credential, set via the API, proven by a two-concurrent-session fixture. A4 Replaceable system prompt. A5 Text, usage, completion, error event shapes.
 - A6 Abort plus observable idle state. A7 No automatic resume after restart. A8 Subagents and compaction can be disabled. A9a LiteLLM OpenAI-compatible provider config. A9b Native provider-qualified id. A10 Provider error classification. A11 Non-interactive permissions. A12 MCP names and `inputSchema` subset accepted end to end.
 - Outcomes: A1, A2, A3, A6 or A11 failure (incl. "settable only at sidecar startup") stops Slices 5–6. A9b failure → `native` rejected at config validation, documented. A4, A7, A8, A10, A12 failures documented and capability claims narrowed.
@@ -84,10 +88,10 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 ### Delivery slices (each branched from `origin/on-going-dev`, PR into `on-going-dev`, no attribution, C-8; `internal` safe fallback after each)
 1. Characterization (C-7). Entry: none. Exit: new tests green on unchanged code; no `src/` change.
 2. Contract, internal extraction, identity (D1–D7). Entry: Slice 1 merged. Exit: suite green; new rows in all three tables internal/1; mismatch tests pass; migration note written.
-3. Spike (A1–A12). Entry: Slice 2 merged. Exit: pinned version; `tests/fixtures/opencode/<version>/` for litellm and native; findings in `docs/PLUGGABLE_EXECUTION_ENGINES.md`; no runtime code.
+3. Spike (A1–A12). Entry: Slice 2 merged. Exit: pinned version and recorded health response; `tests/fixtures/opencode/<version>/` for litellm and native; findings in `docs/PLUGGABLE_EXECUTION_ENGINES.md`; no runtime code.
 4. Config and gating (D9, D10, D18, D23 validation). Entry: no stopping failure in Slice 3. Exit: engine=opencode boots only with loopback URLs; every run rejected `ENGINE_CAPABILITY_UNSUPPORTED` (`headless_segment` still off).
 5. Bridge, pre-claim tool gate, deadline (D12, D13, D20–D22, D24). Entry: Slice 4 merged. Exit: security, ContextVar isolation, fence, close-regression, scope, enablement, media, hooks-off, `ask_user` absence, tool-gate, cumulative-deadline tests pass with a fake engine reporting `headless_segment`; bridge route absent under internal.
-6. Engine (D11, D14–D17, D23). Entry: Slice 5 merged. Exit: fixture-replay and failure tests pass; `headless_segment` on; a headless execute completes with the four D10 flags false.
+6. Engine (D11, D14–D17, D23, D25). Entry: Slice 5 merged. Exit: fixture-replay, version-check and failure tests pass; `headless_segment` on; a headless execute completes with the four D10 flags false.
 - Follow-ups only (Out-3): Phase 5 parity per capability (hooks via bridge, durable `ask_user`, multimodal), Phase 6 rollout incl. sidecar packaging. Out-1/Out-2 ship independently.
 
 ### Test matrix (Q6; no DB, no network)
@@ -97,13 +101,14 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   - `test_engine_identity_persistence.py`: columns, defaults, revision chain on three tables; legacy completed/failed → `Execution` internal/1 with no `llm_states`/`ExecutionRun`; AG-UI and orchestrator stamping incl. per-segment update; backfilled rows read internal/1.
   - `test_engine_architecture.py` (engine imports behind adapters). Unchanged and green: `test_claim_lifecycle`, `test_stale_claim_recovery`, `test_bounded_run_lifecycle`, `test_agui_cancellation`, `test_resume_idempotency`, `test_orchestrator_claim_lifecycle`, `test_agui_await_resume`, `test_llm_error_contract`, `test_workspace_containment`, `test_output_bindings_phase2`.
 - In-3 `test_opencode_engine.py`: fixture replay over httpx `MockTransport`, both provider modes (completion, AG-UI text, tool events, usage); engine never calls `fetch_mcp_tools`.
+  - `test_opencode_version_check.py` (D25): recorded health with pinned version → health request precedes session create; mismatched, missing field, non-JSON body → `UNAVAILABLE`, health timeout → `TIMEOUT`; in each the transport log holds only the health request (no session create, prompt or abort), no scope or token registered, `ExecutionRun` failed, execution/thread state per §12; version changed between two segments → second refused; error and log carry no raw body.
   - `test_opencode_model_route.py`: litellm precedence; native qualified id; native credentials absent from orchestrator requests.
   - `test_opencode_tool_bridge.py`: cross-run and revoked tokens → 401; policy (workflow write blocked, traversal and symlinks refused, budget); leakage (user MCP token never sent to the sidecar, `task`/AG-UI tools absent, only `mapped` exposed); fence (fake stale-reclaim → next call denied, nothing executes, `RUN_LIFECYCLE_FAILED`).
   - Same file, close regression: `mark_active_runs_closing_for_execution` (516) mid-run → `is_run_live` returns `closing`, next call denied "run stopping" with no `RUN_LIFECYCLE_FAILED`; `heartbeat_run` still returns true and advances `heartbeat_at` while a held handler runs; `mark_stale_runs_failed` leaves the run; claim released only after D14 step 5.
   - Same file, ContextVars: two runs with distinct user tokens and user-auth catalogs call MCP concurrently (interleaved via events) → spy on `mcp_auth_headers` sees each run's own token, `find_tool_by_name` resolves only its own catalog; both ContextVars `None` after each call, incl. when the call raises; a mapped name absent from the scope is refused.
   - Same file, `ask_user`: listing never contains `ask_user_local` or `task_local` under any flag combination; a forged `ask_user_local` call returns "not available", no `llm_states` row, run continues.
   - Same file: `LOCAL_TOOLS_ENABLED=false` → no local tools, conflict filter off, forged local call refused; media marker without `absolutePath`, equal to internal's with `MULTIMODAL_ENABLED=false`; hook mutation (`HOOKS_ENABLED=false`, bridged write of a denying `.cursor/hooks.json`, then `execute_local`/`read_file_local` → no `_run_one` spawn).
-  - `test_opencode_failures.py`: sidecar down, timeout, malformed event, partial stream, deadline, close; cancel during each tool class (MCP cancelled then awaited; `execute_local` completes, no orphan; writes awaited). Claim finalized only after handlers return and idle confirmed; hung handler keeps heartbeat fresh; late calls refused; post-failure states match §12. `test_opencode_startup_sweep.py`.
+  - `test_opencode_failures.py`: sidecar down, timeout, malformed event, partial stream, deadline, close; cancel during each tool class (MCP cancelled then awaited; `execute_local` completes, no orphan; writes awaited). Claim finalized only after handlers return and idle confirmed; hung handler keeps heartbeat fresh; late calls refused; post-failure states match §12. `test_opencode_startup_sweep.py`: tagged sessions aborted and deleted on matching version; mismatch → no list/abort/delete, boot continues.
 - In-4 `test_engine_capabilities.py`: every D10 gate (orchestrator, each AG-UI fresh rejection, legacy) leaves no `Execution`/`ExecutionRun` (`create_execution`, `_create_execution_record`, `try_create_active_run` never called); orchestrator `Execution` status unchanged; internal never gated.
   - Each of the four flags true (others satisfied) → every OpenCode entry returns `ENGINE_CAPABILITY_UNSUPPORTED` naming capability and flag, no rows; `HOOKS_ENABLED=true` with no hook files still rejected; all false → pass; `MULTIMODAL_ENABLED=true` with `LOCAL_TOOLS_ENABLED=false` → not gated; internal with all true never gated.
   - AG-UI `input` (shared_folder) and in-place `workspacePath` pass gates; ignored `workspacePath` fails in-segment with the thread open.
@@ -129,12 +134,12 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 - D20 adds one DB read per tool call. A long local tool delays stop to its own bound; `worker_cancellation_slow` makes it visible.
 - `executions.engine` reflects only the latest orchestrator segment; audit, not resume authority. Server defaults keep the revision online-safe.
 - D22 spends D24 budget pre-claim (OpenCode only); MCP drift between gate and run surfaces as the bridge's call-time error. Bridge shares the app port: gateways must not expose `/internal/*`; the per-run bearer is the control.
-- Input-branch `ensure_runtime` (1582) creates the thread runtime dir before a rejection; idempotent, no lifecycle row. Version drift: pinned version checked on health; fixtures re-recorded on upgrade.
+- Input-branch `ensure_runtime` (1582) creates the thread runtime dir before a rejection; idempotent, no lifecycle row. Version drift: D25 refuses any unpinned sidecar per segment (one extra loopback request); upgrading means bumping the constant and re-recording fixtures in one PR.
 
 ### Validation
 - Per slice: `python -m pytest` with no DB or network; new tests fail before the change where applicable.
 - Slice 2: `alembic upgrade head` and `downgrade -1` on disposable Postgres with pre-existing rows in all three tables; `scripts/smoke_service.py` and `scripts/smoke_agui.py` under internal.
 - Slice 4: loopback acceptance/rejection matrix; boot under internal with OpenCode vars unset.
 - Slice 5: ContextVar concurrency, `ask_user` absence, bridge enablement, media, hooks-off and cumulative-deadline and close-regression tests; unchanged `test_bounded_run_lifecycle`, `test_claim_lifecycle`, `test_stale_claim_recovery` pass.
-- Slice 6: manual headless execute against the pinned loopback sidecar, both provider modes.
+- Slice 6: `test_opencode_version_check.py` green; manual headless execute against the pinned loopback sidecar, both provider modes, and a refused run against a different sidecar version.
 - After every slice the characterization suite confirms `ORCHESTRATOR_ENGINE=internal` behaves exactly as before.
