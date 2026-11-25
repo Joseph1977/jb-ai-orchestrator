@@ -78,8 +78,8 @@ class BuilderTests(unittest.TestCase):
 
     def test_templates_state_line_length_and_review_title(self) -> None:
         expected = {
-            "planner": ("one ≤300-character row per\npoint",),
-            "reviewer": ("# Review — <plan title>", "One ≤300-character line\nper point"),
+            "planner": ("one ≤600-character row per\npoint",),
+            "reviewer": ("# Review — <plan title>", "One ≤600-character line\nper point"),
         }
         for mode, literals in expected.items():
             result = self.run_builder(*self.args(mode))

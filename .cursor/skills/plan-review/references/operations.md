@@ -176,6 +176,6 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   maintained blocker/major. `NO_FURTHER_COMMENTS` has no points or maintained pushback.
 - A Response reason or `## Plan` containing `defer`, `next round`, `next version`, `follow-up`, `TBD`
   or `TODO`, or a `## Plan` that points to an earlier version instead of restating it, fails format.
-- Enforce caps (default plan 150/review 50), one ≤300-character line per point/response reason.
+- Enforce caps (default plan 150/review 50), one ≤600-character line per point/response reason.
 
 Subagent format failure gets one `recovery.md` retry, then stops. Correct self-planner before commit.

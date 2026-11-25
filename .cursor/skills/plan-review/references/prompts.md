@@ -17,7 +17,7 @@ candidate path, inspect ancestor AGENTS.md and `.cursor/rules/**/*.mdc` frontmat
 policy/standards in full. If any ceiling would be exceeded, stop the round before reading that body;
 never partially review, truncate, summarize, or omit required policy.
 
-Write ONLY plan.md: title, `Version:` = 1 + the larger `Version:` header of plan.md and review.md (1 when neither exists), Model; when a prior review.md exists, `## Response to review` with exactly one ≤300-character row per
+Write ONLY plan.md: title, `Version:` = 1 + the larger `Version:` header of plan.md and review.md (1 when neither exists), Model; when a prior review.md exists, `## Response to review` with exactly one ≤600-character row per
 point and decision accepted/partly accepted/pushed back/closed by user; `## Plan` with what/where/why,
 steps, files, risks, validation.
 
@@ -73,7 +73,7 @@ Retain IDs for maintained/reframed points; allocate monotonically from the suppl
 renumber, or use retired IDs. Settle pushback from cited evidence; maintain only with counterevidence
 and keep that ID in Points. Do not repeat soundly rebutted points or invent issues.
 
-Minor means no effect on safety, feasibility, scope, cost, or validation. Judge correctness, feasibility, scope, cost, risk, validation, and standards. One ≤300-character line
+Minor means no effect on safety, feasibility, scope, cost, or validation. Judge correctness, feasibility, scope, cost, risk, validation, and standards. One ≤600-character line
 per point; no praise/restatement. NO_FURTHER_COMMENTS requires no points/maintains;
 APPROVE_WITH_MINORS requires only minors and no blocker/major maintain; otherwise CHANGES_REQUESTED.
 Return only the Verdict line and no other text.
