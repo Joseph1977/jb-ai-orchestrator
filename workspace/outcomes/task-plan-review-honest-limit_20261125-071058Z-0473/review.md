@@ -1,8 +1,8 @@
 # Review — Plan-review skill: honest rounds and a real iteration limit
-Version: 2
+Version: 3
 Model: gpt-5.6-sol-medium
-Verdict: CHANGES_REQUESTED
+Verdict: APPROVE_WITH_MINORS
 
 ## Points
-1. P003 [major] Caused by P002: M4 requires brief/plan/review to contain no “limit”, but this feature’s required plan must discuss the iteration limit, making the manual check impossible → check only configured-budget disclosure such as `Iteration: N of L` or the active maximum, while allowing semantic scope text.
-2. P004 [minor] Step 5 defines “consensus after minors close” with nonzero pushed-back minors, so unresolved findings can still be labeled consensus contrary to In-5’s 0/0/0 outcome → require Minors close to reach 0/0/0 or return unresolved pushbacks to review/limit gating under a non-consensus state.
+1. P005 [minor] Steps 1–4 preserve `Model` headers and a `MODEL` prompt scalar despite brief C-3 and CONTRIBUTING.md §House style prohibiting model/vendor attribution anywhere → remove model identity from task-file schemas, templates, builder scalars, format checks, and related tests.
+2. P006 [minor] In-7 tests cover a repeated `plan-start` after `planner-running` but not the required symmetric repeated `review-start` after `reviewer-running` → add a history/pre contract test proving an exact-subject `review-start vN` retry with incremented attempt passes.
