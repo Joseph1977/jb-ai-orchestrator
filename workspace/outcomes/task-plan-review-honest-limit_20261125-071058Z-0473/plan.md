@@ -1,12 +1,12 @@
 # Plan — Plan-review skill: honest rounds and a real iteration limit
-Version: 4
+Version: 5
 Model: claude-opus-5-5-medium
 
 ## Response to review
 
 | Point | Decision | Reason |
 |---|---|---|
-| P005 | pushed back | Model headers are task records the model-family checks need, not attribution in code, docs, commits or PR text; removing them is Out-3. Evidence: .cursor/skills/plan-review/references/operations.md \| CONTRIBUTING.md § House style \| brief Out-3 |
+| P005 | pushed back | `Model:` headers are run-audit data the family checks require (Out-3) and the brief itself carries; Plan now keeps model names out of code, docs, commits, branch, PR and changes/. Evidence: .cursor/skills/plan-review/SKILL.md#Model checks \| AGENTS.md § Attribution \| brief Out-3 |
 | P006 | accepted | Added `test_review_start_retry_after_reviewer_running_passes` (Tests In-7): an exact-subject `review-start vN` repeated after `reviewer-running` with `attempt 2` passes `pre` and `history`. |
 
 ## Plan
@@ -91,7 +91,8 @@ Model: claude-opus-5-5-medium
 
 ### Execution and C-1/C-3
 - Implement only after this run is `approved` and its session has ended; no plan-review run may be running in the implementing chat, so the digest change trips no checkpoint.
-- Branch `fix/plan-review-honest-limit` from `origin/on-going-dev`; if its `.cursor/skills/plan-review/` differs from this branch, stop and ask; PR targets `on-going-dev` only; no attribution anywhere.
+- Branch `fix/plan-review-honest-limit` from `origin/on-going-dev`; if its `.cursor/skills/plan-review/` differs from this branch, stop and ask; PR targets `on-going-dev` only.
+- C-3: no model, vendor or tool name in skill code, comments, docs, `changes/` entry, commit subjects/bodies/trailers, branch name or PR text; `Model:` headers stay only in task files as audit data (P005, Out-3).
 - Order: Step 1 → 4 → 2/3 → 6 → 5/7/8 → tests → 9; then the unit suite from `SKILL.md` §Validation, then a fresh `/plan-review` for M1–M9.
 
 ### C-2 answer
@@ -141,3 +142,4 @@ Model: claude-opus-5-5-medium
 
 ## Validation
 - Unit suite green; byte budgets reported under caps; M1–M9 recorded in the PR description; `history` on both old folders matches the C-2 answer.
+- Before pushing, search the diff, `changes/` entry, commit messages and PR text for model/vendor/tool names; none allowed (C-3).
