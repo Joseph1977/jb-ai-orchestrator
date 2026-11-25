@@ -2,7 +2,7 @@
 Model: Auto
 Iteration: 9 of 10
 Length caps: plan 150, review 50
-State: planner-running
+State: reviewing
 Outcome: none
 Working branch: feature/opencode-engine-plan
 Branch authorization: approved-current@4eb8f1ed3ee873fece107ef8deff7810efb2e4db
@@ -14,4 +14,4 @@ Trend: v1=1, v2=3, v3=2, v4=4, v5=1, v6=1, v7=3, v8=2
 Next point ID: P017
 Retired point IDs: none
 Stop reason: none
-Next action: planner writes plan v9 — attempt 1
+Next action: reviewer writes review v9 — attempt 1
