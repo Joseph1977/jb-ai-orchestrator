@@ -76,6 +76,18 @@ class BuilderTests(unittest.TestCase):
             self.assertIn("def metadata(path):", text)
             self.assertIn(str(self.task), text)
 
+    def test_templates_state_line_length_and_review_title(self) -> None:
+        expected = {
+            "planner": ("one ≤300-character row per\npoint",),
+            "reviewer": ("# Review — <plan title>", "One ≤300-character line\nper point"),
+        }
+        for mode, literals in expected.items():
+            result = self.run_builder(*self.args(mode))
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            text = result.stdout.decode("utf-8")
+            for literal in literals:
+                self.assertIn(literal, text)
+
     def test_builder_has_no_version_iteration_or_limit_input(self) -> None:
         for option in ("--version", "--iteration", "--limit", "--max-iterations"):
             result = self.run_builder(*self.args("planner"), option, "1")
