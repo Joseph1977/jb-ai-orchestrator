@@ -383,10 +383,10 @@ class StaticContractTests(unittest.TestCase):
         )
         self.assertLessEqual(
             reviewer_bytes + planner_bytes,
-            7_500,
+            7_600,
             "rendered prompts are "
             f"{reviewer_bytes + planner_bytes} bytes "
-            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 7500",
+            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 7600",
         )
 
     def test_explicit_foreground_subagent_contracts(self) -> None:

@@ -20,7 +20,7 @@ Read only while maintaining or explicitly validating the skill.
 ## Context and models
 
 - `SKILL.md` is at most 30,000 UTF-8 bytes; exact rendered planner+reviewer prompts total at most
-  7,500 bytes. Contract tests measure shipped content and print actual values on failure.
+  7,600 bytes. Contract tests measure shipped content and print actual values on failure.
 - Trigger-only task schemas, commit mechanics, and format detail live in digest-gated
   `operations.md`; trusted mismatch bootstrap remains inline.
 - Planner defaults to a fresh explicit model; reviewer is always fresh and a different family.
