@@ -1,9 +1,11 @@
 # Review — OpenCodeExecutionEngine implementation plan
-Version: 7
+Version: 8
 Model: gpt-5.6-sol-medium
 Verdict: CHANGES_REQUESTED
 
 ## Points
-1. P013 [major] D11/A1 share a loopback sidecar while D12 can expose execute_local; local_tool_provider.py:514 and ORCHESTRATOR §6 show shell is unjailed, so one run can call sidecar APIs for another → authenticate/isolate the sidecar or gate shell; add cross-run attack tests.
-2. P014 [major] D10/D18 require global feature flags false for OpenCode, but D7 resumes internal state in that process; resumes silently lose compaction, subagents and multimodal behavior → keep globals unchanged with engine-local gates; test internal resume under an OpenCode default.
-3. P015 [major] D15 relies on startup sweep for orphan recovery, but D25 skips cleanup and boots on version/health failure; stale claims can be reclaimed while sidecar work is unconfirmed stopped → block OpenCode reclaim until cleanup is verified; test this path.
+1. P015 [major] D15 reclaims after process death while the sidecar may still generate and consume quota; a failed sweep still starts another segment, violating C-1 bounded work and stop-before-release → require verified abort/idle or a sidecar lease that stops orphan work before replacement.
+2. P016 [major] D12 checks hook config before each local call, then D26 suppresses hooks; a concurrent bridged write can install hooks after the check while another call runs without their permission policy → reject hook-config writes atomically or serialize check and dispatch; test the race.
+
+## Pushback assessment
+P015: maintain, because docs/ORCHESTRATOR.md §12: claims are released only after work stops, while D15 allows sweep failure to proceed and admits orphan model-token use.
