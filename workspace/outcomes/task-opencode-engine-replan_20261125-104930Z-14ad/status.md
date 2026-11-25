@@ -14,4 +14,4 @@ Trend: none
 Next point ID: P001
 Retired point IDs: none
 Stop reason: none
-Next action: reviewer writes review v1 — attempt 1
+Next action: reviewer writes review v1 — attempt 2
