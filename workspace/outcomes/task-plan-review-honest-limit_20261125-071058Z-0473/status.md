@@ -13,4 +13,4 @@ Trend: v1=2
 Next point ID: P003
 Retired point IDs: none
 Stop reason: none
-Next action: planner writes plan v2
+Next action: planner writes plan v2 (retry 1 after format failure: response reason over 300 characters)
