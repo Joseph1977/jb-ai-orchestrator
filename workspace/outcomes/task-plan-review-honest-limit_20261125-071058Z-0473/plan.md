@@ -1,12 +1,12 @@
 # Plan — Plan-review skill: honest rounds and a real iteration limit
-Version: 6
+Version: 7
 Model: claude-opus-5-5-medium
 
 ## Response to review
 
 | Point | Decision | Reason |
 |---|---|---|
-| P005 | closed by user | User decision 2026-11-25 10:01 (brief §User feedback): `Model:` task headers are not attribution and stay as the model-family audit record; ID retired, Plan keeps headers and the `MODEL` scalar as-is. |
+| P007 | partly accepted | Added K-only text (Steps 5/7/8, flow 6) and tests: feedback needs only status.md; brief.md only for dated user text or retired IDs. Code already allows it: feedback has no STEP_REQUIRED entry. Evidence: scripts/commit_check.py#STEP_REQUIRED \| operations.md §Allowed files \| brief In-4 |
 
 ## Plan
 
@@ -22,7 +22,7 @@ Model: claude-opus-5-5-medium
 3. Limit check (only here, never in a prompt or inside a round): open points remain (`CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = L → `limit-reached vN`.
 4. `APPROVE_WITH_MINORS` and N < L → Minors close: `plan-start vN+1` with `Iteration: N+1 of L`, planner in `minors` mode, `plan vN+1`, then `review vN+1` and back to step 1.
 5. `CHANGES_REQUESTED` and N < L → `plan-start vN+1` with `Iteration: N+1 of L`, then plan and review as usual.
-6. `limit-reached`: State `limit-reached`, Iteration and Open points copied unchanged from `review vN`, no consensus; only an explicit user K continues via `feedback vN` setting `Iteration: N of N+K`.
+6. `limit-reached`: State `limit-reached`, Iteration and Open points copied unchanged from `review vN`, no consensus; only an explicit user K continues via `feedback vN` changing only `status.md` to `Iteration: N of N+K`; `brief.md` changes in that commit only if the user also gives dated feedback or decides point IDs.
 
 ### Step 1 — Move prompt templates out of `SKILL.md` (In-6, enables In-1..In-3)
 - New `references/prompts.md` with `<!-- BEGIN PLANNER_PROMPT -->`/`END` blocks for `PLANNER_PROMPT`, `REVIEWER_PROMPT`, `MINORS_LINE`; one heading per block, nothing else.
@@ -61,6 +61,7 @@ Model: claude-opus-5-5-medium
 - Retry rule: a retried launch commits the exact subject `plan-review(<slug>): plan-start vN` (or `review-start vN`) again with no suffix, after incrementing `attempt k` in `Next action`, so the commit has a real diff.
 - §Commit transaction: `pre` gains required `--subject "plan-review(<slug>): <step> v<N>"`; `git commit` uses that same string.
 - Limit may change only in `brief v1` or `feedback`; `brief.md` never records the iteration count, an `Iteration:` line or this run's limit (agents read it).
+- §Allowed files: "`feedback`: `status.md` required; `brief.md` optional, changed only for dated user feedback or retired-point decisions (a K-only grant changes `status.md` alone)"; `brief`: both required.
 - §Format checks: delete the `Caused by` bullet; keep exact `Version: N`; add "A Response reason or `## Plan` containing `defer`, `next round`, `next version`, `follow-up`, `TBD` or `TODO`, or a `## Plan` that points to an earlier version instead of restating it, fails format."
 
 ### Step 6 — `commit_check.py` (In-4, In-5, In-7, C-2)
@@ -69,16 +70,17 @@ Model: claude-opus-5-5-medium
 - `SUBJECT` mismatch message keeps "is not a plan-review step" and adds "; retries reuse the exact subject plan-review(<slug>): <step> v<N>" when a valid subject has a suffix.
 - Current format (brief v1 status has `Outcome:`; `pre` rejects a new `brief v1` without it): `consensus` requires latest review `NO_FURTHER_COMMENTS` and Outcome open points 0/0/0; `limit-reached` requires latest review CR/AWM, review Iteration N = its limit, Iteration and Open points equal to the review commit, Open points ≠ 0/0/0.
 - Current format also: `minors` is rejected ("Minors close commits plan vN+1 and is reviewed"); `plan-start`/`plan` vN+1 after an AWM review are allowed (lifting the "rejected until minors commits" rule at line ~506) and, like after CR, require review N < its limit; any limit change outside `feedback` fails; terminal commits require the matching `Outcome` with their Iteration and Open points.
+- `feedback` keeps no `STEP_REQUIRED` entry (required = `status.md`, allowed = `brief.md`, `status.md`) in both formats; `_validate_step` and `pre` apply the same sets.
 - Legacy format (no `Outcome:` in the brief v1 status): existing rules only, including `minors` → `awaiting-user`; no new failure; result adds `"format": "legacy"` and note `legacy status format: honest-limit checks not applied`.
 
 ### Step 7 — `SKILL.md` loop text (In-4, In-5, C-1)
 - §Loop step 4 Decide replaced by the six-line gate flow.
 - §Minors close rewritten: "Only when N < limit: commit `plan-start vN+1` with `Iteration: N+1 of L`, render `prompt_build.py minors`, validate and commit `plan vN+1` at `reviewing`, then run Review. Consensus follows only a `NO_FURTHER_COMMENTS` review." (deletes `max(limit,N+1)`, `awaiting-user` and the `minors` commit).
-- §Consensus: "After no comments, use the current version" (drops "or Minors close step 2"); step 1 records the consensus `Outcome`; step 2 lists pushback IDs the reviewer accepted; add "After `approved`, the session ends; implementing changes to this skill runs outside the loop."
+- §Consensus: "After no comments, use the current version" (drops "or Minors close step 2"); step 1 records the consensus `Outcome`; step 2 lists pushback IDs the reviewer accepted; step 4 keeps dated user feedback in brief and raises the limit in `status.md` only; add "After `approved`, the session ends; implementing changes to this skill runs outside the loop."
 - §Loop steps 2–3: "exact retry" points to the operations retry rule; §Commits references `pre --subject`.
 
 ### Step 8 — Other references (In-4, In-7, In-8)
-- `limit.md`: trigger "review vN with open points (any verdict) and N = limit"; delete "APPROVE_WITH_MINORS is not Limit reached … including when N = limit"; commit sets State/Outcome, keeps Iteration and Open points; K sets `Iteration: N of N+K` in `feedback vN`; brief records retired decisions only.
+- `limit.md`: trigger "review vN with open points (any verdict) and N = limit"; delete "APPROVE_WITH_MINORS is not Limit reached … including when N = limit"; commit sets State/Outcome, keeps Iteration and Open points; K sets `Iteration: N of N+K` in `feedback vN`; a K-only grant commits `status.md` alone; brief.md changes only to record user-decided point IDs or dated feedback, never the limit.
 - `resume.md` step 3: describe `pre --subject`, current vs legacy format and the new checks; mark the `minors` paragraph (line 29) legacy-only and add the current AWM → `plan-start vN+1` rule.
 - `resume.md` step 6 `reviewed`: "`APPROVE_WITH_MINORS` goes to Minors close when N < limit, else Limit reached"; `awaiting-user` drops the pushed-back-minor go list; step 7 replaces the `max(limit, N+1)` sentence with "Minors close runs only when N < limit."
 - `recovery.md` §Format failure: remove the `Caused by` example, add deferral/partial-plan and wrong-derived-Version examples; retry launches follow the operations retry rule.
@@ -109,7 +111,7 @@ Model: claude-opus-5-5-medium
 - In-2: `test_reviewer_template_reviews_whole_plan_at_true_severity`; `test_caused_by_rule_removed` (SKILL, prompts, operations, recovery, validation); stable-ID/pushback strings still asserted; drop the "cited point ID must differ" contract.
 - In-3: `test_templates_are_iteration_blind` (raw `prompts.md` blocks contain no `(?i)\biteration\b|\bv\d|version:? *\d|\bfinal\b|last round|remaining|budget|\blimit\b`); `test_rendered_prompts_disclose_no_budget` (all three modes contain no `Iteration:` and no `\b\d+ of \d+\b`); `test_prompts_do_not_read_status_md`.
 - In-3 continued: `test_builder_has_no_version_iteration_or_limit_input` (argparse rejects `--version`, `--iteration`, `--limit`); `test_templates_define_version_derivation` (planner and reviewer derivation text present).
-- In-4: `test_limit_reached_requires_review_at_limit`; `test_limit_reached_after_minors_verdict_at_limit_passes`; `test_minors_subject_rejected_current_format`; `test_plan_start_after_awm_below_limit_passes`; `test_plan_start_after_review_at_limit_rejected_without_feedback`; `test_feedback_with_k_continues_past_limit_passes`.
+- In-4: `test_limit_reached_requires_review_at_limit`; `test_limit_reached_after_minors_verdict_at_limit_passes`; `test_minors_subject_rejected_current_format`; `test_plan_start_after_awm_below_limit_passes`; `test_plan_start_after_review_at_limit_rejected_without_feedback`; `test_feedback_with_k_continues_past_limit_passes`; `test_feedback_k_only_status_change_passes` (history and `pre`, brief.md unchanged); `test_limit_and_operations_state_brief_optional_for_feedback`.
 - In-4 continued: `test_consensus_requires_no_further_comments`; `test_consensus_after_awm_without_new_review_rejected`; `test_limit_change_outside_feedback_rejected`; `test_limit_reached_preserves_open_points`; `test_skill_decide_contains_gate_sequence`; `test_skill_minors_close_is_reviewed`.
 - In-5: `test_outcome_required_on_terminal_commits`; `test_outcome_matches_iteration_and_open_points`; `test_consensus_outcome_nonzero_counts_rejected`; `test_early_consensus_at_iteration_one_of_six_passes`; `test_limit_reached_outcome_four_of_four`.
 - In-6: `test_shipped_templates_render` (each mode exits 0 on real `prompts.md`; output keeps `<metadata|frontmatter>`, `<path>`, `<ordinal>`, `<issue>` and contains no `{{`).
@@ -124,7 +126,7 @@ Model: claude-opus-5-5-medium
 - M2 whole-plan review: review v2 raises a seeded issue in a section untouched by v1 points.
 - M3 prompt integrity: each Task prompt equals `prompt_build.py` output (sha256 match); no added text in any round.
 - M4 blindness: rendered prompts disclose no budget; brief.md has no `Iteration:` line and does not state this run's limit or "N of L"; plan/review may discuss limits as subject matter; agents never open `status.md`; derived Versions pass format checks in v1, v2 and a Minors close.
-- M5 limit: `--max-iterations 1` with a seeded major ends `limit-reached v1`, open points unchanged, no `plan-start v2`, plain-text question asked.
+- M5 limit: `--max-iterations 1` with a seeded major ends `limit-reached v1`, open points unchanged, no `plan-start v2`, plain-text question asked; granting K=1 commits `feedback v1` changing only `status.md`, and `plan-start v2` follows.
 - M6 early consensus: a trivial brief with limit 6 reaches consensus before 6; `Outcome` reads "consensus at iteration N of 6, open points 0/0/0".
 - M7 legacy: `history` on both old folders reports `format: legacy` and only pre-existing failure messages.
 - M8 retry: a guard-failed planner retry commits `plan-start vN` again with attempt 2 and passes `pre`/`history`.
