@@ -1,7 +1,7 @@
 # Plan-review: honest rounds and a real iteration limit
 
 - **Date:** 2026-11-25
-- **Branch:** `fix/plan-review-honest-limit` (pull request against `on-going-dev`)
+- **Branch:** `fix/plan-review-honest-limit` (pull request #27 against `feature/opencode-engine-plan`)
 
 ## What changed
 
