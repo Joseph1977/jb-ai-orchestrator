@@ -1,14 +1,11 @@
 # Plan — OpenCodeExecutionEngine implementation plan
-Version: 5
+Version: 6
 Model: claude-opus-5-5-medium
 
 ## Response to review
 | Point | Decision | Response |
 |---|---|---|
-| P007 | accepted | Bridge calls run in their own ASGI tasks; `execute_mcp_tool` reads `_mcp_user_token` and `_request_mcp_tools` (`mcp_agent_service.py` 54–81, 488, 515). D12 now binds both from the run scope per call and resets in `finally`; concurrent two-token test added. |
-| P008 | accepted | D18 now accepts only `http` with host `localhost` or an `ipaddress` loopback literal (127.0.0.0/8, `::1`) for `OPENCODE_BASE_URL` and `OPENCODE_TOOL_BRIDGE_URL`; startup fails otherwise. IPv4, IPv6, hostname, mapped and wildcard cases tested. |
-| P009 | accepted | D21 fallback removed. A3 failure (no per-session MCP config with per-session credential) now stops Slices 5–6; the orchestrator never launches or configures the sidecar process, so no startup secret is needed. |
-| P010 | accepted | D12 lists bridge local tools with `exclude_base={"task","ask_user"}`, the subagent precedent (`tool_hub.py` 430; `docs/ORCHESTRATOR.md` §5); a forged `ask_user_local` call returns "not available". Absence tests added; call-time failure path deleted. |
+| P011 | accepted | D20: `heartbeat_run` (408) unchanged, still active+closing; fence is a separate read-only `is_run_live`. Closing denies calls as "run stopping", not lost ownership. Close regression test: heartbeat continues, stale recovery skips it. |
 
 ## Plan
 
@@ -66,7 +63,8 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
   - `_require_loopback_url(name, value)` for both URLs: scheme `http`, no userinfo/query/fragment, `urlparse().hostname` equal to `localhost` or `ipaddress.ip_address(host).is_loopback`; else `ValueError` naming the variable. Rejected: other hostnames (`localhost.example.com`, `host.docker.internal`), `0.0.0.0`, `::`, IPv4-mapped IPv6, private/public IPs.
   - Positive timeout, valid provider, non-empty `OPENCODE_MODEL` for native. Any of `HOOKS_ENABLED`, `SUBAGENT_ENABLED`, `CONTEXT_COMPACTION_ENABLED`, `MULTIMODAL_ENABLED` true logs `opencode_capability_flag_enabled` naming it (boot continues; D10 rejects runs).
 - D19 OpenCode does not depend on `ModelClient` (Out-1); no discovery adapter needed (Out-2): discovery stays orchestrator-side.
-- D20 (C-1) New `RunLifecycleService.is_run_live(session, run_pk)`: the `heartbeat_run` predicate (408) narrowed from `_ACTIVE_RUN_STATUSES` (32) to `status == active`. Bridge checks before each call; not live → deny, mark scope `ownership_lost`, D14, `RUN_LIFECYCLE_FAILED`. Residual: a call already running at reclaim completes, as on internal (§12).
+- D20 (C-1) New read-only `RunLifecycleService.is_run_live(session, run_pk) -> Literal["active","closing","lost"]`: SELECT on `id == run_pk`, `finished_at IS NULL`; `active`/`closing` by status, anything else (reclaimed, finished, missing) `lost`. `heartbeat_run` (408) and `_ACTIVE_RUN_STATUSES` (32) unchanged, so a closing worker stays heartbeated until D14 step 5 and `mark_stale_runs_failed` (531) never takes a live closing claim.
+  - Bridge checks before each call: `closing` → deny "run stopping", nothing executes, D14 runs from the existing `manage_run` cancel path, close outcome per §12; `lost` → deny, mark scope `ownership_lost`, D14, `RUN_LIFECYCLE_FAILED`. Residual: a call already running at reclaim completes, as on internal (§12).
 - D21 (C-2) Tenant isolation: each session gets its own MCP config with its own per-run bearer (A3); no shared sidecar-wide credential exists. There is no fallback: A3 failure stops Slices 5–6.
 - D22 (C-2, In-4) `engines/opencode/tool_map.py` `resolve_engine_tools(requested, user_token) -> ResolvedTools{mapped, mcp_tools, rejected{name: reason}}`, last D10 gate on OpenCode fresh paths; `mcp_tools` keeps the `MCPTool` objects D12 binds.
   - Listing via `mcp_service.fetch_mcp_tools(user_access_token=…)` (388), `MCP_FETCH_TIMEOUT_SEC` unchanged, whole call under `asyncio.timeout_at(D24 deadline)`; expiry → 504 / `RunErrorEvent` `TIMEOUT` before any claim. `FILTER_MCP_TOOLS_CONFLICTING_WITH_LOCAL` applied only when local tools are included (hub 400–413).
@@ -88,7 +86,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 2. Contract, internal extraction, identity (D1–D7). Entry: Slice 1 merged. Exit: suite green; new rows in all three tables internal/1; mismatch tests pass; migration note written.
 3. Spike (A1–A12). Entry: Slice 2 merged. Exit: pinned version; `tests/fixtures/opencode/<version>/` for litellm and native; findings in `docs/PLUGGABLE_EXECUTION_ENGINES.md`; no runtime code.
 4. Config and gating (D9, D10, D18, D23 validation). Entry: no stopping failure in Slice 3. Exit: engine=opencode boots only with loopback URLs; every run rejected `ENGINE_CAPABILITY_UNSUPPORTED` (`headless_segment` still off).
-5. Bridge, pre-claim tool gate, deadline (D12, D13, D20–D22, D24). Entry: Slice 4 merged. Exit: security, ContextVar isolation, fence, scope, enablement, media, hooks-off, `ask_user` absence, tool-gate, cumulative-deadline tests pass with a fake engine reporting `headless_segment`; bridge route absent under internal.
+5. Bridge, pre-claim tool gate, deadline (D12, D13, D20–D22, D24). Entry: Slice 4 merged. Exit: security, ContextVar isolation, fence, close-regression, scope, enablement, media, hooks-off, `ask_user` absence, tool-gate, cumulative-deadline tests pass with a fake engine reporting `headless_segment`; bridge route absent under internal.
 6. Engine (D11, D14–D17, D23). Entry: Slice 5 merged. Exit: fixture-replay and failure tests pass; `headless_segment` on; a headless execute completes with the four D10 flags false.
 - Follow-ups only (Out-3): Phase 5 parity per capability (hooks via bridge, durable `ask_user`, multimodal), Phase 6 rollout incl. sidecar packaging. Out-1/Out-2 ship independently.
 
@@ -101,6 +99,7 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 - In-3 `test_opencode_engine.py`: fixture replay over httpx `MockTransport`, both provider modes (completion, AG-UI text, tool events, usage); engine never calls `fetch_mcp_tools`.
   - `test_opencode_model_route.py`: litellm precedence; native qualified id; native credentials absent from orchestrator requests.
   - `test_opencode_tool_bridge.py`: cross-run and revoked tokens → 401; policy (workflow write blocked, traversal and symlinks refused, budget); leakage (user MCP token never sent to the sidecar, `task`/AG-UI tools absent, only `mapped` exposed); fence (fake stale-reclaim → next call denied, nothing executes, `RUN_LIFECYCLE_FAILED`).
+  - Same file, close regression: `mark_active_runs_closing_for_execution` (516) mid-run → `is_run_live` returns `closing`, next call denied "run stopping" with no `RUN_LIFECYCLE_FAILED`; `heartbeat_run` still returns true and advances `heartbeat_at` while a held handler runs; `mark_stale_runs_failed` leaves the run; claim released only after D14 step 5.
   - Same file, ContextVars: two runs with distinct user tokens and user-auth catalogs call MCP concurrently (interleaved via events) → spy on `mcp_auth_headers` sees each run's own token, `find_tool_by_name` resolves only its own catalog; both ContextVars `None` after each call, incl. when the call raises; a mapped name absent from the scope is refused.
   - Same file, `ask_user`: listing never contains `ask_user_local` or `task_local` under any flag combination; a forged `ask_user_local` call returns "not available", no `llm_states` row, run continues.
   - Same file: `LOCAL_TOOLS_ENABLED=false` → no local tools, conflict filter off, forged local call refused; media marker without `absolutePath`, equal to internal's with `MULTIMODAL_ENABLED=false`; hook mutation (`HOOKS_ENABLED=false`, bridged write of a denying `.cursor/hooks.json`, then `execute_local`/`read_file_local` → no `_run_one` spawn).
@@ -136,6 +135,6 @@ Insert an `ExecutionEngine` seam at the six controller calls to `ToolExecutionHu
 - Per slice: `python -m pytest` with no DB or network; new tests fail before the change where applicable.
 - Slice 2: `alembic upgrade head` and `downgrade -1` on disposable Postgres with pre-existing rows in all three tables; `scripts/smoke_service.py` and `scripts/smoke_agui.py` under internal.
 - Slice 4: loopback acceptance/rejection matrix; boot under internal with OpenCode vars unset.
-- Slice 5: ContextVar concurrency, `ask_user` absence, bridge enablement, media, hooks-off and cumulative-deadline tests; unchanged `test_bounded_run_lifecycle` passes.
+- Slice 5: ContextVar concurrency, `ask_user` absence, bridge enablement, media, hooks-off and cumulative-deadline and close-regression tests; unchanged `test_bounded_run_lifecycle`, `test_claim_lifecycle`, `test_stale_claim_recovery` pass.
 - Slice 6: manual headless execute against the pinned loopback sidecar, both provider modes.
 - After every slice the characterization suite confirms `ORCHESTRATOR_ENGINE=internal` behaves exactly as before.
