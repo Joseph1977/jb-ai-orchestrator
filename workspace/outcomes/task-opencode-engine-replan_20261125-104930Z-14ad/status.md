@@ -1,8 +1,8 @@
 # Status — OpenCodeExecutionEngine implementation plan (continued)
 Model: Auto
-Iteration: 3 of 10
+Iteration: 4 of 10
 Length caps: plan 150, review 50
-State: reviewed
+State: planner-running
 Outcome: none
 Working branch: feature/opencode-engine-plan
 Branch authorization: approved-current@4eb8f1ed3ee873fece107ef8deff7810efb2e4db
@@ -14,4 +14,4 @@ Trend: v1=1, v2=3, v3=2
 Next point ID: P007
 Retired point IDs: none
 Stop reason: none
-Next action: decide after review v3 (CHANGES_REQUESTED, 3 of 10)
+Next action: planner writes plan v4 — attempt 1
