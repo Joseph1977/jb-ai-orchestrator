@@ -2,8 +2,8 @@
 Model: Auto
 Iteration: 12 of 13
 Length caps: plan 150, review 50
-State: reviewer-running
-Outcome: none
+State: stopped
+Outcome: stopped at iteration 12 of 13 (error)
 Working branch: feature/opencode-engine-plan
 Branch authorization: approved-current@4eb8f1ed3ee873fece107ef8deff7810efb2e4db
 Planner mode: subagent
@@ -13,5 +13,5 @@ Open points: 0/1/0
 Trend: v1=1, v2=3, v3=2, v4=4, v5=1, v6=1, v7=3, v8=2, v9=2, v10=1, v11=1
 Next point ID: P021
 Retired point IDs: none
-Stop reason: none
-Next action: reviewer writes review v12 — attempt 2
+Stop reason: error
+Next action: none — review v12 failed format twice (point lines over 300 characters); awaiting user approval to retry
