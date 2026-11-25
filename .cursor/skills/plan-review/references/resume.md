@@ -22,11 +22,13 @@ markers.
      --repo "$ROOT" --task workspace/outcomes/<task folder>
    ```
 
-   `history` re-validates every commit that touched the task folder. It checks the `plan-review(<slug>): <step> v<N>` subject and slug, first commit `brief v1`, a single parent, changed paths within that step's allowed files (required files changed), only the four task files as `100644` blobs, persistent `brief.md` and `status.md` in every resulting tree, the `State` each step must set and the state it may follow, and that every subject version equals that commit's `Iteration` and does not exceed its limit. It rejects a committed `Recovery:` line. This covers a crash between the commit and `post`. It also reports the worktree recovery marker.
+   `history` re-validates every commit that touched the task folder. It checks the `plan-review(<slug>): <step> v<N>` subject and slug (retries reuse the exact subject), first commit `brief v1`, a single parent, changed paths within that step's allowed files (required files changed), only the four task files as `100644` blobs, persistent `brief.md` and `status.md` in every resulting tree, the `State` each step must set and the state it may follow, and that every subject version equals that commit's `Iteration` and does not exceed its limit. It rejects a committed `Recovery:` line. This covers a crash between the commit and `post`. It also reports the worktree recovery marker. `pre --subject` applies the same checks to the staged step before any commit.
 
-   Version sequencing: before the first plan, N is 1. `plan-start`, `plan`, and `minors` open the same way. Let `latest_plan` and `latest_review` be the latest committed `Version` of those files (0 when absent) and `closed_plan` the latest `minors` version (0 when none). The next `plan-start` or `plan` expects `latest_plan` when `latest_plan > max(latest_review, closed_plan)`, otherwise `max(latest_review, closed_plan) + 1`. `minors` uses that same opening rule, checks `plan.md` `Version`, and records `closed_plan` as its subject version. Every other step keeps the open subject version.
+   Format: a task whose `brief v1` status has an `Outcome:` line uses the current rules; `history` reports `"format": "current"`. They add: `Outcome` matching each step and its Iteration and Open points; `consensus` only after a `NO_FURTHER_COMMENTS` review; `limit-reached` only after a review with open points at its limit, with Iteration and Open points copied from that review; no `plan-start`/`plan` after a review at the limit unless `feedback` raised it; the limit changes only in `feedback`; and `minors` rejected. A task without `Outcome:` (older run) reports `"format": "legacy"` and the note `legacy status format: honest-limit checks not applied`; only the existing rules apply.
 
-   `minors` is allowed only after `reviewed` or `planner-running`. It requires the latest committed review at version N with `Verdict: APPROVE_WITH_MINORS`, and it commits `plan.md` plus `status.md` at `State: awaiting-user` for version N+1. Until that `minors` commit exists, `consensus` and `limit-reached` are rejected, and `plan` is rejected unless a `feedback` commit follows that review. `plan-start vN+1` remains allowed so a subagent Minors close keeps its failure marker.
+   Version sequencing: before the first plan, N is 1. `plan-start`, `plan`, and (legacy format) `minors` open the same way. Let `latest_plan` and `latest_review` be the latest committed `Version` of those files (0 when absent) and `closed_plan` the latest `minors` version (0 when none). The next `plan-start` or `plan` expects `latest_plan` when `latest_plan > max(latest_review, closed_plan)`, otherwise `max(latest_review, closed_plan) + 1`. `minors` uses that same opening rule, checks `plan.md` `Version`, and records `closed_plan` as its subject version. Every other step keeps the open subject version.
+
+   Legacy format only: `minors` is allowed only after `reviewed` or `planner-running`. It requires the latest committed review at version N with `Verdict: APPROVE_WITH_MINORS`, and it commits `plan.md` plus `status.md` at `State: awaiting-user` for version N+1. Until that `minors` commit exists, `consensus` and `limit-reached` are rejected, and `plan` is rejected unless a `feedback` commit follows that review. `plan-start vN+1` remains allowed so a subagent Minors close keeps its failure marker. In the current format, an `APPROVE_WITH_MINORS` review below the limit continues with `plan-start vN+1` (Minors close), is reviewed like any plan, and `minors` is rejected.
 
    Exit 0 means history is valid and no marker is present. Exit 1 (ordinary history failure or a
    commit-check marker) or exit 2 requires stopping. Report failures and the commit SHA. Require an
@@ -46,7 +48,7 @@ markers.
 6. Handle the committed state explicitly:
    - `planning`: start the next plan step.
    - `reviewing`: the plan is committed and validated. Start the review step.
-   - `reviewed`: the review is committed and validated. Run Decide. Do not start another subagent. `APPROVE_WITH_MINORS` goes to Minors close, not to `consensus` or `plan`.
+   - `reviewed`: the review is committed and validated. Run Decide. Do not start another subagent. `APPROVE_WITH_MINORS` goes to Minors close when N < limit, else Limit reached.
    - `planner-running` / `reviewer-running`: the prior subagent was interrupted or guard-aborted.
      Confirm the owned file is restored/absent. Report outside deltas only when guard comparison
      actually ran; a skill-integrity marker with pending/failed repository checking makes no such
@@ -54,9 +56,9 @@ markers.
    - `limit-reached`: read `references/limit.md`. Require explicit approval for K more iterations or stop.
    - `stopped` with reason `error`: require explicit approval to retry the failed step.
    - `stopped` with reason `user`: require explicit approval to reopen and a new iteration limit.
-   - `awaiting-user`: present the final plan and require a fresh implementation **go**. If the latest review is `APPROVE_WITH_MINORS`, the go question lists each pushed-back minor by ID and reason.
+   - `awaiting-user`: present the final plan and require a fresh implementation **go**.
    - `approved`: report the prior approval, and require a fresh **go** before implementation in this chat. Another chat's approval is not current authorization.
-7. A new `--max-iterations` replaces the limit and is recorded. With no flag, keep the limit already in `status.md` (a resumed `of 10` stays 10). Never continue with N > limit. Minors close is the one transition that may set `Iteration: N+1 of max(limit, N+1)` while the loop is running; resume does not invent that bump.
+7. A new `--max-iterations` replaces the limit and is recorded. With no flag, keep the limit already in `status.md` (a resumed `of 10` stays 10). Never continue with N > limit. Minors close runs only when N < limit.
 
 Reviewer mode always starts fresh. Planner mode defaults to a fresh explicit subagent; self mode
 requires a new explicit `--planner-model self` selection and exact concrete identity match.
