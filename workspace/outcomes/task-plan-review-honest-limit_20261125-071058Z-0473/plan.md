@@ -1,13 +1,13 @@
 # Plan — Plan-review skill: honest rounds and a real iteration limit
-Version: 3
+Version: 4
 Model: claude-opus-5-5-medium
 
 ## Response to review
 
 | Point | Decision | Reason |
 |---|---|---|
-| P003 | accepted | M4 now checks only configured-budget disclosure (an `Iteration:` line, this run's `N of L`, the active maximum, final/last-round wording); limits as subject matter are allowed. The static blindness test scans template text, not filled task-folder names (Tests In-3; M4). |
-| P004 | accepted | The "consensus after minors close" outcome is removed. Minors close now produces `plan vN+1`, which is reviewed like any other plan: consensus only on `NO_FURTHER_COMMENTS` (0/0/0); open minors at N+1 = L end `limit-reached` (gate steps 4–6; Steps 5–8). |
+| P005 | pushed back | Model headers are task records the model-family checks need, not attribution in code, docs, commits or PR text; removing them is Out-3. Evidence: .cursor/skills/plan-review/references/operations.md \| CONTRIBUTING.md § House style \| brief Out-3 |
+| P006 | accepted | Added `test_review_start_retry_after_reviewer_running_passes` (Tests In-7): an exact-subject `review-start vN` repeated after `reviewer-running` with `attempt 2` passes `pre` and `history`. |
 
 ## Plan
 
@@ -115,7 +115,7 @@ Model: claude-opus-5-5-medium
 - In-6: `test_shipped_templates_render` (each mode exits 0 on real `prompts.md`; output keeps `<metadata|frontmatter>`, `<path>`, `<ordinal>`, `<issue>` and contains no `{{`).
 - In-6 continued (`test_prompt_build.py`): unknown option, newline/backtick injection, bad path/ID/cap, unknown or unsupplied token, stray brace all exit 2; value containing `{{MODEL}}`-like text is not rescanned; minors adds exactly one line; deterministic sha; no local imports; allowed-scalar set equals template tokens.
 - In-6 continued: `test_context_byte_budgets` renders via builder (keeps 30,000/7,500 caps); `test_skill_has_no_inline_prompt_templates`; `test_rules_require_builder_output`.
-- In-7: `test_retry_subject_suffix_rejected_with_hint`; `test_plan_start_retry_after_planner_running_passes`; `test_pre_rejects_wrong_state_before_commit`; `test_pre_rejects_iteration_mismatch`; `test_pre_rejects_new_brief_without_outcome`; `test_post_rejects_subject_mismatch`; `test_manifest_v2_rejected`.
+- In-7: `test_retry_subject_suffix_rejected_with_hint`; `test_plan_start_retry_after_planner_running_passes`; `test_review_start_retry_after_reviewer_running_passes`; `test_pre_rejects_wrong_state_before_commit`; `test_pre_rejects_iteration_mismatch`; `test_pre_rejects_new_brief_without_outcome`; `test_post_rejects_subject_mismatch`; `test_manifest_v2_rejected`.
 - In-8/C-2: `test_legacy_status_format_uses_existing_rules` (fixtures without `Outcome:` keep passing, incl. `test_minors_after_reviewed_passes`, `test_minors_at_limit_passes`, `test_approved_after_minors_passes`, `test_plan_rejected_after_approve_with_minors`, `test_limit_reached_rejected_after_approve_with_minors` as legacy cases); existing `Version does not match` tests kept; helper `step()` passes `--subject`.
 - Command: `PYTHONDONTWRITEBYTECODE=1 python3 -I -B -m unittest discover -s "$SKILL_ROOT/scripts"`.
 
