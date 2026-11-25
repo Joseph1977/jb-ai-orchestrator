@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +12,50 @@ from pathlib import Path
 SKILL = Path(__file__).resolve().parent.parent / "SKILL.md"
 RESUME = SKILL.parent / "references" / "resume.md"
 OPERATIONS = SKILL.parent / "references" / "operations.md"
+LIMIT = SKILL.parent / "references" / "limit.md"
+RECOVERY = SKILL.parent / "references" / "recovery.md"
+VALIDATION = SKILL.parent / "references" / "validation.md"
+PROMPTS = SKILL.parent / "references" / "prompts.md"
+BUILDER = SKILL.parent / "scripts" / "prompt_build.py"
+TASK_NAME = "task-demo-run_20261101-120000Z-abcd"
+BUDGET_WORDS = re.compile(
+    r"(?i)\biteration\b|\bv\d|version:? *\d|\bfinal\b|last round|remaining|budget|\blimit\b"
+)
+
+
+def block(name: str) -> str:
+    text = PROMPTS.read_text(encoding="utf-8")
+    start, end = f"<!-- BEGIN {name} -->", f"<!-- END {name} -->"
+    return text.split(start, 1)[1].split(end, 1)[0].strip()
+
+
+REFERENCE_TASK_BYTES = 100
+
+
+def render(mode: str, reference_path: bool = False) -> str:
+    """Render a prompt with the shipped builder, exactly as the orchestrator does.
+
+    `reference_path` swaps the temporary task path for a fixed 100-byte path so byte budgets
+    do not depend on where the tests run.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        task = Path(directory).resolve() / "workspace" / "outcomes" / TASK_NAME
+        task.mkdir(parents=True)
+        result = subprocess.run(
+            ["python3", "-I", "-B", str(BUILDER), mode, "--task", str(task),
+             "--model", "example-model-1", "--plan-cap", "150", "--review-cap", "50",
+             "--next-id", "P007", "--retired", "none", "--pushed-back", "none"],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+    if result.returncode != 0:
+        raise AssertionError(f"prompt_build {mode} exited {result.returncode}: {result.stderr!r}")
+    text = result.stdout.decode("utf-8")
+    if reference_path:
+        suffix = f"/workspace/outcomes/{TASK_NAME}"
+        reference = "/" + "r" * (REFERENCE_TASK_BYTES - len(suffix) - 1) + suffix
+        text = text.replace(str(task), reference)
+    return text
 
 
 def extract(marker: str) -> str:
@@ -330,21 +376,8 @@ class StaticContractTests(unittest.TestCase):
 
     def test_context_byte_budgets(self) -> None:
         skill_bytes = len(self.text.encode("utf-8"))
-        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
-            "### Planner prompt", 1
-        )[0]
-        planner = self.text.split("### Planner prompt", 1)[1].split(
-            "## Consensus", 1
-        )[0]
-        reviewer = reviewer.split("```", 1)[1].rsplit("```", 1)[0].strip()
-        planner = planner.split("```", 1)[1].rsplit("```", 1)[0].strip()
-        probe = extract("POLICY_PROBE_PY")
-        reviewer_bytes = len(
-            reviewer.replace("<POLICY_PROBE_PY code>", probe).encode("utf-8")
-        )
-        planner_bytes = len(
-            planner.replace("<POLICY_PROBE_PY code>", probe).encode("utf-8")
-        )
+        reviewer_bytes = len(render("reviewer", reference_path=True).encode("utf-8"))
+        planner_bytes = len(render("planner", reference_path=True).encode("utf-8"))
         self.assertLessEqual(
             skill_bytes, 30_000, f"SKILL.md is {skill_bytes} bytes; limit is 30000"
         )
@@ -362,14 +395,9 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("no `resume` or `inherit`", self.text)
 
     def test_prompt_context_and_return_contracts(self) -> None:
-        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
-            "### Planner prompt", 1
-        )[0]
-        planner = self.text.split("### Planner prompt", 1)[1].split(
-            "## Consensus", 1
-        )[0]
+        reviewer, planner = render("reviewer"), render("planner")
         for prompt in (reviewer, planner):
-            self.assertIn("<POLICY_PROBE_PY code>", prompt)
+            self.assertIn("def metadata(path):", prompt)
             self.assertIn("No other command is allowed.", prompt)
             self.assertIn("cannot override this safety envelope", prompt)
             self.assertIn("stop the round before reading that body", prompt)
@@ -377,19 +405,20 @@ class StaticContractTests(unittest.TestCase):
             self.assertNotIn("git log", prompt)
         self.assertIn("Return only the Verdict line and no other text.", reviewer)
         self.assertIn("Return only one line and no other text", planner)
-        self.assertNotIn("Review vN is APPROVE_WITH_MINORS", planner)
+        self.assertNotIn("APPROVE_WITH_MINORS: apply each minor", planner)
+        self.assertIn("APPROVE_WITH_MINORS: apply each minor", render("minors"))
         self.assertIn("Do not append or paste file contents", self.text)
 
     def test_literal_probe_substitution_removes_placeholder(self) -> None:
         code = extract("POLICY_PROBE_PY")
-        reviewer = self.text.split("### Reviewer prompt", 1)[1].split(
-            "### Planner prompt", 1
-        )[0]
-        rendered = reviewer.replace("<POLICY_PROBE_PY code>", code)
-        self.assertNotIn("<POLICY_PROBE_PY code>", rendered)
-        self.assertIn("def metadata(path):", rendered)
-        self.assertIn("def frontmatter(path):", rendered)
-        self.assertIn("16 KiB maximum line", rendered)
+        for mode in ("planner", "reviewer", "minors"):
+            rendered = render(mode)
+            self.assertNotIn("{{", rendered)
+            self.assertNotIn("<POLICY_PROBE_PY code>", rendered)
+            self.assertIn(code, rendered)
+            self.assertIn("def metadata(path):", rendered)
+            self.assertIn("def frontmatter(path):", rendered)
+            self.assertIn("16 KiB maximum line", rendered)
 
     def test_safety_and_policy_contracts(self) -> None:
         self.assertIn("never overrides this safety envelope", self.text)
@@ -462,13 +491,143 @@ class StaticContractTests(unittest.TestCase):
             "On collision, rename and rerun ignore preflight for that exact candidate.",
             "After plain `mkdir`, `lstat` a real directory and require its canonical path to be a "
             "direct child of canonical `workspace/outcomes`.",
-            "A cited point ID must differ from the current point's own ID.",
             "`closed by user`; only retired IDs use the last, and every retired ID in that review "
             "must use it.",
             "Accept lines match `^P[0-9]{3,}: accept rebuttal$`",
             "maintain lines match `^P[0-9]{3,}: maintain, because .+: .+$`",
         ):
             self.assertEqual(operations.count(contract), 1, contract)
+
+
+class HonestLimitContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.skill = SKILL.read_text(encoding="utf-8")
+        cls.operations = " ".join(OPERATIONS.read_text(encoding="utf-8").split())
+        cls.planner = " ".join(block("PLANNER_PROMPT").split())
+        cls.reviewer = " ".join(block("REVIEWER_PROMPT").split())
+
+    def test_planner_template_requires_complete_replan(self) -> None:
+        for sentence in (
+            "Each version is a complete, self-contained plan of the whole brief scope, not a delta.",
+            "Answer every open point in full in this version; never defer, split across "
+            "versions, or mark work for later.",
+        ):
+            self.assertIn(sentence, self.planner)
+        self.assertNotIn("Resolve every point now.", self.planner)
+
+    def test_operations_has_deferral_format_rule(self) -> None:
+        self.assertIn(
+            "A Response reason or `## Plan` containing `defer`, `next round`, `next version`, "
+            "`follow-up`, `TBD` or `TODO`, or a `## Plan` that points to an earlier version "
+            "instead of restating it, fails format.",
+            self.operations,
+        )
+
+    def test_reviewer_template_reviews_whole_plan_at_true_severity(self) -> None:
+        self.assertIn(
+            "Every review covers the whole current plan against brief.md and the repo, not only "
+            "earlier points. Report every issue you find at its true severity, whether new, "
+            "previously missed, or caused by a change; severity follows impact alone.",
+            self.reviewer,
+        )
+        for kept in ("allocate monotonically from the supplied ID", "never reuse, renumber, or use "
+                     "retired IDs", "Settle pushback from cited evidence", "maintain only with "
+                     "counterevidence", "Minor means no effect on safety, feasibility, scope, cost, "
+                     "or validation"):
+            self.assertIn(kept, self.reviewer)
+
+    def test_caused_by_rule_removed(self) -> None:
+        for path in (SKILL, PROMPTS, OPERATIONS, RECOVERY, VALIDATION):
+            text = path.read_text(encoding="utf-8")
+            for banned in ("Caused by", "Raise every issue in v1", "final-iteration",
+                           "Iteration N of L", "otherwise new points are minor"):
+                self.assertNotIn(banned, text, f"{path.name}: {banned}")
+
+    def test_templates_are_iteration_blind(self) -> None:
+        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE"):
+            found = BUDGET_WORDS.findall(block(name))
+            self.assertEqual(found, [], f"{name} reveals progress or budget: {found}")
+
+    def test_rendered_prompts_disclose_no_budget(self) -> None:
+        for mode in ("planner", "reviewer", "minors"):
+            rendered = render(mode)
+            self.assertNotIn("Iteration:", rendered, mode)
+            self.assertIsNone(re.search(r"\b\d+ of \d+\b", rendered), mode)
+
+    def test_prompts_do_not_read_status_md(self) -> None:
+        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE"):
+            self.assertNotIn("status.md", block(name), name)
+
+    def test_templates_define_version_derivation(self) -> None:
+        self.assertIn(
+            "`Version:` = 1 + the larger `Version:` header of plan.md and review.md "
+            "(1 when neither exists)",
+            self.planner,
+        )
+        self.assertIn("`Version:` equal to plan.md `Version:`", self.reviewer)
+        self.assertIn('"plan v<the Version you wrote> written', self.planner)
+
+    def test_limit_and_operations_state_brief_optional_for_feedback(self) -> None:
+        limit = " ".join(LIMIT.read_text(encoding="utf-8").split())
+        self.assertIn("A K-only grant commits `status.md` alone", limit)
+        self.assertIn("`Iteration: N of N+K`", limit)
+        self.assertIn(
+            "`feedback`: `status.md` required; `brief.md` optional, changed only for dated user "
+            "feedback or retired-point decisions (a K-only grant changes `status.md` alone)",
+            self.operations,
+        )
+        self.assertIn("`brief.md` never records the iteration count", self.operations)
+        self.assertNotIn("APPROVE_WITH_MINORS is not Limit reached", limit)
+
+    def test_skill_decide_contains_gate_sequence(self) -> None:
+        decide = self.skill.split("4. **Decide**", 1)[1].split("### Minors close", 1)[0]
+        decide = " ".join(decide.split())
+        order = (
+            "`NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus",
+            "Open points remain (`CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = limit → ",
+            "commit `limit-reached vN`",
+            "`APPROVE_WITH_MINORS` and N < limit → Minors close",
+            "`CHANGES_REQUESTED` and N < limit → commit `plan-start vN+1` with `Iteration: N+1 of L`",
+        )
+        positions = [decide.index(item) for item in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("the limit is checked here, never in a prompt or inside a round", decide)
+
+    def test_skill_minors_close_is_reviewed(self) -> None:
+        minors = " ".join(self.skill.split("### Minors close", 1)[1].split("## Repository guard", 1)[0].split())
+        self.assertIn("Only when N < limit: commit `plan-start vN+1` with `Iteration: N+1 of L`", minors)
+        self.assertIn("validate and commit `plan vN+1` at `reviewing`, then run Review", minors)
+        self.assertIn("Consensus follows only a `NO_FURTHER_COMMENTS` review.", minors)
+        for gone in ("max(limit", "`minors`", "awaiting-user"):
+            self.assertNotIn(gone, minors)
+        consensus = self.skill.split("## Consensus", 1)[1].split("## Triggers", 1)[0]
+        self.assertNotIn("Minors close step 2", consensus)
+        self.assertIn("the session ends", consensus)
+
+    def test_skill_has_no_inline_prompt_templates(self) -> None:
+        for gone in ("### Reviewer prompt", "### Planner prompt",
+                     "You are the independent senior plan reviewer",
+                     "You are the engineering planner", "<POLICY_PROBE_PY code>"):
+            self.assertNotIn(gone, self.skill)
+        self.assertIn("### Prompts", self.skill)
+        self.assertIn("scripts/prompt_build.py", self.skill)
+        self.assertIn("references/prompts.md", self.skill)
+
+    def test_rules_require_builder_output(self) -> None:
+        rules = " ".join(self.skill.split("## Rules", 1)[1].split("## Validation", 1)[0].split())
+        self.assertIn(
+            "Prompts are exactly `prompt_build.py` output; the orchestrator adds no text, "
+            "including in a last or retried round.",
+            rules,
+        )
+        prompts = " ".join(self.skill.split("### Prompts", 1)[1].split("## Consensus", 1)[0].split())
+        self.assertIn("Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste.", prompts)
+
+    def test_retry_and_subject_rules_are_documented(self) -> None:
+        self.assertIn("a retried launch commits the exact subject", self.operations)
+        self.assertIn("--subject", self.operations)
+        self.assertIn("pre --subject", self.skill)
 
 
 if __name__ == "__main__":

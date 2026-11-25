@@ -12,9 +12,9 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-MANIFEST_VERSION = 2
+MANIFEST_VERSION = 3
 
 
 class CheckError(RuntimeError):
@@ -113,7 +113,12 @@ def _branch(repo: Path) -> str:
     return result.stdout.decode().strip()
 
 
-def pre(repo_value: str, paths: list[str]) -> dict[str, Any]:
+def pre(repo_value: str, paths: list[str], subject: str | None = None) -> dict[str, Any]:
+    """Inspect the staged paths; with a subject, also validate the step it commits.
+
+    The CLI always passes a subject. The Python entry point accepts none only for low-level
+    staging checks that carry no task semantics.
+    """
     repo = Path(repo_value).resolve(strict=True)
     allowed = sorted({_normalize(repo, value) for value in paths})
     if not allowed:
@@ -137,11 +142,15 @@ def pre(repo_value: str, paths: list[str]) -> dict[str, Any]:
     if not expected_changed:
         raise CheckError("no allowed path differs from HEAD")
 
+    if subject is not None:
+        _validate_staged_step(repo, allowed, expected_changed, subject)
+
     unrelated = {key: value for key, value in entries.items() if key.split("\0", 1)[0] not in allowed}
     return {
         "version": MANIFEST_VERSION,
         "repo": str(repo),
         "pre_head": head,
+        "subject": subject,
         "branch": _branch(repo),
         "files": files,
         "expected_changed": expected_changed,
@@ -168,6 +177,13 @@ def post(manifest: dict[str, Any]) -> dict[str, Any]:
         branch = str(exc)
     if branch != manifest["branch"]:
         failures.append(f"branch changed from {manifest['branch']} to {branch}")
+    expected_subject = manifest.get("subject")
+    if expected_subject is not None:
+        actual_subject = _out(repo, "log", "-1", "--format=%s", head)
+        if actual_subject != expected_subject:
+            failures.append(
+                f"commit subject {actual_subject!r} differs from inspected {expected_subject!r}"
+            )
 
     changed_output = _git(
         repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", pre_head, head
@@ -366,66 +382,326 @@ def write_recovery_marker(repo: Path, status_value: str, commit: str, pre_head: 
     return line
 
 
-def history(repo_value: str, task_value: str) -> dict[str, Any]:
-    """Validate every commit touching a task folder from Git history alone."""
-    repo = Path(repo_value).resolve(strict=True)
-    task, slug = _task_relative(repo, task_value)
-    commits = _out(repo, "log", "--reverse", "--full-history", "--format=%H", "--", task).split()
-    failures: list[str] = []
-    state: str | None = None
-    previous_versions: dict[str, int] = {}
-    previous_step: str | None = None
-    previous_subject_version: int | None = None
-    review_verdict: str | None = None
-    closed_plan = 0
-    feedback_unblocks_plan = False
+SUBJECT_SUFFIX = re.compile(
+    r"^plan-review\(([a-z0-9-]+)\): (brief|feedback|plan-start|review-start|plan|review|"
+    r"minors|consensus|approved|limit-reached|stopped) v([0-9]+)\s.+$"
+)
+ITERATION = re.compile(r"([0-9]+) of ([0-9]+)")
+COUNTS = re.compile(r"[0-9]+/[0-9]+/[0-9]+")
+OUTCOME_CONSENSUS = re.compile(
+    r"consensus at iteration ([0-9]+) of ([0-9]+), open points ([0-9]+/[0-9]+/[0-9]+)"
+)
+OUTCOME_LIMIT = re.compile(
+    r"limit-reached at iteration ([0-9]+) of ([0-9]+), open points ([0-9]+/[0-9]+/[0-9]+)"
+)
+OUTCOME_STOPPED = re.compile(r"stopped at iteration ([0-9]+) of ([0-9]+) \((.+)\)")
+OPEN_VERDICTS = {"CHANGES_REQUESTED", "APPROVE_WITH_MINORS"}
+LEGACY_NOTE = "legacy status format: honest-limit checks not applied"
 
-    if not commits:
-        failures.append("no task commits found")
-    for index, commit in enumerate(commits):
+
+def _subject_failure(subject: str) -> str:
+    message = f"subject {subject!r} is not a plan-review step"
+    suffixed = SUBJECT_SUFFIX.match(subject)
+    if suffixed:
+        message += (
+            "; retries reuse the exact subject "
+            f"plan-review({suffixed.group(1)}): {suffixed.group(2)} v{suffixed.group(3)}"
+        )
+    return message
+
+
+class _Context:
+    """State carried from one task commit to the next."""
+
+    def __init__(self, strict: bool = False) -> None:
+        self.strict = strict
+        self.state: str | None = None
+        self.previous_versions: dict[str, int] = {}
+        self.previous_step: str | None = None
+        self.previous_subject_version: int | None = None
+        self.review_verdict: str | None = None
+        self.closed_plan = 0
+        self.feedback_unblocks_plan = False
+        self.format = "legacy"
+        self.limit: int | None = None
+        self.outcome: str | None = None
+        self.review: dict[str, Any] | None = None
+
+
+def _validate_step(
+    ctx: _Context,
+    task: str,
+    step: str,
+    version: int,
+    changed: set[str],
+    read: Callable[[str], str | None],
+    first: bool,
+) -> list[str]:
+    """Validate one task commit against the context and advance the context.
+
+    `changed` holds repo-relative paths changed by the commit; `read(name)` returns the text
+    of a task file as it is after the commit, or None when absent.
+    """
+    failures: list[str] = []
+    if first and (step != "brief" or version != 1):
+        failures.append(f"first task commit must be brief v1, got {step} v{version}")
+    if ctx.previous_subject_version is None:
+        expected_version = 1
+    elif step in {"plan-start", "plan", "minors"}:
+        latest_plan = ctx.previous_versions.get("plan.md", 0)
+        latest_review = ctx.previous_versions.get("review.md", 0)
+        ceiling = max(latest_review, ctx.closed_plan)
+        expected_version = latest_plan if latest_plan > ceiling else ceiling + 1
+    else:
+        expected_version = ctx.previous_subject_version
+    if version != expected_version:
+        failures.append(
+            f"{step} v{version} must be v{expected_version} after "
+            f"{ctx.previous_step or 'the start of history'}"
+        )
+
+    allowed = {f"{task}/{name}" for name in STEP_FILES.get(step, {"status.md"})}
+    required = {f"{task}/{name}" for name in STEP_REQUIRED.get(step, {"status.md"})}
+    if changed - allowed:
+        failures.append(f"{step} changed disallowed paths {sorted(changed - allowed)}")
+    if required - changed:
+        failures.append(f"{step} did not change required paths {sorted(required - changed)}")
+
+    status = read("status.md")
+    if status is None:
+        failures.append("status.md is missing")
+        ctx.state = None
+        return failures
+    if any(line.startswith(RECOVERY_PREFIX) for line in status.splitlines()):
+        failures.append("committed status.md contains a recovery marker")
+    if ctx.previous_subject_version is None and step == "brief":
+        ctx.format = "current" if _header(status, "Outcome") is not None else "legacy"
+        if ctx.strict and ctx.format == "legacy":
+            failures.append("brief v1 status.md must record an Outcome line")
+    new_state = _header(status, "State")
+    if new_state != STEP_STATE[step]:
+        failures.append(f"{step} must set State {STEP_STATE[step]}, got {new_state}")
+    if ctx.state not in STEP_PREVIOUS[step]:
+        failures.append(f"{step} is not allowed after State {ctx.state}")
+    iteration = ITERATION.fullmatch(_header(status, "Iteration") or "")
+    if not iteration or int(iteration.group(1)) != version:
+        failures.append(f"status.md Iteration does not match v{version}")
+    elif int(iteration.group(1)) > int(iteration.group(2)):
+        failures.append("Iteration exceeds its limit")
+
+    shown: dict[str, str] = {}
+    for name, steps in (("plan.md", {"plan", "minors"}), ("review.md", {"review"})):
+        if step in steps:
+            text = read(name) or ""
+            shown[name] = text
+            if _header(text, "Version") != str(version):
+                failures.append(f"{name} Version does not match v{version}")
+            ctx.previous_versions[name] = version
+    if step == "review":
+        ctx.review_verdict = _header(shown.get("review.md", ""), "Verdict")
+        ctx.feedback_unblocks_plan = False
+        if ctx.previous_versions.get("plan.md") != version:
+            failures.append(f"review v{version} has no committed plan v{version}")
+
+    if ctx.format == "current":
+        failures.extend(_current_checks(ctx, step, version, status, iteration))
+    else:
+        failures.extend(_legacy_checks(ctx, step, version))
+
+    outcome = _header(status, "Outcome")
+    if iteration and ctx.format == "current":
+        if step == "review":
+            ctx.review = {
+                "version": version,
+                "verdict": ctx.review_verdict,
+                "iteration": iteration.group(0),
+                "open": _header(status, "Open points"),
+            }
+        if step in {"brief", "feedback"}:
+            ctx.limit = int(iteration.group(2))
+    elif iteration and step == "brief":
+        ctx.limit = int(iteration.group(2))
+    ctx.outcome = outcome
+    ctx.state = new_state
+    ctx.previous_step = step
+    ctx.previous_subject_version = version
+    return failures
+
+
+def _legacy_checks(ctx: _Context, step: str, version: int) -> list[str]:
+    """Rules for task folders whose status files carry no Outcome line."""
+    failures: list[str] = []
+    if (
+        step == "feedback"
+        and ctx.review_verdict == "APPROVE_WITH_MINORS"
+        and ctx.closed_plan < ctx.previous_versions.get("review.md", 0)
+    ):
+        ctx.feedback_unblocks_plan = True
+    if step == "minors":
+        review_version = ctx.previous_versions.get("review.md")
+        if (
+            review_version is None
+            or ctx.review_verdict != "APPROVE_WITH_MINORS"
+            or review_version != version - 1
+        ):
+            got = "none" if review_version is None else f"v{review_version} {ctx.review_verdict}"
+            failures.append(
+                f"minors requires the latest committed review at version "
+                f"{version - 1} with Verdict APPROVE_WITH_MINORS, got {got}"
+            )
+        else:
+            ctx.closed_plan = version
+    if (
+        step in {"consensus", "limit-reached", "plan"}
+        and ctx.review_verdict == "APPROVE_WITH_MINORS"
+        and ctx.closed_plan < ctx.previous_versions.get("review.md", 0)
+        and not (step == "plan" and ctx.feedback_unblocks_plan)
+    ):
+        failures.append(f"{step} is rejected after Verdict APPROVE_WITH_MINORS until minors commits")
+    return failures
+
+
+def _current_checks(
+    ctx: _Context,
+    step: str,
+    version: int,
+    status: str,
+    iteration: re.Match[str] | None,
+) -> list[str]:
+    """Rules for task folders whose status files record an Outcome line."""
+    failures: list[str] = []
+    outcome = _header(status, "Outcome")
+    open_points = _header(status, "Open points")
+    if outcome is None:
+        failures.append(f"{step} status.md must record an Outcome line")
+    if step == "minors":
+        failures.append(
+            f"minors is not used in the current status format; Minors close commits plan "
+            f"v{version} and is reviewed"
+        )
+    if iteration is None:
+        return failures
+    count, limit = int(iteration.group(1)), int(iteration.group(2))
+    if ctx.limit is not None and limit != ctx.limit and step not in {"brief", "feedback"}:
+        failures.append(
+            f"{step} changed the limit from {ctx.limit} to {limit}; only feedback may change it"
+        )
+
+    review = ctx.review
+    if step in {"plan-start", "plan"} and review and version == review["version"] + 1:
+        if ctx.limit is not None and review["version"] >= ctx.limit:
+            failures.append(
+                f"{step} v{version} is rejected: review v{review['version']} reached the limit "
+                f"{ctx.limit}; only feedback with an explicit K continues"
+            )
+
+    if step in {"brief", "feedback", "plan-start", "plan", "review-start", "review"}:
+        if outcome is not None and outcome != "none":
+            failures.append(f"{step} must set Outcome none, got {outcome}")
+    elif step == "consensus":
+        expected = f"consensus at iteration {count} of {limit}, open points 0/0/0"
+        if not review or review["version"] != version or review["verdict"] != "NO_FURTHER_COMMENTS":
+            got = "none" if not review else f"v{review['version']} {review['verdict']}"
+            failures.append(
+                f"consensus requires the latest committed review at version {version} with "
+                f"Verdict NO_FURTHER_COMMENTS, got {got}"
+            )
+        if outcome != expected:
+            failures.append(f"consensus must set Outcome {expected!r}, got {outcome!r}")
+        if open_points != "0/0/0":
+            failures.append(f"consensus must record Open points 0/0/0, got {open_points}")
+    elif step == "limit-reached":
+        if not review or review["version"] != version or review["verdict"] not in OPEN_VERDICTS:
+            got = "none" if not review else f"v{review['version']} {review['verdict']}"
+            failures.append(
+                f"limit-reached requires the latest committed review at version {version} with "
+                f"open points (CHANGES_REQUESTED or APPROVE_WITH_MINORS), got {got}"
+            )
+        else:
+            review_limit = int(review["iteration"].split(" of ")[1])
+            if version != review_limit:
+                failures.append(
+                    f"limit-reached requires review v{version} at its limit, "
+                    f"got {review['iteration']}"
+                )
+            if iteration.group(0) != review["iteration"]:
+                failures.append(
+                    f"limit-reached Iteration {iteration.group(0)} must equal the review's "
+                    f"{review['iteration']}"
+                )
+            if open_points != review["open"]:
+                failures.append(
+                    f"limit-reached Open points {open_points} must equal the review's "
+                    f"{review['open']}"
+                )
+        if open_points is None or not COUNTS.fullmatch(open_points) or open_points == "0/0/0":
+            failures.append(f"limit-reached must keep nonzero Open points, got {open_points}")
+        expected = f"limit-reached at iteration {count} of {limit}, open points {open_points}"
+        if outcome != expected:
+            failures.append(f"limit-reached must set Outcome {expected!r}, got {outcome!r}")
+    elif step == "stopped":
+        reason = _header(status, "Stop reason")
+        match = OUTCOME_STOPPED.fullmatch(outcome or "")
+        if not match or (int(match.group(1)), int(match.group(2))) != (count, limit):
+            failures.append(
+                f"stopped must set Outcome 'stopped at iteration {count} of {limit} (<reason>)', "
+                f"got {outcome!r}"
+            )
+        elif reason in {None, "none"} or match.group(3) != reason:
+            failures.append(
+                f"stopped Outcome reason {match.group(3)!r} must equal Stop reason {reason!r}"
+            )
+    elif step == "approved":
+        if outcome != ctx.outcome or not OUTCOME_CONSENSUS.fullmatch(outcome or ""):
+            failures.append(
+                f"approved must keep the consensus Outcome {ctx.outcome!r}, got {outcome!r}"
+            )
+    return failures
+
+
+def _show_task_file(repo: Path, commit: str, task: str) -> Callable[[str], str | None]:
+    return lambda name: _show(repo, commit, f"{task}/{name}")
+
+
+def _replay(repo: Path, task: str, slug: str, strict: bool = False) -> tuple[_Context, list[str], list[str]]:
+    """Replay every commit that touched the task folder; return context, failures, commits."""
+    log = _git(
+        repo, "log", "--reverse", "--full-history", "--format=%H%x1f%P%x1f%s%x1e", "--", task
+    ).stdout.decode("utf-8", "replace")
+    entries = [record.strip("\n").split("\x1f", 2) for record in log.split("\x1e") if record.strip()]
+    commits = [entry[0] for entry in entries]
+    failures: list[str] = []
+    ctx = _Context(strict=strict)
+    for index, (commit, parent_text, subject) in enumerate(entries):
         short = commit[:12]
-        subject = _out(repo, "log", "-1", "--format=%s", commit)
         match = SUBJECT.match(subject)
         if not match:
-            failures.append(f"{short}: subject {subject!r} is not a plan-review step")
-            state = None
+            failures.append(f"{short}: {_subject_failure(subject)}")
+            ctx.state = None
             continue
         subject_slug, step, version_text = match.groups()
         version = int(version_text)
         if subject_slug != slug:
             failures.append(f"{short}: subject slug {subject_slug} does not match task slug {slug}")
-        if index == 0 and (step != "brief" or version != 1):
-            failures.append(f"{short}: first task commit must be brief v1, got {step} v{version}")
-        if previous_subject_version is None:
-            expected_version = 1
-        elif step in {"plan-start", "plan", "minors"}:
-            latest_plan = previous_versions.get("plan.md", 0)
-            latest_review = previous_versions.get("review.md", 0)
-            ceiling = max(latest_review, closed_plan)
-            expected_version = latest_plan if latest_plan > ceiling else ceiling + 1
-        else:
-            expected_version = previous_subject_version
-        if version != expected_version:
-            failures.append(
-                f"{short}: {step} v{version} must be v{expected_version} after "
-                f"{previous_step or 'the start of history'}"
-            )
 
-        parents = _out(repo, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+        parents = parent_text.split()
         if len(parents) != 1:
             failures.append(f"{short}: task commits must have exactly one parent, got {len(parents)}")
             continue
-        changed_output = _git(
-            repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", parents[0], commit
-        ).stdout.decode("utf-8", "surrogateescape")
-        changed = set(filter(None, changed_output.split("\0")))
-        allowed = {f"{task}/{name}" for name in STEP_FILES.get(step, {"status.md"})}
-        required = {f"{task}/{name}" for name in STEP_REQUIRED.get(step, {"status.md"})}
-        if changed - allowed:
-            failures.append(f"{short}: {step} changed disallowed paths {sorted(changed - allowed)}")
-        if required - changed:
-            failures.append(f"{short}: {step} did not change required paths {sorted(required - changed)}")
+        changed: set[str] = set()
+        if not strict:  # strict replay only carries context; its path failures are not reported
+            changed_output = _git(
+                repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", parents[0], commit
+            ).stdout.decode("utf-8", "surrogateescape")
+            changed = set(filter(None, changed_output.split("\0")))
 
+        for message in _validate_step(
+            ctx, task, step, version, changed, _show_task_file(repo, commit, task), index == 0
+        ):
+            failures.append(f"{short}: {message}")
+
+        if strict:
+            continue  # tree shape of earlier commits is reported by `history`, not re-checked here
         tree = _git(repo, "ls-tree", "-r", "-z", commit, "--", f"{task}/").stdout.decode(
             "utf-8", "surrogateescape"
         )
@@ -445,79 +721,56 @@ def history(repo_value: str, task_value: str) -> dict[str, Any]:
             failures.append(
                 f"{short}: persistent task files are missing {sorted(missing_persistent)}"
             )
+    return ctx, failures, commits
 
-        status = _show(repo, commit, f"{task}/status.md")
-        if status is None:
-            failures.append(f"{short}: status.md is missing")
-            state = None
-            continue
-        if any(line.startswith(RECOVERY_PREFIX) for line in status.splitlines()):
-            failures.append(f"{short}: committed status.md contains a recovery marker")
-        new_state = _header(status, "State")
-        if new_state != STEP_STATE[step]:
-            failures.append(f"{short}: {step} must set State {STEP_STATE[step]}, got {new_state}")
-        if state not in STEP_PREVIOUS[step]:
-            failures.append(f"{short}: {step} is not allowed after State {state}")
-        iteration = re.fullmatch(r"([0-9]+) of ([0-9]+)", _header(status, "Iteration") or "")
-        if not iteration or int(iteration.group(1)) != version:
-            failures.append(f"{short}: status.md Iteration does not match v{version}")
-        elif int(iteration.group(1)) > int(iteration.group(2)):
-            failures.append(f"{short}: Iteration exceeds its limit")
-        shown: dict[str, str] = {}
-        for name, steps in (("plan.md", {"plan", "minors"}), ("review.md", {"review"})):
-            if step in steps:
-                text = _show(repo, commit, f"{task}/{name}") or ""
-                shown[name] = text
-                if _header(text, "Version") != str(version):
-                    failures.append(f"{short}: {name} Version does not match v{version}")
-                previous_versions[name] = version
-        if step == "review":
-            review_verdict = _header(shown.get("review.md", ""), "Verdict")
-            feedback_unblocks_plan = False
-            if previous_versions.get("plan.md") != version:
-                failures.append(f"{short}: review v{version} has no committed plan v{version}")
-        if (
-            step == "feedback"
-            and review_verdict == "APPROVE_WITH_MINORS"
-            and closed_plan < previous_versions.get("review.md", 0)
-        ):
-            feedback_unblocks_plan = True
-        if step == "minors":
-            review_version = previous_versions.get("review.md")
-            if (
-                review_version is None
-                or review_verdict != "APPROVE_WITH_MINORS"
-                or review_version != version - 1
-            ):
-                got = "none" if review_version is None else f"v{review_version} {review_verdict}"
-                failures.append(
-                    f"{short}: minors requires the latest committed review at version "
-                    f"{version - 1} with Verdict APPROVE_WITH_MINORS, got {got}"
-                )
-            else:
-                closed_plan = version
-        if (
-            step in {"consensus", "limit-reached", "plan"}
-            and review_verdict == "APPROVE_WITH_MINORS"
-            and closed_plan < previous_versions.get("review.md", 0)
-            and not (step == "plan" and feedback_unblocks_plan)
-        ):
-            failures.append(
-                f"{short}: {step} is rejected after Verdict APPROVE_WITH_MINORS until minors commits"
-            )
-        state = new_state
-        previous_step = step
-        previous_subject_version = version
 
-    return {
+def history(repo_value: str, task_value: str) -> dict[str, Any]:
+    """Validate every commit touching a task folder from Git history alone."""
+    repo = Path(repo_value).resolve(strict=True)
+    task, slug = _task_relative(repo, task_value)
+    ctx, failures, commits = _replay(repo, task, slug)
+    if not commits:
+        failures.append("no task commits found")
+    result: dict[str, Any] = {
         "ok": not failures,
         "task": task,
         "commits": len(commits),
         "last_commit": commits[-1] if commits else None,
-        "last_state": state,
+        "last_state": ctx.state,
+        "format": ctx.format,
         "recovery": recovery_marker(repo, task),
         "failures": failures,
     }
+    if ctx.format == "legacy":
+        result["note"] = LEGACY_NOTE
+    return result
+
+
+def _validate_staged_step(
+    repo: Path, allowed: list[str], changed: list[str], subject: str
+) -> None:
+    """Reject a staged step that history would reject, before anything is committed."""
+    match = SUBJECT.match(subject)
+    if not match:
+        raise CheckError(_subject_failure(subject))
+    subject_slug, step, version_text = match.groups()
+    statuses = [path for path in allowed if path.endswith("/status.md")]
+    if len(statuses) != 1:
+        raise CheckError("--subject requires exactly one task status.md among the allowed paths")
+    task, slug = _task_relative(repo, statuses[0].rpartition("/")[0])
+    if subject_slug != slug:
+        raise CheckError(f"subject slug {subject_slug} does not match task slug {slug}")
+    ctx, _failures, commits = _replay(repo, task, slug, strict=True)
+
+    def read(name: str) -> str | None:
+        result = _git(repo, "show", f":{task}/{name}", check=False)
+        return result.stdout.decode("utf-8", "replace") if result.returncode == 0 else None
+
+    problems = _validate_step(
+        ctx, task, step, int(version_text), set(changed), read, first=not commits
+    )
+    if problems:
+        raise CheckError(f"staged {step} v{version_text} is invalid: " + "; ".join(problems))
 
 
 def _canonical_json(manifest: dict[str, Any]) -> bytes:
@@ -554,6 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     pre_parser = subparsers.add_parser("pre")
     pre_parser.add_argument("--repo", required=True)
     pre_parser.add_argument("--output", required=True)
+    pre_parser.add_argument("--subject", required=True)
     pre_parser.add_argument("paths", nargs="+")
 
     post_parser = subparsers.add_parser("post")
@@ -601,7 +855,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         if args.command == "pre":
-            print(write_manifest(pre(args.repo, args.paths), args.output))
+            print(write_manifest(pre(args.repo, args.paths, args.subject), args.output))
             return 0
         if args.command == "post":
             return _post_command(args)

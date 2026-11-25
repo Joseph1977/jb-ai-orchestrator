@@ -57,8 +57,8 @@ class CommitCheckTests(unittest.TestCase):
         hook.write_text(f"#!/bin/sh\nset -e\n{body}\n", encoding="utf-8")
         hook.chmod(0o755)
 
-    def commit(self, *paths: str) -> None:
-        self.git("commit", "-q", "--only", "-m", "plan-review(demo): step v1", "--", *paths)
+    def commit(self, *paths: str, subject: str = "plan-review(demo): step v1") -> None:
+        self.git("commit", "-q", "--only", "-m", subject, "--", *paths)
 
     def run_pre(self, *paths: str) -> dict:
         self.git("add", "--", *paths)
@@ -200,14 +200,16 @@ class CommitCheckTests(unittest.TestCase):
         script = Path(commit_check.__file__)
         manifest_path = Path(self.manifest_directory.name) / "commit-check.json"
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-        self.write(STATUS, "State: reviewing\n")
-        self.git("add", "--", STATUS)
+        subject = "plan-review(demo-run): brief v1"
+        self.write(STATUS, "Iteration: 1 of 4\nState: planning\nOutcome: none\n")
+        self.write(BRIEF, "brief v1\n")
+        self.git("add", "--", STATUS, BRIEF)
         digest = subprocess.run(
             ["python3", str(script), "pre", "--repo", str(self.repo),
-             "--output", str(manifest_path), STATUS],
+             "--output", str(manifest_path), "--subject", subject, STATUS, BRIEF],
             check=True, text=True, stdout=subprocess.PIPE, env=env,
         ).stdout.strip()
-        self.commit(STATUS)
+        self.commit(STATUS, BRIEF, subject=subject)
 
         def run_post(sha: str) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -228,8 +230,8 @@ class CommitCheckTests(unittest.TestCase):
         self.assertIn("Recovery: commit-check-failed", (self.repo / STATUS).read_text())
 
 
-class HistoryTests(unittest.TestCase):
-    """Resume-time validation of task commits from Git history alone."""
+class HistoryFixture(unittest.TestCase):
+    """Shared repository and step helpers for resume-time validation of task commits."""
 
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
@@ -290,18 +292,23 @@ class HistoryTests(unittest.TestCase):
             "status.md": self.status("awaiting-user", iteration, limit),
         })
 
-    def step(self, step: str, version: int, files: dict[str, str], run_post: bool = True):
+    def step(self, step: str, version: int, files: dict[str, str], run_post: bool = True,
+             valid: bool = True, subject: str | None = None):
+        """Commit one step through `pre`; `valid=False` builds a deliberately invalid commit."""
+        subject = subject or f"plan-review(demo-run): {step} v{version}"
         paths = []
         for name, text in files.items():
             (self.repo / TASK / name).write_text(text, encoding="utf-8")
             paths.append(f"{TASK}/{name}")
         self.git("add", "--", *paths)
         manifest = Path(self.manifest_directory.name) / f"{step}-{version}.json"
-        pre = self.cli("pre", "--repo", str(self.repo), "--output", str(manifest), *paths)
-        self.assertEqual(pre.returncode, 0, pre.stderr)
-        self.git("commit", "-q", "--only", "-m", f"plan-review(demo-run): {step} v{version}",
-                 "--", *paths)
-        if not run_post:
+        pre = None
+        if valid:
+            pre = self.cli("pre", "--repo", str(self.repo), "--output", str(manifest),
+                           "--subject", subject, *paths)
+            self.assertEqual(pre.returncode, 0, pre.stderr)
+        self.git("commit", "-q", "--only", "-m", subject, "--", *paths)
+        if not run_post or pre is None:
             return None
         return self.cli("post", "--repo", str(self.repo), "--baseline", str(manifest),
                         "--baseline-sha256", pre.stdout.strip(), "--status-file", STATUS)
@@ -310,7 +317,12 @@ class HistoryTests(unittest.TestCase):
         return commit_check.history(str(self.repo), TASK)
 
     def brief(self) -> None:
-        self.step("brief", 1, {"brief.md": "# Brief\n", "status.md": self.status("planning")})
+        # Legacy fixture (status without Outcome): `pre` refuses to start such a run, so commit it directly.
+        self.step("brief", 1, {"brief.md": "# Brief\n", "status.md": self.status("planning")},
+                  valid=False)
+
+class HistoryTests(HistoryFixture):
+    """Legacy status format (no Outcome line): the pre-existing rules still apply."""
 
     def test_valid_history_through_consensus_passes(self) -> None:
         self.brief()
@@ -365,7 +377,7 @@ class HistoryTests(unittest.TestCase):
     def test_interrupted_before_post_invalid_transition_is_detected(self) -> None:
         self.brief()
         self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
-                                "status.md": self.status("reviewed")}, run_post=False)
+                                "status.md": self.status("reviewed")}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -429,7 +441,7 @@ class HistoryTests(unittest.TestCase):
         self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
                                 "status.md": self.status("reviewed")})
         self.step("consensus", 99, {"status.md": self.status("awaiting-user", 99)},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -445,7 +457,7 @@ class HistoryTests(unittest.TestCase):
         self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
                                 "status.md": self.status("reviewed")})
         self.step("consensus", 1, {"status.md": self.status("awaiting-user", 2)},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -461,7 +473,7 @@ class HistoryTests(unittest.TestCase):
         self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
                                 "status.md": self.status("reviewed")})
         self.step("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
-                              "status.md": self.status("reviewing")}, run_post=False)
+                              "status.md": self.status("reviewing")}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -477,7 +489,7 @@ class HistoryTests(unittest.TestCase):
         self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
                                 "status.md": self.status("reviewed")})
         self.step("plan", 5, {"plan.md": "# Plan\nVersion: 5\n",
-                              "status.md": self.status("reviewing", 5)}, run_post=False)
+                              "status.md": self.status("reviewing", 5)}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -495,7 +507,7 @@ class HistoryTests(unittest.TestCase):
         self.step("limit-reached", 1, {"status.md": self.status("limit-reached")})
         self.step("stopped", 1, {"status.md": self.status("stopped")})
         self.step("plan-start", 1, {"status.md": self.status("planner-running")},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -560,7 +572,7 @@ class HistoryTests(unittest.TestCase):
                               "status.md": self.status("reviewing")
                               + f"Recovery: commit-check-failed commit={digest} "
                               + f"pre-head={digest}\n"},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -708,7 +720,7 @@ class HistoryTests(unittest.TestCase):
     def test_minors_rejected_with_no_review(self) -> None:
         self.brief()
         self.step("minors", 1, {"plan.md": "# Plan\nVersion: 1\n",
-                                "status.md": self.status("awaiting-user")}, run_post=False)
+                                "status.md": self.status("awaiting-user")}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -718,7 +730,7 @@ class HistoryTests(unittest.TestCase):
     def test_minors_rejected_after_changes_requested(self) -> None:
         self.through_review("CHANGES_REQUESTED")
         self.step("minors", 2, {"plan.md": "# Plan\nVersion: 2\n",
-                                "status.md": self.status("awaiting-user", 2)}, run_post=False)
+                                "status.md": self.status("awaiting-user", 2)}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -728,7 +740,7 @@ class HistoryTests(unittest.TestCase):
     def test_minors_rejected_with_wrong_version(self) -> None:
         self.through_review("APPROVE_WITH_MINORS")
         self.step("minors", 3, {"plan.md": "# Plan\nVersion: 3\n",
-                                "status.md": self.status("awaiting-user", 3)}, run_post=False)
+                                "status.md": self.status("awaiting-user", 3)}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -738,7 +750,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_consensus_rejected_after_approve_with_minors(self) -> None:
         self.through_review("APPROVE_WITH_MINORS")
-        self.step("consensus", 1, {"status.md": self.status("awaiting-user")}, run_post=False)
+        self.step("consensus", 1, {"status.md": self.status("awaiting-user")}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -749,7 +761,7 @@ class HistoryTests(unittest.TestCase):
     def test_limit_reached_rejected_after_approve_with_minors(self) -> None:
         self.through_review("APPROVE_WITH_MINORS")
         self.step("limit-reached", 1, {"status.md": self.status("limit-reached")},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -760,7 +772,7 @@ class HistoryTests(unittest.TestCase):
     def test_plan_rejected_after_approve_with_minors(self) -> None:
         self.through_review("APPROVE_WITH_MINORS")
         self.step("plan", 2, {"plan.md": "# Plan\nVersion: 2\n",
-                              "status.md": self.status("reviewing", 2)}, run_post=False)
+                              "status.md": self.status("reviewing", 2)}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -786,7 +798,7 @@ class HistoryTests(unittest.TestCase):
         self.step("feedback", 2, {"brief.md": "# Brief\n\nFeedback.\n",
                                   "status.md": self.status("planning", 2)})
         self.step("plan", 2, {"plan.md": "# Plan\nVersion: 2\n",
-                              "status.md": self.status("reviewing", 2)}, run_post=False)
+                              "status.md": self.status("reviewing", 2)}, run_post=False, valid=False)
 
         result = self.history()
 
@@ -823,7 +835,7 @@ class HistoryTests(unittest.TestCase):
         self.step("feedback", 2, {"brief.md": "# Brief\n\nFeedback.\n",
                                   "status.md": self.status("planning", 2)})
         self.step("consensus", 2, {"status.md": self.status("awaiting-user", 2)},
-                  run_post=False)
+                  run_post=False, valid=False)
 
         result = self.history()
 
@@ -854,7 +866,7 @@ class HistoryTests(unittest.TestCase):
             "status.md": self.status("reviewed", 3),
         })
         self.step("plan", 4, {"plan.md": "# Plan\nVersion: 4\n",
-                              "status.md": self.status("reviewing", 4)}, run_post=False)
+                              "status.md": self.status("reviewing", 4)}, run_post=False, valid=False)
 
         result = self.history()
         rejections = [
@@ -873,6 +885,381 @@ class HistoryTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], json.dumps(result, indent=2))
         self.assertEqual(result["last_state"], "approved")
+
+
+class CurrentFormatTests(HistoryFixture):
+    """Status files with an Outcome line: honest-limit rules."""
+
+    @staticmethod
+    def cstatus(state: str, iteration: int = 1, limit: int = 4, outcome: str = "none",
+                open_points: str = "0/0/0", stop_reason: str = "none", attempt: int = 1) -> str:
+        return (
+            f"# Status — demo\nIteration: {iteration} of {limit}\nState: {state}\n"
+            f"Outcome: {outcome}\nOpen points: {open_points}\nStop reason: {stop_reason}\n"
+            f"Next action: attempt {attempt}\n"
+        )
+
+    def cbrief(self, limit: int = 4) -> None:
+        self.step("brief", 1, {"brief.md": "# Brief\n",
+                               "status.md": self.cstatus("planning", 1, limit)})
+
+    def round_(self, n: int, verdict: str, limit: int, open_points: str = "0/0/0") -> None:
+        self.step("plan-start", n, {"status.md": self.cstatus("planner-running", n, limit)})
+        self.step("plan", n, {"plan.md": f"# Plan\nVersion: {n}\n",
+                              "status.md": self.cstatus("reviewing", n, limit)})
+        self.step("review-start", n, {"status.md": self.cstatus("reviewer-running", n, limit)})
+        self.step("review", n, {
+            "review.md": f"# Review\nVersion: {n}\nVerdict: {verdict}\n",
+            "status.md": self.cstatus("reviewed", n, limit, open_points=open_points),
+        })
+
+    def limit_reached(self, n: int, open_points: str, **overrides: str) -> None:
+        outcome = f"limit-reached at iteration {n} of {n}, open points {open_points}"
+        self.step("limit-reached", n, {"status.md": self.cstatus(
+            "limit-reached", n, n, outcome=overrides.get("outcome", outcome),
+            open_points=overrides.get("open_points", open_points))},
+            **{key: value for key, value in overrides.items() if key == "valid"})
+
+    def consensus(self, n: int, limit: int, **kwargs) -> None:
+        outcome = kwargs.pop("outcome", f"consensus at iteration {n} of {limit}, open points 0/0/0")
+        self.step("consensus", n, {"status.md": self.cstatus(
+            "awaiting-user", n, limit, outcome=outcome)}, **kwargs)
+
+    def assert_pre_rejects(self, step: str, version: int, files: dict[str, str],
+                           pattern: str, subject: str | None = None) -> None:
+        paths = []
+        for name, text in files.items():
+            (self.repo / TASK / name).write_text(text, encoding="utf-8")
+            paths.append(f"{TASK}/{name}")
+        self.git("add", "--", *paths)
+        subject = subject or f"plan-review(demo-run): {step} v{version}"
+        with self.assertRaisesRegex(commit_check.CheckError, pattern):
+            commit_check.pre(str(self.repo), paths, subject)
+
+    def failures(self) -> str:
+        result = self.history()
+        self.assertEqual(result["format"], "current")
+        return "\n".join(result["failures"])
+
+    def test_current_format_full_flow_passes(self) -> None:
+        self.cbrief()
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0")
+        self.round_(2, "NO_FURTHER_COMMENTS", 4)
+        self.consensus(2, 4)
+        self.step("approved", 2, {"status.md": self.cstatus(
+            "approved", 2, 4, outcome="consensus at iteration 2 of 4, open points 0/0/0")})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual((result["format"], result["last_state"]), ("current", "approved"))
+        self.assertNotIn("note", result)
+
+    def test_limit_reached_requires_review_at_limit(self) -> None:
+        self.cbrief()
+        self.round_(1, "CHANGES_REQUESTED", 4, "0/1/0")
+        self.assert_pre_rejects("limit-reached", 1, {"status.md": self.cstatus(
+            "limit-reached", 1, 4, outcome="limit-reached at iteration 1 of 4, open points 0/1/0",
+            open_points="0/1/0")}, "requires review v1 at its limit")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.limit_reached(1, "0/1/0", valid=False)
+        self.assertIn("requires review v1 at its limit", self.failures())
+
+    def test_limit_reached_after_minors_verdict_at_limit_passes(self) -> None:
+        self.cbrief(2)
+        self.round_(1, "CHANGES_REQUESTED", 2, "0/1/0")
+        self.round_(2, "APPROVE_WITH_MINORS", 2, "0/0/1")
+        self.limit_reached(2, "0/0/1")
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["last_state"], "limit-reached")
+
+    def test_minors_subject_rejected_current_format(self) -> None:
+        self.cbrief()
+        self.round_(1, "APPROVE_WITH_MINORS", 4, "0/0/1")
+        files = {"plan.md": "# Plan\nVersion: 2\n",
+                 "status.md": self.cstatus("awaiting-user", 2, 4)}
+        self.assert_pre_rejects("minors", 2, files, "Minors close commits plan v2 and is reviewed")
+        self.git("reset", "-q")
+        self.step("minors", 2, files, valid=False)
+        self.assertIn("Minors close commits plan v2 and is reviewed", self.failures())
+
+    def test_plan_start_after_awm_below_limit_passes(self) -> None:
+        self.cbrief()
+        self.round_(1, "APPROVE_WITH_MINORS", 4, "0/0/1")
+        self.round_(2, "NO_FURTHER_COMMENTS", 4)
+        self.consensus(2, 4)
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["last_state"], "awaiting-user")
+
+    def test_plan_start_after_review_at_limit_rejected_without_feedback(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 2, 1)}, "Iteration exceeds its limit")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 2, 2)}, "reached the limit 1")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.step("plan-start", 2, {"status.md": self.cstatus("planner-running", 2, 2)},
+                  valid=False)
+        failures = self.failures()
+        self.assertIn("reached the limit 1", failures)
+        self.assertIn("only feedback may change it", failures)
+
+    def test_feedback_with_k_continues_past_limit_passes(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.limit_reached(1, "0/1/0")
+        self.step("feedback", 1, {"status.md": self.cstatus("planning", 1, 3, open_points="0/1/0")})
+        self.round_(2, "NO_FURTHER_COMMENTS", 3)
+        self.consensus(2, 3)
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["last_state"], "awaiting-user")
+
+    def test_feedback_k_only_status_change_passes(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.limit_reached(1, "0/1/0")
+        brief_before = self.git("rev-parse", f"HEAD:{BRIEF}")
+        files = {"status.md": self.cstatus("planning", 1, 2, open_points="0/1/0")}
+        (self.repo / STATUS).write_text(files["status.md"], encoding="utf-8")
+        self.git("add", "--", STATUS)
+
+        manifest = commit_check.pre(str(self.repo), [STATUS, BRIEF],
+                                    "plan-review(demo-run): feedback v1")
+        self.assertEqual(manifest["expected_changed"], [STATUS])
+        self.git("reset", "-q", "--", STATUS)
+        self.step("feedback", 1, files)
+
+        changed = self.git("show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(changed, [STATUS])
+        self.assertEqual(self.git("rev-parse", f"HEAD:{BRIEF}"), brief_before)
+        result = self.history()
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+
+    def test_consensus_requires_no_further_comments(self) -> None:
+        self.cbrief()
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0")
+        self.consensus(1, 4, valid=False, run_post=False)
+
+        self.assertIn("Verdict NO_FURTHER_COMMENTS", self.failures())
+
+    def test_consensus_after_awm_without_new_review_rejected(self) -> None:
+        self.cbrief()
+        self.round_(1, "APPROVE_WITH_MINORS", 4, "0/0/1")
+        self.assert_pre_rejects("consensus", 1, {"status.md": self.cstatus(
+            "awaiting-user", 1, 4, outcome="consensus at iteration 1 of 4, open points 0/0/0")},
+            "Verdict NO_FURTHER_COMMENTS")
+
+    def test_limit_change_outside_feedback_rejected(self) -> None:
+        self.cbrief()
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0")
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 2, 5)}, "only feedback may change it")
+
+    def test_limit_reached_preserves_open_points(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.assert_pre_rejects("limit-reached", 1, {"status.md": self.cstatus(
+            "limit-reached", 1, 1, open_points="0/2/0",
+            outcome="limit-reached at iteration 1 of 1, open points 0/2/0")},
+            "Open points 0/2/0 must equal the review's 0/1/0")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.assert_pre_rejects("limit-reached", 1, {"status.md": self.cstatus(
+            "limit-reached", 1, 1, open_points="0/0/0",
+            outcome="limit-reached at iteration 1 of 1, open points 0/0/0")},
+            "nonzero Open points")
+
+    def test_outcome_required_on_terminal_commits(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.assert_pre_rejects("limit-reached", 1, {"status.md": self.cstatus(
+            "limit-reached", 1, 1, open_points="0/1/0")}, "limit-reached must set Outcome")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.limit_reached(1, "0/1/0")
+        self.step("stopped", 1, {"status.md": self.cstatus("stopped", 1, 1, stop_reason="user")},
+                  valid=False)
+        self.assertIn("stopped must set Outcome", self.failures())
+
+    def test_stopped_outcome_matches_reason(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.limit_reached(1, "0/1/0")
+        self.step("stopped", 1, {"status.md": self.cstatus(
+            "stopped", 1, 1, outcome="stopped at iteration 1 of 1 (user)", stop_reason="user")})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+
+    def test_approved_must_keep_consensus_outcome(self) -> None:
+        self.cbrief()
+        self.round_(1, "NO_FURTHER_COMMENTS", 4)
+        self.consensus(1, 4)
+        self.assert_pre_rejects("approved", 1, {"status.md": self.cstatus("approved", 1, 4)},
+                                "approved must keep the consensus Outcome")
+
+    def test_outcome_matches_iteration_and_open_points(self) -> None:
+        self.cbrief()
+        self.round_(1, "NO_FURTHER_COMMENTS", 4)
+        self.assert_pre_rejects("consensus", 1, {"status.md": self.cstatus(
+            "awaiting-user", 1, 4,
+            outcome="consensus at iteration 2 of 4, open points 0/0/0")}, "consensus must set Outcome")
+
+    def test_consensus_outcome_nonzero_counts_rejected(self) -> None:
+        self.cbrief()
+        self.round_(1, "NO_FURTHER_COMMENTS", 4)
+        self.assert_pre_rejects("consensus", 1, {"status.md": self.cstatus(
+            "awaiting-user", 1, 4,
+            outcome="consensus at iteration 1 of 4, open points 0/1/0")}, "consensus must set Outcome")
+
+    def test_early_consensus_at_iteration_one_of_six_passes(self) -> None:
+        self.cbrief(6)
+        self.round_(1, "NO_FURTHER_COMMENTS", 6)
+        self.consensus(1, 6)
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertIn("consensus at iteration 1 of 6, open points 0/0/0",
+                      self.git("show", f"HEAD:{STATUS}"))
+
+    def test_limit_reached_outcome_four_of_four(self) -> None:
+        self.cbrief(4)
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0")
+        self.round_(2, "CHANGES_REQUESTED", 4, "0/1/0")
+        self.round_(3, "CHANGES_REQUESTED", 4, "0/1/0")
+        self.round_(4, "CHANGES_REQUESTED", 4, "0/1/0")
+        self.limit_reached(4, "0/1/0")
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertIn("limit-reached at iteration 4 of 4, open points 0/1/0",
+                      self.git("show", f"HEAD:{STATUS}"))
+
+    def test_retry_subject_suffix_rejected_with_hint(self) -> None:
+        self.cbrief()
+        hint = r"retries reuse the exact subject plan-review\(demo-run\): plan-start v1"
+        self.assert_pre_rejects("plan-start", 1, {"status.md": self.cstatus("planner-running")},
+                                hint, subject="plan-review(demo-run): plan-start v1 retry")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.step("plan-start", 1, {"status.md": self.cstatus("planner-running")}, valid=False,
+                  subject="plan-review(demo-run): plan-start v1 retry")
+        self.assertRegex("\n".join(self.history()["failures"]), hint)
+
+    def test_plan_start_retry_after_planner_running_passes(self) -> None:
+        self.cbrief()
+        self.step("plan-start", 1, {"status.md": self.cstatus("planner-running", attempt=1)})
+        self.step("plan-start", 1, {"status.md": self.cstatus("planner-running", attempt=2)})
+        self.step("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
+                              "status.md": self.cstatus("reviewing")})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+
+    def test_review_start_retry_after_reviewer_running_passes(self) -> None:
+        self.cbrief()
+        self.step("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
+                              "status.md": self.cstatus("reviewing")})
+        self.step("review-start", 1, {"status.md": self.cstatus("reviewer-running", attempt=1)})
+        self.step("review-start", 1, {"status.md": self.cstatus("reviewer-running", attempt=2)})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+
+    def test_pre_rejects_wrong_state_before_commit(self) -> None:
+        self.cbrief()
+        self.step("plan-start", 1, {"status.md": self.cstatus("planner-running")})
+        self.assert_pre_rejects("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
+                                            "status.md": self.cstatus("planner-running", attempt=2)},
+                                "plan must set State reviewing, got planner-running")
+
+    def test_pre_rejects_iteration_mismatch(self) -> None:
+        self.cbrief()
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0")
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 1, 4)}, "Iteration does not match v2")
+
+    def test_pre_rejects_new_brief_without_outcome(self) -> None:
+        self.assert_pre_rejects("brief", 1, {"brief.md": "# Brief\n",
+                                             "status.md": self.status("planning")},
+                                "must record an Outcome line")
+
+    def test_pre_requires_subject_on_the_command_line(self) -> None:
+        self.cbrief()
+        manifest = Path(self.manifest_directory.name) / "no-subject.json"
+        (self.repo / STATUS).write_text(self.cstatus("planner-running"), encoding="utf-8")
+        self.git("add", "--", STATUS)
+        result = self.cli("pre", "--repo", str(self.repo), "--output", str(manifest), STATUS)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--subject", result.stderr)
+
+    def test_post_rejects_subject_mismatch(self) -> None:
+        self.cbrief()
+        (self.repo / STATUS).write_text(self.cstatus("planner-running"), encoding="utf-8")
+        self.git("add", "--", STATUS)
+        manifest = commit_check.pre(str(self.repo), [STATUS], "plan-review(demo-run): plan-start v1")
+        self.git("commit", "-q", "--only", "-m", "plan-review(demo-run): plan-start v1 retry",
+                 "--", STATUS)
+
+        result = commit_check.post(manifest)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("commit subject" in item for item in result["failures"]))
+
+    def test_manifest_v2_rejected(self) -> None:
+        path = Path(self.manifest_directory.name) / "old.json"
+        data = json.dumps({"version": 2}, sort_keys=True, separators=(",", ":")) + "\n"
+        path.write_text(data, encoding="utf-8")
+        digest = commit_check._sha256_bytes(data.encode("utf-8"))
+
+        with self.assertRaisesRegex(commit_check.CheckError, "unsupported manifest version"):
+            commit_check.load_manifest(str(path), digest)
+
+    def test_legacy_status_format_uses_existing_rules(self) -> None:
+        self.brief()
+        self.step("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
+                              "status.md": self.status("reviewing")})
+        self.step("review-start", 1, {"status.md": self.status("reviewer-running")})
+        self.step("review", 1, {"review.md": "# Review\nVersion: 1\n",
+                                "status.md": self.status("reviewed")})
+        self.step("consensus", 1, {"status.md": self.status("awaiting-user")})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["format"], "legacy")
+        self.assertEqual(result["note"],
+                         "legacy status format: honest-limit checks not applied")
+        cli = json.loads(self.cli("history", "--repo", str(self.repo), "--task", TASK).stdout)
+        self.assertEqual(cli["format"], "legacy")
+
+    def test_legacy_status_format_keeps_minors_and_limit_cases(self) -> None:
+        self.through_review("APPROVE_WITH_MINORS", limit=1)
+        self.minors(iteration=2, limit=2)
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["format"], "legacy")
 
 
 if __name__ == "__main__":

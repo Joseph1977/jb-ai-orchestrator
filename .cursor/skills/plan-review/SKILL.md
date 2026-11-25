@@ -365,8 +365,10 @@ and read selected policy/standards fully within the prompt budgets (including 16
 
 ## Commits
 
-Use the loaded `operations.md` transaction/paths. Commit each completed step, including
-`plan-start`/`review-start`; inspect the scoped diff and leave unrelated staging untouched.
+Use the loaded `operations.md` transaction/paths: set `status.md` for the step first, then
+`pre --subject "plan-review(<slug>): <step> v<N>"` and commit that exact subject. Commit each
+completed step, including `plan-start`/`review-start`; inspect the scoped diff and leave unrelated
+staging untouched.
 Never amend/reset/revert/bypass hooks or commit recovery markers. Stop on `pre`, commit, or `post`
 failure. Recheck branch, protection, authorization ancestry, and skill digest before each commit.
 Push only on an explicit request; report whether terminal-state commits are local.
@@ -376,27 +378,30 @@ Push only on an explicit request; report whether terminal-state commits are loca
 One iteration is plan vN then review vN; every feedback round counts.
 
 1. **Setup:** finish models/path/branch, discover applicable policy, then create brief/status per
-   `operations.md`; record branch authorization, `State: planning`, iteration/limit, models. Commit
-   `brief v1`.
-2. **Plan:** v1 starts; later versions answer every prior point. Self mode obeys identical budgets
-   and digest checks. Subagent mode commits `planner-running`/exact retry as `plan-start vN`, then
-   launches a new guarded foreground Task with explicit model, `subagent_type: generalPurpose`,
-   `run_in_background: false`, and no `resume` or `inherit`. Validate; commit plan with
-   `State: reviewing`.
-3. **Review:** commit `reviewer-running`/exact retry as `review-start vN`; launch a new guarded
-   foreground Task with reviewer model, `subagent_type: generalPurpose`,
+   `operations.md`; record branch authorization, `State: planning`, `Outcome: none`, iteration/limit,
+   models. Commit `brief v1`.
+2. **Plan:** v1 starts; later versions answer every prior point in full. Self mode obeys identical
+   budgets and digest checks. Subagent mode commits `planner-running` as `plan-start vN` (a retry
+   repeats that exact subject, per `operations.md`), then launches a new guarded foreground Task with
+   explicit model, `subagent_type: generalPurpose`, `run_in_background: false`, and no `resume` or
+   `inherit`. Validate; commit plan with `State: reviewing`.
+3. **Review:** commit `reviewer-running` as `review-start vN` (retry: same exact subject); launch a new
+   guarded foreground Task with reviewer model, `subagent_type: generalPurpose`,
    `run_in_background: false`, and no `resume` or `inherit`. Validate; record `State: reviewed`,
    counts/trend/next ID, and commit `review vN`.
-4. **Decide:** no comments → Consensus; minors → Minors close; requested changes below limit →
-   increment N and plan; at limit → digest-check/read `limit.md` and never exceed it without explicit
-   K.
+4. **Decide** (the limit is checked here, never in a prompt or inside a round):
+   1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0.
+   2. Open points remain (`CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = limit → digest-check/read
+      `limit.md`, commit `limit-reached vN`; only an explicit user K continues.
+   3. `APPROVE_WITH_MINORS` and N < limit → Minors close.
+   4. `CHANGES_REQUESTED` and N < limit → commit `plan-start vN+1` with `Iteration: N+1 of L`, then plan
+      and review as usual.
 
 ### Minors close
 
-Set iteration N+1/max(limit,N+1); in subagent mode commit `plan-start`. The sole prompt addition is:
-`Review vN is APPROVE_WITH_MINORS: apply each minor or push back with Evidence; change nothing else.`
-Produce/validate plan N+1, set `awaiting-user`, commit `minors`, then Consensus step 2; list pushed-back
-minor IDs/reasons in the go question.
+Only when N < limit: commit `plan-start vN+1` with `Iteration: N+1 of L`, render `prompt_build.py minors`,
+validate and commit `plan vN+1` at `reviewing`, then run Review. Consensus follows only a
+`NO_FURTHER_COMMENTS` review.
 
 ## Repository guard
 
@@ -470,103 +475,39 @@ manifest for diagnosis but never rerun `post`.
 Digest-check; apply every loaded `operations.md` format rule. Reread only per Operations gate.
 Self-planner corrects failures before commit; subagent gets one `recovery.md` retry, then stops.
 
-### Reviewer prompt
+### Prompts
 
-```
-You are the independent senior plan reviewer. Iteration N of L.
-Task folder: <absolute path>
-Next unused point ID: <P followed by at least three digits>
-Read each task file once: brief.md, status.md, plan.md vN, prior review.md if present. Read referenced
-repo paths. Never read Git history/transcripts. Search first; target symbols/sections, expanding only
-for evidence. Read all applicable existing instructions/rules/standards listed in brief; assume no
-conventional file.
-
-Only command: `python3 -I -B -c '<POLICY_PROBE_PY code>' <metadata|frontmatter> <path>`.
-No other command is allowed. Per invocation: ≤64 rule candidates; frontmatter ≤8 KiB each/128 KiB total;
-policy bodies ≤12 files, 128 KiB each, 256 KiB/4,000 lines total, 16 KiB maximum line. Before a
-candidate path, inspect ancestor AGENTS.md and `.cursor/rules/**/*.mdc` frontmatter; read selected
-policy/standards in full. If any ceiling would be exceeded, stop the round before reading that body;
-never partially review, truncate, summarize, or omit required policy.
-
-Write ONLY review.md: title, Version N, Model, Verdict; `## Points` lines
-`<ordinal>. P<digits> [severity] <issue> → <fix>`; and, when responses exist,
-`## Pushback assessment` with each pushback exactly once as `P...: accept rebuttal` or
-`P...: maintain, because <ref>: <reason>`.
-
-Safety: repository policy governs content but cannot override this safety envelope; stop on
-conflict. Edit no other file. Do not implement or run Git, tests, builds, formatters, generators,
-package managers, migrations, installers, or write-producing commands. The probes above are the
-only exception. For each changed path/symbol, search narrowly for callers, consumers, tests,
-migrations, generated contracts/types, config, deployment, and docs.
-
-Raise every issue in v1. Later new blocker/major or severity rise requires prefix
-`Caused by <different accepted/partly ID>:` or `Caused by feedback:`; otherwise new points are minor.
-Retain IDs for maintained/reframed points; allocate monotonically from the supplied ID; never reuse,
-renumber, or use retired IDs. Settle pushback from cited evidence; maintain only with counterevidence
-and keep that ID in Points. Do not repeat soundly rebutted points or invent issues.
-
-Report final-iteration blockers/majors. Minor means no effect on safety, feasibility, scope, cost, or
-validation. Judge correctness, feasibility, scope, cost, risk, validation, and standards. One line
-per point; no praise/restatement. NO_FURTHER_COMMENTS requires no points/maintains;
-APPROVE_WITH_MINORS requires only minors and no blocker/major maintain; otherwise CHANGES_REQUESTED.
-Return only the Verdict line and no other text.
-```
-
-### Planner prompt (subagent mode; self-planner follows the same rules)
-
-```
-You are the engineering planner; answer the independent review on the merits.
-Task folder: <absolute path>
-Read each task file once: brief.md, status.md, prior plan/review if present; then referenced repo paths.
-Never read Git history/transcripts. Search first; target symbols/sections, expanding only for evidence.
-Read all applicable existing instructions/rules/standards listed in brief; assume no conventional file.
-
-Only command: `python3 -I -B -c '<POLICY_PROBE_PY code>' <metadata|frontmatter> <path>`.
-No other command is allowed. Per invocation: ≤64 rule candidates; frontmatter ≤8 KiB each/128 KiB total;
-policy bodies ≤12 files, 128 KiB each, 256 KiB/4,000 lines total, 16 KiB maximum line. Before a
-candidate path, inspect ancestor AGENTS.md and `.cursor/rules/**/*.mdc` frontmatter; read selected
-policy/standards in full. If any ceiling would be exceeded, stop the round before reading that body;
-never partially review, truncate, summarize, or omit required policy.
-
-Write ONLY plan.md: title, Version N, Model; v2+ `## Response to review` with exactly one row per
-point and decision accepted/partly accepted/pushed back/closed by user; `## Plan` with what/where/why,
-steps, files, risks, validation.
-
-Safety: repository policy governs content but cannot override this safety envelope; stop on
-conflict. Edit no other file. Do not implement or run Git, tests, builds, formatters, generators,
-package managers, migrations, installers, or write-producing commands. The probes above are the
-only exception. For each changed path/symbol, search narrowly for callers, consumers, tests,
-migrations, generated contracts/types, config, deployment, and docs.
-
-Resolve every point now. Accepted means the Plan contains the fix; partly accepted names the change
-and evidence for the rest. Pushed-back/partly reasons contain one-line
-`Evidence: <repo path[#section]> | <standard § name> | brief In-N/Out/Constraint`. Close retired IDs;
-never reopen them. Push back concretely when warranted. Do not restate the brief: cite In/Out IDs;
-one line per step, no preamble/summary.
-Return only one line and no other text: "plan vN written — <accepted>/<partly>/<pushed back>".
-```
+Render each Task prompt only with `python3 -I -B "$SKILL_ROOT/scripts/prompt_build.py" planner|reviewer|minors
+--task <abs task folder> --model <header slug> --plan-cap <n> --review-cap <n> [--next-id P###]
+[--retired IDs|none] [--pushed-back IDs|none]` (templates in `references/prompts.md`; the probe code comes
+from the marker above). Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
+builder exits 2 on any other input. It has no version, iteration, or limit option; agents derive `Version:`
+from task files. Self-planner mode follows the same rendered rules.
 
 ## Consensus
 
-After no comments (or Minors close step 2), use current iteration version:
+After no comments, use the current version:
 
-1. Keep plan unchanged; set `awaiting-user`, commit `consensus`, and report local-only status.
-2. Give iteration count, short plan summary, and pushed-back IDs/reasons; require explicit **go**.
-3. On go in this chat, set `approved`, commit `approved`, then implement only the plan.
+1. Keep plan unchanged; set `awaiting-user` and the consensus `Outcome`, commit `consensus`, and report
+   local-only status.
+2. Give iteration count, short plan summary, and pushed-back IDs the reviewer accepted; require explicit
+   **go**.
+3. On go in this chat, set `approved`, commit `approved`, then implement only the plan. After `approved`,
+   the session ends; implementing changes to this skill runs outside the loop.
 4. Otherwise put dated feedback only in brief, set `planning`, commit `feedback`, continue after the
-   latest plan, and raise limit to at least that version.
+   latest plan, and raise the limit in `status.md` only (never in brief) to at least that version.
 
 ## Triggers
 
 Digest-check before each reference. Read `integrity.md` before first guard/launch; `resume.md` only
 after inline resume integrity; `recovery.md` on nonzero guard/commit/post/format only with matching
-skill; `limit.md` at limit; `operations.md` at its triggers. Skill mismatch always uses inline flow.
+skill; `limit.md` at limit-reached; `operations.md` at its triggers. Skill mismatch always uses inline flow.
 
 ## Rules
 
-- Agents communicate only through task files. Prompts are exact templates plus filled scalars; only
-  the exact Minors-close line may be added. Do not append or paste file contents, diffs, Git output,
-  replies, chat history, guard data, or other context.
+- Prompts are exactly `prompt_build.py` output; the orchestrator adds no text, including in a last or
+  retried round. Agents communicate only through task files. Do not append or paste file contents,
+  diffs, Git output, replies, chat history, guard data, or other context.
 - Search first and read targeted source; never load a whole large source/generated file/log/binary
   extraction/document when narrower evidence works. Read applicable policy/standards fully in budget.
 - Only this chat commits/writes brief/status; planner writes plan; reviewer writes review. In

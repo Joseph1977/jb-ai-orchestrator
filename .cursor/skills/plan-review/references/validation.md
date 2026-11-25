@@ -5,10 +5,17 @@ Read only while maintaining or explicitly validating the skill.
 ## Loop and format
 
 - Default limit is 4; resume preserves an existing limit unless explicitly changed.
-- Final-iteration reviewer still reports every blocker/major.
-- Uncaused late blocker/major, invalid severity rise, bad verdict, missing Evidence, duplicate IDs,
-  bad pushback assessment, and line/length cap violations fail format validation.
-- Minors close adds exactly its one permitted prompt line and handles pushed-back minors.
+- Bad verdict, missing Evidence, duplicate IDs, bad pushback assessment, deferral wording or a plan
+  that points to an earlier version, and line/length cap violations fail format validation.
+- M1 seeded missed major: plan v2 keeps a major defect review v1 missed; review v2 reports it as major with no prefix.
+- M2 whole-plan review: review v2 raises a seeded issue in a section untouched by v1 points.
+- M3 prompt integrity: each Task prompt equals `prompt_build.py` output (sha256 match); no added text in any round.
+- M4 blindness: rendered prompts disclose no budget; brief.md has no `Iteration:` line and does not state this run's limit or "N of L"; plan/review may discuss limits as subject matter; agents never open `status.md`; derived Versions pass format checks in v1, v2 and a Minors close.
+- M5 limit: `--max-iterations 1` with a seeded major ends `limit-reached v1`, open points unchanged, no `plan-start v2`, plain-text question asked; granting K=1 commits `feedback v1` changing only `status.md`, and `plan-start v2` follows.
+- M6 early consensus: a trivial brief with limit 6 reaches consensus before 6; `Outcome` reads "consensus at iteration N of 6, open points 0/0/0".
+- M7 legacy: `history` on older folders without `Outcome:` reports `format: legacy` and only pre-existing failure messages.
+- M8 retry: a guard-failed planner retry commits `plan-start vN` again with attempt 2 and passes `pre`/`history`.
+- M9 Minors close: a seeded minor at N < L yields `plan vN+1` then `review vN+1`; a pushed-back minor is assessed there; consensus only at 0/0/0, otherwise the gate continues.
 
 ## Context and models
 
@@ -74,7 +81,8 @@ Read only while maintaining or explicitly validating the skill.
 ## Honest claims
 
 - Static contract tests validate declared prompt/checkpoint structure; this matrix validates actual
-  Cursor behavior manually.
+  Cursor behavior manually. Verbatim delivery of rendered prompts to the Task tool and semantic
+  severity honesty are manual-only (M1–M3).
 - Guards cover guarded subagent windows; commit checks cover declared transaction invariants; skill
   digest covers declared checkpoints. No host-wide, arbitrary-hook-worktree, or cross-session claim
   is made.

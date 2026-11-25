@@ -68,6 +68,7 @@ Model: <orchestrator identity>
 Iteration: N of <limit>
 Length caps: plan <n>, review <n>
 State: planning | planner-running | reviewing | reviewer-running | reviewed | limit-reached | awaiting-user | approved | stopped
+Outcome: none | consensus at iteration N of L, open points 0/0/0 | limit-reached at iteration L of L, open points b/m/n | stopped at iteration N of L (<reason>)
 Working branch: <approved non-protected branch>
 Branch authorization: approved-current@<sha> | from-<source-branch>@<sha>
 Planner mode: self | subagent
@@ -82,7 +83,34 @@ Next action: <one line>
 ```
 
 No caps means plan 150/review 50. Change only by explicit instruction plus dated brief feedback.
-Never record new commit/`Recovery:`. Resume: `git log -1 -- <task folder>`.
+Never record new commit/`Recovery:`. Resume: `git log -1 -- <task folder>`. No consensus
+`Outcome` has nonzero open points. A status without an `Outcome:` line (older run) uses the legacy
+rules in `commit_check.py`; `pre` rejects a new `brief v1` without it.
+
+The limit may change only in `brief v1` or `feedback`. `brief.md` never records the iteration count,
+an `Iteration:` line, or this run's limit: agents read it.
+
+## Status before each commit
+
+Set `status.md` before `git add`:
+
+| Commit | State | Iteration | Outcome / other |
+|---|---|---|---|
+| `brief v1` | planning | 1 of L | none |
+| `plan-start vN` | planner-running | N of L | none; `Next action: planner writes plan vN — attempt k` |
+| `plan vN` | reviewing | N of L | none |
+| `review-start vN` | reviewer-running | N of L | none; `Next action` names attempt k |
+| `review vN` | reviewed | N of L | none; Open points, Trend, Next point ID recorded |
+| `consensus vN` | awaiting-user | N of L | consensus Outcome, open points 0/0/0 |
+| `limit-reached vN` | limit-reached | L of L | limit Outcome; Iteration and Open points copied from `review vN` |
+| `feedback vN` | planning | N of L′ | none |
+| `stopped vN` | stopped | N of L | stopped Outcome; `Stop reason` set |
+| `approved vN` | approved | N of L | Outcome unchanged |
+
+Minors close uses the `plan-start`/`plan` rows; the `minors` subject (and its Allowed-files entry) is
+legacy-only. Retry: a retried launch commits the exact subject `plan-review(<slug>): plan-start vN`
+(or `review-start vN`) again, no suffix, after incrementing `attempt k` in `Next action`, so the
+commit has a real diff.
 
 Brief Relevant files: applicable repo policy/standards plus relevant source; exclude absent files,
 pathless user rules; prefer section/symbol/ranges.
@@ -103,10 +131,11 @@ CHECK="$SKILL_ROOT/scripts/commit_check.py"
 CHECK_FILE="$(mktemp "${TMPDIR:-/tmp}/plan-review-commit.XXXXXX")"
 PRE_HEAD="$(git rev-parse HEAD)"
 git add -- <allowed paths>
-CHECK_SHA="$(python3 -I -B "$CHECK" pre --repo "$ROOT" --output "$CHECK_FILE" <allowed paths>)"
+CHECK_SHA="$(python3 -I -B "$CHECK" pre --repo "$ROOT" --output "$CHECK_FILE" \
+  --subject "plan-review(<slug>): <step> v<N>" <allowed paths>)"
 git diff --cached -- <allowed paths>
 # Recheck SKILL_BASELINE immediately before commit.
-git commit --only -m "plan-review(<slug>): <step> v<N>" -- <allowed paths>
+git commit --only -m "plan-review(<slug>): <step> v<N>" -- <allowed paths>   # same string as --subject
 python3 -I -B "$CHECK" post --repo "$ROOT" --baseline "$CHECK_FILE" \
   --baseline-sha256 "$CHECK_SHA" --status-file workspace/outcomes/<task>/status.md
 rm -f "$CHECK_FILE"
@@ -117,9 +146,11 @@ On `pre`/commit/`post` failure stop for digest-gated recovery. Inspect the allow
 
 Allowed files:
 
-- `brief` / `feedback`: `brief.md`, `status.md`
+- `brief`: `brief.md` and `status.md`, both required
+- `feedback`: `status.md` required; `brief.md` optional, changed only for dated user feedback or
+  retired-point decisions (a K-only grant changes `status.md` alone)
 - `plan-start` / `review-start`: `status.md`
-- `plan` / `minors`: `plan.md`, `status.md`
+- `plan` (and legacy `minors`): `plan.md`, `status.md`
 - `review`: `review.md`, `status.md`
 - `consensus` / `approved` / `limit-reached` / `stopped`: `status.md`
 
@@ -134,10 +165,6 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 - Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\] .+ → .+$`; ordinals start at 1.
 - IDs increase from `Next point ID`, stay while open/reframed, and are never repeated, reused,
   renumbered, or retired while current/maintained.
-- In v2+, a new blocker/major or severity rise starts
-  `Caused by <accepted-or-partly-accepted-ID>:` or `Caused by feedback:`. Feedback requires a
-  feedback commit after the prior review. A cited point ID must differ from the current point's own
-  ID. Otherwise the new point is minor.
 - Plan v2+ has one row per preceding review point, no older-only/duplicates. Decision is exactly
   `accepted`, `partly accepted`, `pushed back`, or `closed by user`; only retired IDs use the last,
   and every retired ID in that review must use it.
@@ -147,6 +174,8 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   No assessment is allowed for a non-pushback.
 - `CHANGES_REQUESTED` has a blocker/major. `APPROVE_WITH_MINORS` has points, all minor, with no
   maintained blocker/major. `NO_FURTHER_COMMENTS` has no points or maintained pushback.
+- A Response reason or `## Plan` containing `defer`, `next round`, `next version`, `follow-up`, `TBD`
+  or `TODO`, or a `## Plan` that points to an earlier version instead of restating it, fails format.
 - Enforce caps (default plan 150/review 50), one ≤300-character line per point/response reason.
 
 Subagent format failure gets one `recovery.md` retry, then stops. Correct self-planner before commit.

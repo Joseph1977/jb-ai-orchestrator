@@ -38,10 +38,10 @@ A later resume of `planner-running` or `reviewer-running` still needs the user's
 
 ## Format failure
 
-A format or consistency failure is one retry, then `stopped`. This includes a late blocker or major that lacks a valid `Caused by` prefix, a bad verdict, a missing `Evidence: ` field, a bad maintain line, and a length-cap miss.
+A format or consistency failure is one retry, then `stopped`. This includes a plan that defers or splits work across versions or points to an earlier version, a wrong derived `Version:` header, a bad verdict, a missing `Evidence: ` field, a bad maintain line, and a length-cap miss.
 
 - Self-planner output: correct the owned file yourself before `plan vN` or `minors vN+1` is committed. There is no subagent retry.
-- Subagent output: only a format failure after guard exit 0 is retriable. Restore the valid pre-run owned file, or remove its invalid first version. Retry once with a new subagent. The retry is a new guarded run: capture a fresh manifest, launch, compare, then validate.
+- Subagent output: only a format failure after guard exit 0 is retriable. Restore the valid pre-run owned file, or remove its invalid first version. Retry once with a new subagent. The retry is a new guarded run: capture a fresh manifest, launch, compare, then validate. Commit its launch as the exact subject `plan-start vN` (or `review-start vN`) again, per `operations.md` §Status before each commit, with no suffix.
 - A second format failure: restore again, set `State: stopped` and `Stop reason: error`, record the failure, commit only `status.md` as `stopped vN`, and report. Never leave or resume from invalid output.
 - A guard nonzero result is not a format retry. Use the guard-failure steps above.
 
