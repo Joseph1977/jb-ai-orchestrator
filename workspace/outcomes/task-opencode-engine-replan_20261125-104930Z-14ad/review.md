@@ -1,7 +1,7 @@
 # Review — OpenCodeExecutionEngine implementation plan
-Version: 14
+Version: 15
 Model: gpt-5.6-sol-medium
 Verdict: CHANGES_REQUESTED
 
 ## Points
-1. P023 [major] D4 resolves every “fresh” segment from `ORCHESTRATOR_ENGINE`, while D5 explicitly makes `executions.engine` audit-only and overwrites it on each orchestrator execute; therefore an environment change can move later segments of the same persisted orchestrator session to another engine, contrary to C-5’s “persisted engine identity wins” rule → Resolve an existing session from its immutable `Execution.engine`/version, use the environment only when creating the session, keep each `ExecutionRun` consistent, and test env changes between initiate/execute and repeated executes.
+1. P024 [major] D4 resolves the fresh AG-UI and legacy engines inside `_create_agui_execution` / `_create_execution_record`, but D10 requires OpenCode capability and tool gates before calling those helpers; the controller therefore cannot select the gates without another environment read, or rejection still creates an `Execution`, violating P004/In-4 → Resolve the fresh engine once before all gates, pass that immutable choice into execution creation and subsequent run/state stamping, and test one resolver call plus no durable rows on rejection.
