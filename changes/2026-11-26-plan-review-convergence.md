@@ -5,7 +5,7 @@
 
 ## What changed
 
-- The first review of a run is a full audit. The reviewer builds a checklist of
+- The first review of a run is a full audit. The reviewer is given a checklist of
   every brief Constraint, In and Out item, numbered question and Done criterion,
   plus every plan anchor, and reports every blocker, major and minor it finds in
   that one review. `## Coverage` must list each checklist item exactly once.
