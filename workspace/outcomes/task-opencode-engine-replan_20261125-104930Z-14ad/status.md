@@ -1,9 +1,9 @@
 # Status — OpenCodeExecutionEngine implementation plan (continued)
 Model: Auto
-Iteration: 13 of 13
+Iteration: 13 of 17
 Length caps: plan 150, review 50
-State: limit-reached
-Outcome: limit-reached at iteration 13 of 13, open points 0/1/0
+State: planning
+Outcome: none
 Working branch: feature/opencode-engine-plan
 Branch authorization: approved-current@4eb8f1ed3ee873fece107ef8deff7810efb2e4db
 Planner mode: subagent
@@ -14,4 +14,4 @@ Trend: v1=1, v2=3, v3=2, v4=4, v5=1, v6=1, v7=3, v8=2, v9=2, v10=1, v11=1, v12=1
 Next point ID: P023
 Retired point IDs: none
 Stop reason: none
-Next action: awaiting user K; estimate 1–3 more iterations (no maintained points; each round raises one new major)
+Next action: user granted K=4; planner writes plan v14
