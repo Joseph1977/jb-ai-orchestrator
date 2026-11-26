@@ -1,7 +1,7 @@
 # Review — OpenCodeExecutionEngine implementation plan
-Version: 15
+Version: 16
 Model: gpt-5.6-sol-medium
 Verdict: CHANGES_REQUESTED
 
 ## Points
-1. P024 [major] D4 resolves the fresh AG-UI and legacy engines inside `_create_agui_execution` / `_create_execution_record`, but D10 requires OpenCode capability and tool gates before calling those helpers; the controller therefore cannot select the gates without another environment read, or rejection still creates an `Execution`, violating P004/In-4 → Resolve the fresh engine once before all gates, pass that immutable choice into execution creation and subsequent run/state stamping, and test one resolver call plus no durable rows on rejection.
+1. P025 [major] D9–D10 set `workspace_free=false` and always reject legacy `/v1/agent/executeRequest` and workspace-free AG-UI, so the engine resolver at those entry points can never route their new headless runs to OpenCode; this leaves In-3's headless capability set incomplete and avoids C-1 only by disabling a scoped entry point → Support workspace-free MCP/model segments from the per-run scratch directory, adding bounded legacy execution/cancellation and tests, or narrow the brief/design contract before implementation.
