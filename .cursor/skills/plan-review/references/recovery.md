@@ -46,4 +46,8 @@ A format or consistency failure is one retry, then `stopped`. This includes a pl
 - A second format failure: restore again, set `State: stopped` and `Stop reason: error`, record the failure, commit only `status.md` as `stopped vN`, and report. Never leave or resume from invalid output.
 - A guard nonzero result is not a format retry. Use the guard-failure steps above.
 
+With a second audit model, each audit reviewer is its own guarded run with its own owned file
+(`review-2.md`, then `review.md`); a `merge` exit 1 retries only the named reviewer. A `review-2.md`
+left by an interrupted audit is never committed: delete it before relaunching that review.
+
 A missing, truncated, symlinked, or malformed owned file fails these checks and is restored the same way. `lstat` it before reading subagent output, as `references/integrity.md` requires.

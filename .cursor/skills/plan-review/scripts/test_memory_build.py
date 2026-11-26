@@ -352,6 +352,82 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("reuses a closed", self.failures(memory, plan_v2(), reused, "converge"))
 
 
+SECOND_V1 = """# Review — demo
+Version: 1
+Model: second-model-1
+Verdict: CHANGES_REQUESTED
+
+## Points
+1. P001 [major] (C-1, D2) deadline is UNBOUNDED. → Bound it differently.
+2. P002 [minor] (D1) Wrapper has no test → Add one.
+
+## Coverage
+- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1
+- D1: P002
+- C-1, D2: P001
+"""
+
+
+class MergeTests(unittest.TestCase):
+    def test_exact_repeats_are_dropped_and_new_points_renumbered(self) -> None:
+        merged, counts = memory_build.merge_reviews(REVIEW_V1, SECOND_V1, "P001")
+        self.assertEqual(counts, {"points": 2, "from_second": 1, "duplicates": 1})
+        self.assertIn("Model: other-model-1 + second-model-1\nVerdict: CHANGES_REQUESTED", merged)
+        self.assertIn("1. P001 [major] (D2, C-1) Deadline is unbounded → Bound it.", merged)
+        self.assertIn("2. P002 [minor] (D1) Wrapper has no test → Add one.", merged)
+        self.assertIn("- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n", merged)
+        self.assertIn("- D1: P002\n", merged)
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, merged, "audit", [],
+                                           "P001")
+        self.assertEqual(result["new"], 2)
+
+    def test_distinct_points_on_the_same_anchors_are_all_kept(self) -> None:
+        second = SECOND_V1.replace("deadline is UNBOUNDED.", "Deadline ignores cancellation")
+        merged, counts = memory_build.merge_reviews(REVIEW_V1, second, "P001")
+        self.assertEqual(counts, {"points": 3, "from_second": 2, "duplicates": 0})
+        self.assertIn("2. P002 [major] (C-1, D2) Deadline ignores cancellation", merged)
+        self.assertIn("3. P003 [minor] (D1)", merged)
+        self.assertIn("- D2: P001, P002\n", merged)
+        memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, merged, "audit", [], "P001")
+
+    def test_second_review_ids_the_primary_keeps_or_accepted_are_dropped(self) -> None:
+        primary = review(2, "1. P004 [major] (D2) Still unbounded → Bound it.",
+                         "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1, S1\n- D2: P004",
+                         extra="\n## Pushback assessment\nP003: accept rebuttal\n"
+                               "P004: maintain, because brief C-1: unbounded\n")
+        second = review(2, "1. P003 [major] (D1) Rebutted again → x\n"
+                           "2. P004 [major] (D2) Same ID → y\n3. P005 [minor] (S1) New → z",
+                        "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done\n- D1: P003\n- D2: P004\n"
+                        "- S1: P005")
+        merged, counts = memory_build.merge_reviews(primary, second, "P005")
+        self.assertEqual(counts, {"points": 2, "from_second": 1, "duplicates": 2})
+        self.assertIn("2. P005 [minor] (S1) New → z", merged)
+        self.assertNotIn("P003 [major]", merged)
+        self.assertIn("- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1\n", merged)
+        self.assertTrue(merged.endswith("## Pushback assessment\nP003: accept rebuttal\n"
+                                        "P004: maintain, because brief C-1: unbounded\n"))
+
+    def test_verdict_is_recomputed_from_merged_points(self) -> None:
+        clean = review(1, "None", "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1, D2, S1",
+                       verdict="NO_FURTHER_COMMENTS")
+        minor = review(1, "1. P001 [minor] (D1) Name → Rename.",
+                       "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D2, S1\n- D1: P001",
+                       verdict="APPROVE_WITH_MINORS")
+        self.assertIn("Verdict: APPROVE_WITH_MINORS", memory_build.merge_reviews(clean, minor,
+                                                                               "P001")[0])
+        merged = memory_build.merge_reviews(clean, clean, "P001")[0]
+        self.assertIn("Verdict: NO_FURTHER_COMMENTS\n\n## Points\nNone\n", merged)
+
+    def test_plan_check_caps_the_audit_checklist(self) -> None:
+        anchors = "".join(f"- D{n} (In-1) Step {n}.\n" for n in range(1, 500))
+        plan = PLAN_V1.replace("- D1 (In-1) Engine wrapper.\n  Continues here.\n- D2 (C-1) "
+                               "Deadline.\n", anchors)
+        with self.assertRaises(memory_build.FormatError) as caught:
+            memory_build.check_plan(plan, None, None, BRIEF)
+        self.assertIn("over 2000 characters", "\n".join(caught.exception.failures))
+        memory_build.check_plan(PLAN_V1, None, None, BRIEF)
+
+
 class MemoryFormatTests(unittest.TestCase):
     def test_blindness_and_line_length_fail(self) -> None:
         text = audited_memory().render()
@@ -469,6 +545,36 @@ class CliTests(unittest.TestCase):
         self.assertEqual(failed.returncode, 1)
         self.assertIn("D2 was changed", failed.stderr)
         self.assertIn("memory_build: retry: ", failed.stderr.splitlines()[-1])
+
+    def test_merge_validates_both_audits_then_replaces_review_and_removes_the_second(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.assertEqual(self.run_cli("init").returncode, 0)
+        self.write("plan.md", PLAN_V1)
+        self.write("status.md", "# Status — demo\nIteration: 1 of 4\nNext point ID: P001\n"
+                                "Retired point IDs: none\n")
+        self.commit("brief.md", "memory.md", "plan.md", "status.md")
+        self.write("review.md", REVIEW_V1)
+        self.assertEqual(self.run_cli("merge").returncode, 2)
+        broken = SECOND_V1.replace("- D1: P002\n", "")
+        self.write("review-2.md", broken)
+        failed = self.run_cli("merge")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("review-2.md: audit coverage misses ['D1']", failed.stderr)
+        self.assertEqual((self.repo / TASK / "review.md").read_text(encoding="utf-8"), REVIEW_V1)
+        self.write("review-2.md", SECOND_V1)
+        merged = self.run_cli("merge")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.assertEqual(json.loads(merged.stdout),
+                         {"points": 2, "from_second": 1, "duplicates": 1})
+        self.assertFalse((self.repo / TASK / "review-2.md").exists())
+        self.assertIn("Model: other-model-1 + second-model-1",
+                      (self.repo / TASK / "review.md").read_text(encoding="utf-8"))
+        updated = self.run_cli("update", "--scope", "audit")
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        self.assertEqual(json.loads(updated.stdout)["next_id"], "P003")
+        self.commit("review.md", "memory.md")
+        self.write("review-2.md", SECOND_V1)
+        self.assertEqual(self.run_cli("merge").returncode, 2)
 
     def test_init_scope_update_feedback_round_trip(self) -> None:
         self.write("brief.md", BRIEF)

@@ -30,14 +30,24 @@ def block(name: str) -> str:
 
 
 REFERENCE_TASK_BYTES = 100
-REFERENCE_CHECKLIST = ",".join(
-    [f"C-{n}" for n in range(1, 7)] + [f"In-{n}" for n in range(1, 6)]
-    + [f"Out-{n}" for n in range(1, 4)] + [f"Q{n}" for n in range(1, 6)] + ["Done"]
-    + [f"D{n}" for n in range(1, 25)] + [f"S{n}" for n in range(1, 7)]
-)
+CHECKLIST_CHARS = 2000
 
 
-def render(mode: str, reference_path: bool = False, scope: str = "converge") -> str:
+def _maximal_checklist() -> str:
+    """The longest `D1,D2,…` checklist the builder accepts; no further item fits."""
+    text = "D1"
+    for n in range(2, CHECKLIST_CHARS):
+        if len(f"{text},D{n}") > CHECKLIST_CHARS:
+            return text
+        text = f"{text},D{n}"
+    return text
+
+
+REFERENCE_CHECKLIST = _maximal_checklist()
+
+
+def render(mode: str, reference_path: bool = False, scope: str = "converge",
+           checklist: str = REFERENCE_CHECKLIST) -> str:
     """Render a prompt with the shipped builder, exactly as the orchestrator does.
 
     `reference_path` swaps the temporary task path for a fixed 100-byte path so byte budgets
@@ -48,7 +58,7 @@ def render(mode: str, reference_path: bool = False, scope: str = "converge") -> 
         task.mkdir(parents=True)
         scope_args = ["--scope", scope] if mode == "reviewer" else []
         if scope_args and scope == "audit":
-            scope_args += ["--checklist", REFERENCE_CHECKLIST]
+            scope_args += ["--checklist", checklist]
         result = subprocess.run(
             ["python3", "-I", "-B", str(BUILDER), mode, "--task", str(task),
              "--model", "example-model-1", "--plan-cap", "250", "--review-cap", "150",
@@ -384,21 +394,24 @@ class StaticContractTests(unittest.TestCase):
 
     def test_context_byte_budgets(self) -> None:
         skill_bytes = len(self.text.encode("utf-8"))
-        reviewer_bytes = max(
-            len(render("reviewer", reference_path=True, scope=scope).encode("utf-8"))
-            for scope in ("audit", "converge")
-        )
-        planner_bytes = len(render("planner", reference_path=True).encode("utf-8"))
         self.assertLessEqual(
             skill_bytes, 30_000, f"SKILL.md is {skill_bytes} bytes; limit is 30000"
         )
-        self.assertLessEqual(
-            reviewer_bytes + planner_bytes,
-            10_500,
-            "rendered prompts are "
-            f"{reviewer_bytes + planner_bytes} bytes "
-            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 10500",
-        )
+        planner_bytes = len(render("planner", reference_path=True).encode("utf-8"))
+        self.assertGreater(len(REFERENCE_CHECKLIST), CHECKLIST_CHARS - 6)
+        for checklist, limit in (("D1", 10_500), (REFERENCE_CHECKLIST, 12_500)):
+            reviewer_bytes = max(
+                len(render("reviewer", reference_path=True, scope=scope,
+                           checklist=checklist).encode("utf-8"))
+                for scope in ("audit", "converge")
+            )
+            self.assertLessEqual(
+                reviewer_bytes + planner_bytes,
+                limit,
+                "rendered prompts are "
+                f"{reviewer_bytes + planner_bytes} bytes (reviewer={reviewer_bytes}, "
+                f"planner={planner_bytes}, checklist={len(checklist)}); limit is {limit}",
+            )
 
     def test_explicit_foreground_subagent_contracts(self) -> None:
         self.assertGreaterEqual(self.text.count("run_in_background: false"), 2)

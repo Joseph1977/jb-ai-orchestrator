@@ -60,7 +60,7 @@ candidate path, inspect ancestor AGENTS.md and `.cursor/rules/**/*.mdc` frontmat
 policy/standards in full. If any ceiling would be exceeded, stop the round before reading that body;
 never partially review, truncate, summarize, or omit required policy.
 
-Write ONLY review.md: `# Review — <plan title>`, `Version:` equal to plan.md `Version:`, Model, Verdict; `## Points` lines
+Write ONLY {{REVIEW_FILE}}: `# Review — <plan title>`, `Version:` equal to plan.md `Version:`, Model, Verdict; `## Points` lines
 `<ordinal>. P<digits> [severity] (<anchors>) <issue> → <fix>`, where anchors name the plan anchors (D1, S2) and brief items (C-1, In-2, Out-1, Q3, Done) holding the defect; `## Coverage`; and, when responses exist,
 `## Pushback assessment` with each pushback exactly once as `P...: accept rebuttal` or
 `P...: maintain, because <ref>: <reason>`.

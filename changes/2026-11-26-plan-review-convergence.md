@@ -65,14 +65,38 @@
   The audit block checks every item through seven fixed lenses: existing gates
   still apply, isolation, existing callers and records, explicit behaviour
   changes, persisted state, owned processes and secrets, and tested claims.
+  The checklist is rendered without spaces and capped at 2,000 characters;
+  `plan-check` fails a plan that would exceed it.
+- Optional `--second-audit-model` (an experiment, off by default) runs a second
+  independent audit reviewer, which writes `review-2.md` (`prompt_build.py
+  --second-audit`), before the audit reviewer. `memory_build.py merge` validates
+  both files separately, then rewrites `review.md` deterministically: primary
+  points, IDs and pushback assessment kept; second-review points renumbered
+  after them; only exact repeats (severity, anchor set, normalized issue words)
+  dropped; coverage unioned; Verdict recomputed; `review-2.md` deleted.
+  Overlapping but non-identical points stay separate: on the replay, true
+  duplicates shared at most 0.15 word overlap, so no looser rule could tell them
+  from distinct defects without dropping some.
+- `references/m13-rubric.md` freezes the M13 rubric: the 16 historical points
+  present in plan v1 (commit `b2f18e9`), the 9 excluded with reasons, the
+  matching rule and standing rulings, and the recorded runs. M13 now scores
+  that rubric (target 10 of 16), and the merged review when a second audit
+  model is used. M12 is split into routing (M12) and real-reviewer detection
+  (M12b).
 - A pending audit also blocks consensus for tasks in the legacy status format.
 - A maintained point may keep citing an anchor that an earlier plan removed.
 - Retry summaries keep quoted details (non-ASCII arrows and dashes become
   ASCII), and seeding accepts `;` between a point's anchors.
 - Review parsing accepts `None.` under an empty `## Points` and `;` between a
   point's anchors, and reports unknown coverage items in one grouped failure.
-- Default caps are plan 250 / review 150 lines. The rendered prompt budget is
-  10,500 bytes (planner plus the larger reviewer variant).
+- Default caps are plan 250 / review 150 lines; a merged audit may use twice
+  the review cap. The rendered prompt budget (planner plus the larger reviewer
+  variant) is 10,500 bytes with a one-item checklist and 12,500 bytes with the
+  longest accepted checklist.
+- Validation status: M12 routing passes; M12b detection is unmet (in two
+  deliberate trials the converge reviewer did not raise the planted defect).
+  M13 is unmet: the best single audit matched 6 of 16, and the merged
+  two-model audit matched 9 of 16.
 - Tests: `test_memory_build.py` added; `test_commit_check.py`,
   `test_prompt_build.py`, `test_skill_contract.py` and `test_preflight.py` were
   extended. `references/validation.md` adds manual checks M10–M15.

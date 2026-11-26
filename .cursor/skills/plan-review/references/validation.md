@@ -23,15 +23,17 @@ Read only while maintaining or explicitly validating the skill.
 - M9 Minors close: a seeded minor at N < L yields `plan vN+1` then `review vN+1`; a pushed-back minor is assessed there; consensus only at 0/0/0, otherwise the gate continues.
 - M10 seeded gaps: a fresh run whose plan v1 carries 5 known gaps on distinct anchors (a constraint with no decision, a wrong file path, an In item with no test, contradictory slice entry criteria, an ungated assumption); audit review v1 reports all 5, each mapped through `## Coverage`.
 - M11 convergence: plan v2 fixes the 5 gaps and changes only those anchors; review v2 raises no new non-late point on unchanged anchors; consensus within 3 rounds.
-- M12 late routing: in M11, a non-blocker found on an unchanged anchor goes to Observations, appears in `memory.md`, and is listed in the consensus report.
-- M13 evidence replay: a fresh task with the `opencode-engine-replan` brief and its plan v1; record the share of the P001–P025 issue themes audit review v1 raises (target at least 60%) and rounds to consensus (target at most 4).
+- M12 late routing: in M11, a non-blocker found on an unchanged anchor goes to Observations, appears in `memory.md`, and is listed in the consensus report. This checks routing only; a scripted observation may exercise it.
+- M12b late detection: plan v2 keeps a planted non-blocker defect on an anchor not listed in `## Changes`; the real converge reviewer raises it under Observations. A scripted observation does not satisfy M12b.
+- M13 evidence replay: a fresh task with the `opencode-engine-replan` brief and its frozen plan v1; score audit review v1 against the 16-item rubric in `references/m13-rubric.md` (target at least 10 of 16) and record rounds to consensus (target at most 4). With `--second-audit-model`, score the merged `review.md`, never the union of separate runs. Record each run in that rubric.
 - M14 resume: a scratch-branch copy of that task resumes with `memory-seed v16`, `plan-start v17` and an audit review v17; `history` reports `memory: seeded` and no failures.
 - M15 compaction: a large audit fixture pushes memory over the soft limit; `memory-compact` lands before the next `plan-start` with the kept sections unchanged.
 
 ## Context and models
 
 - `SKILL.md` is at most 30,000 UTF-8 bytes; exact rendered planner+reviewer prompts total at most
-  10,500 bytes. Contract tests measure shipped content and print actual values on failure.
+  10,500 bytes with a one-item audit checklist and at most 12,500 bytes with the longest accepted
+  checklist (2,000 characters; `plan-check` rejects plans beyond it). Contract tests measure shipped content and print actual values on failure.
 - Trigger-only task schemas, commit mechanics, and format detail live in digest-gated
   `operations.md`; trusted mismatch bootstrap remains inline.
 - Planner defaults to a fresh explicit model; reviewer is always fresh and a different family.
@@ -93,7 +95,7 @@ Read only while maintaining or explicitly validating the skill.
 
 - Static contract tests validate declared prompt/checkpoint structure; this matrix validates actual
   Cursor behavior manually. Verbatim delivery of rendered prompts to the Task tool and semantic
-  severity honesty are manual-only (M1–M3, M10–M15).
+  severity honesty are manual-only (M1–M3, M10–M15, M12b).
 - Guards cover guarded subagent windows; commit checks cover declared transaction invariants; skill
   digest covers declared checkpoints. No host-wide, arbitrary-hook-worktree, or cross-session claim
   is made.

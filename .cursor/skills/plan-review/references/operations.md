@@ -134,7 +134,16 @@ IDs and the soft limit. Exit 1 means the floor is still too large: stop and ask 
 - `init`: after writing brief.md, before `brief v1`.
 - `plan-check`: before `plan vN` (Format checks).
 - `scope`: before `review-start vN`. For `audit` it also prints `checklist`, the committed brief
-  items and plan anchors in order, which the reviewer prompt receives as `--checklist`.
+  items and plan anchors in order, which the reviewer prompt receives as `--checklist`. The
+  checklist is at most 2,000 characters; `plan-check` fails a plan that would exceed it.
+- `merge`: only for an `audit` with a second audit model, after both reviewers return and pass
+  their guards. It validates `review.md` and `review-2.md` separately (exit 1 prefixes each failure
+  with its file), then rewrites `review.md` as one review and deletes `review-2.md`. The primary
+  review keeps its IDs, order and pushback assessment; a second-review point is dropped only when
+  it repeats a primary point exactly (severity, anchor set and normalized issue words) or keeps an
+  earlier ID the primary keeps or accepted; other new points get the next free IDs. Coverage is
+  the union, and the Verdict is recomputed from the merged points. Overlapping points that are
+  not exact repeats stay separate, and the planner answers each.
 - `update --scope <scope>`: after the reviewer returns and review.md validates; it applies the
   scope, `[late]`, Observations and Coverage rules, closes points, and prints the counts and
   `next_id` for status.md. `compact: true` triggers the memory gate.
@@ -158,7 +167,7 @@ Outcome: none | consensus at iteration N of L, open points 0/0/0 | limit-reached
 Working branch: <approved non-protected branch>
 Branch authorization: approved-current@<sha> | from-<source-branch>@<sha>
 Planner mode: self | subagent
-Planner model: <identity>   Reviewer model: <slug> | <slug> (audit: <slug>)
+Planner model: <identity>   Reviewer model: <slug> | <slug> (audit: <slug>[, second audit: <slug>])
 Model changes: <none | "v4: reviewer old → new">
 Open points: <blockers>/<majors>/<minors>
 Trend: <per review: v3=4 (new 2, late 0, obs 1), ...>
@@ -294,7 +303,8 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   maintained blocker/major. `NO_FURTHER_COMMENTS` has no points or maintained pushback.
 - A Response reason or `## Plan` containing `defer`, `next round`, `next version`, `follow-up`, `TBD`
   or `TODO`, or a `## Plan` that points to an earlier version instead of restating it, fails format.
-- Enforce caps (default plan 250/review 150), one ≤600-character line per point/response reason,
+- Enforce caps (default plan 250/review 150; a merged audit may use twice the review cap), one
+  ≤600-character line per point/response reason,
   one ≤300-character line per `## Changes` entry.
 
 Subagent format failure gets one `recovery.md` retry, then stops. The retry prompt carries the

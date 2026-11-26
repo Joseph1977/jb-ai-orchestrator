@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Check plan anchors and build the orchestrator-owned memory.md for the plan-review loop.
 
-Modes: init, plan-check, scope, update, feedback, seed, compact. Inputs are committed task files
-(`git show HEAD:`) plus the one worktree file the current step validates. Exit 0 is success,
+Modes: init, plan-check, scope, merge, update, feedback, seed, compact. Inputs are committed task
+files (`git show HEAD:`) plus the worktree file(s) the current step validates. Exit 0 is success,
 1 is a format failure of agent output (or a memory floor over the soft limit), 2 stops.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -38,6 +39,8 @@ COVERAGE_POINTS = re.compile(r"^- ([^:]+?): (P[0-9]{3,}(?:, P[0-9]{3,})*)$")
 OBSERVATION = re.compile(r"^- \(([^()]+)\) (.+)$")
 ACCEPT = re.compile(r"^(P[0-9]{3,}): accept rebuttal$")
 PLAN_SECTIONS = ("## Response to review", "## Changes", "## Plan")
+SECOND_REVIEW = "review-2.md"
+CHECKLIST_CHARS = 2000
 CHANGE_CHARS = 300
 
 MEMORY_SECTIONS = (
@@ -286,9 +289,18 @@ def point_id(value: int) -> str:
 # Plan check
 
 
-def check_plan(plan: str, previous_plan: str | None, previous_review: str | None) -> dict[str, Any]:
+def audit_checklist(brief: str, plan: str) -> str:
+    """Brief items then plan anchors, comma-separated, as the audit prompt receives them."""
+    return ",".join(dict.fromkeys(brief_items(brief) + list(plan_anchors(plan)[0])))
+
+
+def check_plan(plan: str, previous_plan: str | None, previous_review: str | None,
+               brief: str | None = None) -> dict[str, Any]:
     """Validate anchors, sections and `## Changes` of a new plan against the committed one."""
     failures: list[str] = []
+    if brief is not None and len(audit_checklist(brief, plan)) > CHECKLIST_CHARS:
+        failures.append(f"the audit checklist (brief items plus plan anchors) is over "
+                        f"{CHECKLIST_CHARS} characters; merge anchors")
     for heading in sections(plan):
         if heading and not heading.startswith(PLAN_SECTIONS):
             failures.append(f"plan.md section {heading!r} is not allowed")
@@ -714,6 +726,67 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
     }
 
 
+def _point_key(point: dict[str, Any]) -> tuple[str, frozenset[str], str]:
+    words = " ".join(re.findall(r"[a-z0-9]+", point["issue"].lower()))
+    return point["severity"], frozenset(point["anchors"]), words
+
+
+def merge_reviews(primary: str, second: str, next_id: str) -> tuple[str, dict[str, int]]:
+    """Merge two validated audit reviews into one review.md text; return it and merge counts.
+
+    The primary review keeps its points, IDs, order and pushback assessment. A second-review
+    point is dropped only when it repeats a primary point exactly (same severity, anchor set and
+    normalized issue words) or keeps an earlier ID that the primary also keeps or whose rebuttal
+    it accepted; every other new point gets the next free ID. Coverage is the union of both.
+    """
+    points, coverage, _obs, accepted, _failures = parse_review(primary)
+    extra, extra_coverage, _obs2, _accepted2, _failures2 = parse_review(second)
+    start = number(next_id)
+    following = max([start - 1] + [number(p["id"]) for p in points]) + 1
+    primary_ids = {p["id"] for p in points}
+    seen = {_point_key(p): p["id"] for p in points}
+    mapping: dict[str, str | None] = {}
+    merged = list(points)
+    duplicates = 0
+    for point in extra:
+        key, earlier = _point_key(point), number(point["id"]) < start
+        if key in seen or (earlier and (point["id"] in primary_ids or point["id"] in accepted)):
+            mapping[point["id"]] = seen.get(key) or (point["id"] if point["id"] in primary_ids
+                                                      else None)
+            duplicates += 1
+            continue
+        if earlier:
+            new_id = point["id"]
+        else:
+            new_id, following = point_id(following), following + 1
+        mapping[point["id"]] = seen[key] = new_id
+        merged.append({**point, "id": new_id})
+    ok_items: list[str] = []
+    mapped_lines: list[str] = []
+    for item in list(coverage) + [i for i in extra_coverage if i not in coverage]:
+        second_ids = [mapping.get(pid) for pid in extra_coverage.get(item, [])]
+        ids = list(dict.fromkeys(coverage.get(item, []) + [pid for pid in second_ids if pid]))
+        if ids:
+            mapped_lines.append(f"- {item}: {', '.join(ids)}")
+        else:
+            ok_items.append(item)
+    severities = {p["severity"] for p in merged}
+    verdict = ("CHANGES_REQUESTED" if severities & {"blocker", "major"}
+               else "APPROVE_WITH_MINORS" if merged else "NO_FURTHER_COMMENTS")
+    lines = [primary.splitlines()[0], f"Version: {header(primary, 'Version')}",
+             f"Model: {header(primary, 'Model')} + {header(second, 'Model')}",
+             f"Verdict: {verdict}", "", "## Points"]
+    lines += [f"{n}. {p['id']} [{p['severity']}] ({', '.join(p['anchors'])}) {p['issue']} → "
+              f"{p['fix']}" for n, p in enumerate(merged, 1)] or ["None"]
+    lines += ["", "## Coverage"] + ([f"- ok: {', '.join(ok_items)}"] if ok_items else [])
+    lines += mapped_lines
+    assessment = [line for line in section(primary, "## Pushback assessment") or [] if line.strip()]
+    if assessment:
+        lines += ["", "## Pushback assessment"] + assessment
+    return "\n".join(lines) + "\n", {"points": len(merged), "from_second": len(merged) - len(points),
+                                     "duplicates": duplicates}
+
+
 def upsert(memory: Memory, anchor: str, ref: str, text: str) -> None:
     refs, _old = memory.settled.get(anchor, ([], ""))
     memory.settled[anchor] = (refs + ([ref] if ref not in refs else []), short(text, 300))
@@ -910,11 +983,18 @@ def write_memory(repo: Path, task: str, text: str) -> dict[str, Any]:
     _parts, failures = memory_sections(text)
     if failures:
         raise BuildError("refusing to write malformed memory.md: " + "; ".join(failures))
+    write_task_file(repo, task, "memory.md", text)
+    lines, size = measure(text)
+    return {"lines": lines, "bytes": size,
+            "compact": at_or_over(text, SOFT_LINES, SOFT_BYTES)}
+
+
+def write_task_file(repo: Path, task: str, name: str, text: str) -> None:
     directory = repo / task
-    path = directory / "memory.md"
+    path = directory / name
     if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise BuildError("memory.md is not a regular file")
-    fd, temporary = tempfile.mkstemp(prefix=".memory.", dir=directory)
+        raise BuildError(f"{name} is not a regular file")
+    fd, temporary = tempfile.mkstemp(prefix=f".{Path(name).stem}.", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)
@@ -925,9 +1005,6 @@ def write_memory(repo: Path, task: str, text: str) -> dict[str, Any]:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    lines, size = measure(text)
-    return {"lines": lines, "bytes": size,
-            "compact": at_or_over(text, SOFT_LINES, SOFT_BYTES)}
 
 
 def require(text: str | None, name: str) -> str:
@@ -943,7 +1020,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         plan = worktree(repo, task, "plan.md")
         if plan is None:
             raise BuildError("plan.md is missing")
-        return check_plan(plan, committed(repo, task, "plan.md"), committed(repo, task, "review.md"))
+        return check_plan(plan, committed(repo, task, "plan.md"), committed(repo, task, "review.md"),
+                          committed(repo, task, "brief.md"))
     if mode == "init":
         if committed(repo, task, "memory.md") is not None or worktree(repo, task, "memory.md"):
             raise BuildError("memory.md already exists")
@@ -969,8 +1047,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return {"scope": "converge"}
         brief = require(committed(repo, task, "brief.md"), "brief.md")
         plan = require(committed(repo, task, "plan.md"), "plan.md")
-        items = dict.fromkeys(brief_items(brief) + list(plan_anchors(plan)[0]))
-        return {"scope": "audit", "checklist": ",".join(items)}
+        return {"scope": "audit", "checklist": audit_checklist(brief, plan)}
     if mode == "compact":
         if not at_or_over(memory_text, SOFT_LINES, SOFT_BYTES):
             raise BuildError("memory.md is below the soft limit; nothing to compact")
@@ -983,6 +1060,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         written["target_met"] = not (written["lines"] > TARGET_LINES
                                      or written["bytes"] > TARGET_BYTES)
         return written
+    if mode == "merge":
+        if memory.audit != "pending":
+            raise BuildError("merge runs only for an audit (memory.md records no pending audit)")
+        brief = require(committed(repo, task, "brief.md"), "brief.md")
+        plan = require(committed(repo, task, "plan.md"), "plan.md")
+        status = require(committed(repo, task, "status.md"), "status.md")
+        retired = id_list(header(status, "Retired point IDs"))
+        next_id = header(status, "Next point ID") or "P001"
+        reviews = {}
+        failures = []
+        for name in ("review.md", SECOND_REVIEW):
+            text = worktree(repo, task, name)
+            if text is None:
+                raise BuildError(f"{name} is missing")
+            reviews[name] = text
+            if header(text, "Version") != header(plan, "Version"):
+                failures.append(f"{name}: Version must equal the committed plan.md Version")
+                continue
+            try:
+                apply_review(copy.deepcopy(memory), brief, plan, text, "audit", retired, next_id)
+            except FormatError as exc:
+                failures += [f"{name}: {failure}" for failure in exc.failures]
+        if failures:
+            raise FormatError(failures)
+        merged, counts = merge_reviews(reviews["review.md"], reviews[SECOND_REVIEW], next_id)
+        write_task_file(repo, task, "review.md", merged)
+        (repo / task / SECOND_REVIEW).unlink()
+        return counts
     if mode == "update":
         expected = "audit" if memory.audit == "pending" else "converge"
         if args.scope != expected:
@@ -1042,7 +1147,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("init", "plan-check", "scope", "update", "feedback", "seed", "compact"):
+    for mode in ("init", "plan-check", "scope", "merge", "update", "feedback", "seed", "compact"):
         command = subparsers.add_parser(mode)
         command.add_argument("--repo", required=True)
         command.add_argument("--task", required=True)

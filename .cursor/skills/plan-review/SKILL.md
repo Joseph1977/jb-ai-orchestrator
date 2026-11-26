@@ -17,8 +17,8 @@ You are the **orchestrator**. A planner writes `plan.md`; a reviewer from a diff
 ## Invocation
 
 ```
-/plan-review <what we want to do> [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>]
-/plan-review resume <task folder>  [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>]
+/plan-review <what we want to do> [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>] [--second-audit-model <slug>]
+/plan-review resume <task folder>  [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>] [--second-audit-model <slug>]
 ```
 
 | Setting | Default |
@@ -26,6 +26,7 @@ You are the **orchestrator**. A planner writes `plan.md`; a reviewer from a diff
 | `--max-iterations` | `4` |
 | models | require explicit available planner (`self` allowed) and different-family reviewer |
 | `--audit-reviewer-model` | off; when given, passes the same reviewer checks and runs only `audit`-scope reviews |
+| `--second-audit-model` | off (experiment); when given, every `audit` review also runs this independent reviewer and merges both |
 
 A new run without `--max-iterations` records `Iteration: 1 of 4`. Existing runs keep the limit in `status.md`.
 
@@ -43,7 +44,9 @@ user claims cannot establish it. Warn that self retains round context.
 Planner/reviewer families must differ: `claude-*`, `gpt-*`, `grok-*`/`cursor-grok-*`, or
 `composer-*` (or matching named system family). Record exact writer identity in each file and
 mode/models/model changes in status. An audit reviewer model passes the same reviewer checks; status
-records `Reviewer model: <slug> (audit: <slug>)`, and an `audit` review's `Model:` is that slug.
+records `Reviewer model: <slug> (audit: <slug>)`, and an `audit` review's `Model:` is that slug. A
+second audit model passes the same checks and differs from the audit reviewer slug; status adds
+`second audit: <slug>` in those parentheses, and a merged audit's `Model:` is `<audit slug> + <second slug>`.
 
 Never infer model selection or implementation approval.
 
@@ -399,7 +402,9 @@ floor is still too large: stop and ask the user to retire or decide points.
    (an audit also passes the printed `checklist` as `--checklist`) and
    launch a new guarded foreground Task with reviewer model (the audit reviewer model, if set, for
    `audit`), `subagent_type: generalPurpose`, `run_in_background: false`, and
-   no `resume` or `inherit`. Validate, then `memory_build.py update --scope <same>`; record `State: reviewed`,
+   no `resume` or `inherit`. With a second audit model, an `audit` first runs that reviewer the same
+   way (prompt adds `--second-audit`; the owned file is `review-2.md`), then the audit reviewer, then
+   `memory_build.py merge` (exit 1 names the file to retry). Validate, then `memory_build.py update --scope <same>`; record `State: reviewed`,
    counts/trend/next ID from its output, and commit `review vN` with review, status and memory.
 4. **Decide** (the limit is checked here, never in a prompt or inside a round):
    1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0. If
@@ -494,7 +499,7 @@ Self-planner corrects failures before commit; subagent gets one `recovery.md` re
 
 Render each Task prompt only with `python3 -I -B "$SKILL_ROOT/scripts/prompt_build.py" planner|reviewer|minors
 --task <abs task folder> --model <header slug> --plan-cap <n> --review-cap <n> [--next-id P###]
-[--retired IDs|none] [--pushed-back IDs|none] [--scope audit|converge] [--checklist items]` (templates in
+[--retired IDs|none] [--pushed-back IDs|none] [--scope audit|converge] [--checklist items] [--second-audit]` (templates in
 `references/prompts.md`; the probe code comes from the marker above). `--scope` is required for reviewer,
 refused otherwise, and always equals the `memory_build.py scope` output; `--checklist` is required for
 `audit`, refused otherwise, and always equals that output's `checklist`. Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
