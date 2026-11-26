@@ -37,6 +37,14 @@
   audit state, that compaction keeps the other sections and every closed ID, and
   that launches are refused at the soft limit. `history` reports `memory`
   (`native`, `seeded` or `absent`).
+- While memory records `Audit: pending`, `consensus` is refused, so an old
+  `NO_FURTHER_COMMENTS` review cannot end a seeded or re-audited run. A
+  `feedback` that changes the brief must set `Audit: pending`. The only
+  exception is a change limited to `## User feedback` that records newly retired
+  point IDs (`--no-audit`).
+- Review coverage must agree with each point's anchors. Observations may not
+  cite anchors listed in `## Changes`. Removed anchors can be cited and must be
+  covered in a converge review.
 - Resuming a task without `memory.md` seeds it from the committed files
   (`memory-seed vN`, default `Audit: pending`), so the next review is a full
   audit.

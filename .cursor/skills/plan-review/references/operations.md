@@ -138,8 +138,10 @@ IDs and the soft limit. Exit 1 means the floor is still too large: stop and ask 
   scope, `[late]`, Observations and Coverage rules, closes points, and prints the counts and
   `next_id` for status.md. `compact: true` triggers the memory gate.
 - `feedback [--retired IDs] [--no-audit]`: before `feedback vN`. A changed brief sets
-  `Audit: pending` unless `--no-audit` (point decisions or retired IDs only); retired IDs leave Open
-  points.
+  `Audit: pending`. `--no-audit` is accepted only when brief.md changed solely under
+  `## User feedback` and `--retired` names IDs that status.md already records as retired; otherwise
+  it exits 2, and `commit_check.py` rejects such a `feedback` without `Audit: pending`. Retired IDs
+  leave Open points.
 - `seed --audit pending|waived`: on resume of a task without memory.md (`resume.md`).
 - `compact`: at the memory gate.
 
@@ -260,11 +262,15 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 - `audit` scope: `## Coverage` lists every brief item and every plan anchor exactly once, in
   `- ok: <items>` lines or as `- <item>: <point IDs>`; every point ID appears there and every listed
   ID is a point. No `[late]` and no `## Observations`.
-- `converge` scope: `## Coverage` lists exactly the anchors added or changed in plan.md
-  `## Changes`. A new point naming none of them is late: only `[blocker] [late]`, with
-  `Missed: <reason>` in the fix; any other late issue is a `- (<anchors>) <issue>` line under
-  `## Observations`. `memory_build.py update` enforces both scopes (exit 1 is a reviewer format
-  failure).
+- `converge` scope: `## Coverage` lists exactly the anchors in plan.md `## Changes`, removed ones
+  included, and points may cite removed anchors. A new point naming none of them is late: only
+  `[blocker] [late]`, with `Missed: <reason>` in the fix; any other late issue is a
+  `- (<anchors>) <issue>` line under `## Observations`, which never cites a `## Changes` anchor.
+- Both scopes: a coverage line maps an item only to points that cite it, and every point is mapped
+  from each in-scope item it cites (so such an item is never `ok`). `memory_build.py update`
+  enforces the scope rules (exit 1 is a reviewer format failure).
+- With `Audit: pending`, `consensus` is refused; a `NO_FURTHER_COMMENTS` review then continues with
+  `plan-start vN+1`, or at the limit commits `limit-reached vN` (open points may be 0/0/0).
 - Before `plan vN`, run `python3 -I -B "$SKILL_ROOT/scripts/memory_build.py" plan-check --repo
   "$ROOT" --task workspace/outcomes/<task>`. Exit 1 is a format failure (anchors, sections,
   `## Changes`); exit 2 stops. With a prior review, `## Changes` is required and must list exactly

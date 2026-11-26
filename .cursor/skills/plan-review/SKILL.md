@@ -401,7 +401,9 @@ floor is still too large: stop and ask the user to retire or decide points.
    no `resume` or `inherit`. Validate, then `memory_build.py update --scope <same>`; record `State: reviewed`,
    counts/trend/next ID from its output, and commit `review vN` with review, status and memory.
 4. **Decide** (the limit is checked here, never in a prompt or inside a round):
-   1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0.
+   1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0. If
+      `memory.md` records `Audit: pending` (seeded or re-audit), the review was not an audit: treat
+      it as `CHANGES_REQUESTED` (`commit_check.py` refuses that consensus).
    2. Open points remain (`CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = limit → digest-check/read
       `limit.md`, commit `limit-reached vN`; only an explicit user K continues.
    3. `APPROVE_WITH_MINORS` and N < limit → Minors close.

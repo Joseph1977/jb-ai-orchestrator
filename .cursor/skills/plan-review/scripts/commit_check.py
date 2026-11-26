@@ -449,6 +449,11 @@ class _Context:
         self.review: dict[str, Any] | None = None
         self.memory: str | None = None
         self.memory_text: str | None = None
+        self.brief_text: str | None = None
+        self.retired: set[str] = set()
+
+    def audit_pending(self) -> bool:
+        return self.memory_text is not None and _audit_state(_memory_parts(self.memory_text)[0]) == "pending"
 
 
 def _validate_step(
@@ -533,6 +538,8 @@ def _validate_step(
     else:
         failures.extend(_legacy_checks(ctx, step, version))
     failures.extend(_memory_checks(ctx, task, step, version, changed, read))
+    ctx.brief_text = read("brief.md")
+    ctx.retired = set(re.findall(r"P[0-9]{3,}", _header(status, "Retired point IDs") or ""))
 
     outcome = _header(status, "Outcome")
     if iteration and ctx.format == "current":
@@ -629,6 +636,11 @@ def _current_checks(
             failures.append(f"{step} must keep Outcome {ctx.outcome!r}, got {outcome!r}")
     elif step == "consensus":
         expected = f"consensus at iteration {count} of {limit}, open points 0/0/0"
+        if ctx.audit_pending():
+            failures.append(
+                "consensus is rejected: memory.md records Audit: pending, so the latest review "
+                "is not a full audit; run an audit review first"
+            )
         if not review or review["version"] != version or review["verdict"] != "NO_FURTHER_COMMENTS":
             got = "none" if not review else f"v{review['version']} {review['verdict']}"
             failures.append(
@@ -640,11 +652,14 @@ def _current_checks(
         if open_points != "0/0/0":
             failures.append(f"consensus must record Open points 0/0/0, got {open_points}")
     elif step == "limit-reached":
-        if not review or review["version"] != version or review["verdict"] not in OPEN_VERDICTS:
+        pending = ctx.audit_pending()
+        verdicts = OPEN_VERDICTS | ({"NO_FURTHER_COMMENTS"} if pending else set())
+        if not review or review["version"] != version or review["verdict"] not in verdicts:
             got = "none" if not review else f"v{review['version']} {review['verdict']}"
             failures.append(
                 f"limit-reached requires the latest committed review at version {version} with "
-                f"open points (CHANGES_REQUESTED or APPROVE_WITH_MINORS), got {got}"
+                f"open points (CHANGES_REQUESTED or APPROVE_WITH_MINORS) or a pending audit, "
+                f"got {got}"
             )
         else:
             review_limit = int(review["iteration"].split(" of ")[1])
@@ -663,7 +678,9 @@ def _current_checks(
                     f"limit-reached Open points {open_points} must equal the review's "
                     f"{review['open']}"
                 )
-        if open_points is None or not COUNTS.fullmatch(open_points) or open_points == "0/0/0":
+        if open_points is None or not COUNTS.fullmatch(open_points) or (
+            open_points == "0/0/0" and not pending
+        ):
             failures.append(f"limit-reached must keep nonzero Open points, got {open_points}")
         expected = f"limit-reached at iteration {count} of {limit}, open points {open_points}"
         if outcome != expected:
@@ -836,8 +853,36 @@ def _memory_checks(
                 failures.append("memory-compact changed the closed point IDs")
             if _over(size, MEMORY_SOFT):
                 failures.append("memory-compact must end below the soft limit")
+    brief = read("brief.md")
+    status_text = read("status.md") or ""
+    retired = set(re.findall(r"P[0-9]{3,}", _header(status_text, "Retired point IDs") or ""))
+    if (
+        step == "feedback" and not parse_failures and _audit_state(parts) != "pending"
+        and f"{task}/brief.md" in changed and ctx.brief_text is not None
+    ):
+        if _brief_outside_feedback(brief or "") != _brief_outside_feedback(ctx.brief_text):
+            failures.append(
+                "feedback changed brief.md outside ## User feedback, so memory.md must record "
+                "Audit: pending"
+            )
+        elif not retired - ctx.retired:
+            failures.append(
+                "feedback changed brief.md without retiring a point, so memory.md must record "
+                "Audit: pending"
+            )
     ctx.memory_text = text
     return failures
+
+
+def _brief_outside_feedback(text: str) -> list[str]:
+    kept: list[str] = []
+    feedback = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            feedback = line.rstrip() == "## User feedback"
+        if not feedback:
+            kept.append(line)
+    return kept
 
 
 def _show_task_file(repo: Path, commit: str, task: str) -> Callable[[str], str | None]:

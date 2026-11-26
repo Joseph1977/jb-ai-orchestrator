@@ -1059,6 +1059,44 @@ class CurrentFormatTests(HistoryFixture):
         self.assertEqual(result["memory"], "seeded")
         self.assertEqual(result["memory_note"], "pre-memory commits: memory checks not applied")
 
+    def seeded_after_no_comments(self, limit: int) -> None:
+        self.cbrief(limit, memory=False)
+        self.round_(1, "NO_FURTHER_COMMENTS", limit, memory=False)
+        self.step("memory-seed", 1, {"memory.md": memory_text(log=("- seed v1: audit pending",)),
+                                     "status.md": self.cstatus("reviewed", 1, limit)})
+
+    def test_pending_audit_blocks_consensus_from_old_review(self) -> None:
+        self.seeded_after_no_comments(4)
+        self.assert_pre_rejects("consensus", 1, {"status.md": self.cstatus(
+            "awaiting-user", 1, 4, outcome="consensus at iteration 1 of 4, open points 0/0/0")},
+            "consensus is rejected: memory.md records Audit: pending")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        self.step("plan-start", 2, {"status.md": self.cstatus("planner-running", 2, 4)})
+        self.assertTrue(self.history()["ok"])
+
+    def test_pending_audit_at_limit_goes_to_limit_reached(self) -> None:
+        self.seeded_after_no_comments(1)
+        self.limit_reached(1, "0/0/0")
+        self.assertTrue(self.history()["ok"], json.dumps(self.history(), indent=2))
+
+    def test_feedback_brief_change_requires_pending_audit(self) -> None:
+        self.cbrief(1)
+        self.round_(1, "CHANGES_REQUESTED", 1, "0/1/0")
+        self.limit_reached(1, "0/1/0")
+        status = self.cstatus("planning", 1, 2, open_points="0/1/0")
+        self.assert_pre_rejects("feedback", 1, {"brief.md": "# Brief\nnew goal\n",
+                                                "status.md": status},
+                                "changed brief.md outside ## User feedback")
+        self.git("reset", "-q")
+        decided = "# Brief\n## User feedback\n- 2026-11-26: user decided P001\n"
+        self.assert_pre_rejects("feedback", 1, {"brief.md": decided, "status.md": status},
+                                "without retiring a point")
+        self.git("reset", "-q")
+        self.step("feedback", 1, {"brief.md": decided,
+                                  "status.md": status + "Retired point IDs: P001\n"})
+        self.assertTrue(self.history()["ok"])
+
     def test_deleting_memory_after_start_rejected(self) -> None:
         self.cbrief()
         (self.repo / STATUS).write_text(self.cstatus("planner-running"), encoding="utf-8")

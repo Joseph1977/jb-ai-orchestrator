@@ -239,6 +239,18 @@ def review_point_ids(text: str) -> list[str]:
     return found
 
 
+def outside_feedback(text: str) -> list[str]:
+    """brief.md lines outside `## User feedback`, the part an audit depends on."""
+    kept: list[str] = []
+    feedback = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            feedback = line.rstrip() == "## User feedback"
+        if not feedback:
+            kept.append(line)
+    return kept
+
+
 def id_list(value: str | None) -> list[str]:
     if not value or value.strip() == "none":
         return []
@@ -550,8 +562,10 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
     points, coverage, observations, accepted, failures = parse_review(review)
     anchors = plan_anchors(plan)[0]
     checklist = brief_items(brief) + list(anchors)
-    known = set(checklist)
-    listed = [a for a, (kind, _t, _w) in changes(plan)[0].items() if kind != "removed"]
+    listed = list(changes(plan)[0])
+    removed = [a for a, (kind, _t, _w) in changes(plan)[0].items() if kind == "removed"]
+    known = set(checklist) | set(removed)
+    scope_items = known if scope == "audit" else set(listed)
     point_ids = [point["id"] for point in points]
     previous = {point["id"]: point for point in memory.open}
     retired_set = set(retired)
@@ -579,10 +593,18 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
     for item in coverage:
         if item not in known:
             failures.append(f"coverage lists unknown item {item}")
+    by_id = {point["id"]: point for point in points}
     for item, ids in coverage.items():
         for point in ids:
-            if point not in point_ids:
+            if point not in by_id:
                 failures.append(f"coverage {item} cites {point}, which is not in ## Points")
+            elif item not in by_id[point]["anchors"]:
+                failures.append(f"coverage maps {item} to {point}, which does not cite {item}")
+    for point in points:
+        for anchor in point["anchors"]:
+            if anchor in scope_items and point["id"] not in coverage.get(anchor, [point["id"]]):
+                failures.append(f"{point['id']} cites {anchor}, but coverage does not map "
+                                f"{anchor} to {point['id']}")
     if scope == "audit":
         missing = [item for item in checklist if item not in coverage]
         if missing:
@@ -601,6 +623,10 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
         unknown = [a for a in anchors_cited if a not in known]
         if unknown:
             failures.append(f"observation cites unknown anchors {unknown}")
+        on_changes = [a for a in anchors_cited if a in listed]
+        if on_changes:
+            failures.append(f"observation cites {on_changes}, listed in ## Changes; an issue on a "
+                            "changed anchor is a point")
     if failures:
         raise FormatError(failures)
 
@@ -632,7 +658,8 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
 
     cov = canonical_coverage(memory, brief, plan)
     for item, ids in coverage.items():
-        cov[item] = f"open {', '.join(ids)}" if ids else f"verified v{version}"
+        if item in cov:
+            cov[item] = f"open {', '.join(ids)}" if ids else f"verified v{version}"
     if scope == "audit":
         memory.audit = f"done v{version}"
     for item, state in list(cov.items()):
@@ -972,7 +999,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if state.startswith("open "):
                     ids = [p for p in state[5:].split(", ") if p not in retired]
                     memory.coverage[item] = ("open " + ", ".join(ids)) if ids else f"decided v{version}"
-        if brief != committed(repo, task, "brief.md"):
+        previous_brief = committed(repo, task, "brief.md") or ""
+        if args.no_audit and brief != previous_brief:
+            if outside_feedback(brief) != outside_feedback(previous_brief):
+                raise BuildError("--no-audit is refused: brief.md changed outside ## User feedback")
+            recorded = set(id_list(header(status, "Retired point IDs")))
+            if not retired or not set(retired) <= recorded:
+                raise BuildError("--no-audit needs --retired IDs that status.md records as retired")
+        if brief != previous_brief:
             if args.no_audit:
                 memory.decisions.append(
                     f"- feedback v{version}: point decisions only; audit not required")

@@ -220,6 +220,41 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("- open S1: P002", rendered)
         self.assertEqual(memory_build.Memory.parse(rendered).closed_ids(), {"P001"})
 
+    def test_removed_anchor_can_be_cited_and_must_be_covered(self) -> None:
+        plan = plan_v2(change="- D2 changed (P001): bounded deadline.\n"
+                              "- S1 removed (consistency): extraction dropped.\n").replace(
+            "### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n", "")
+        uncovered = review(2, "", "- ok: D2\n", "NO_FURTHER_COMMENTS")
+        self.assertIn("exactly the ## Changes anchors",
+                      self.failures(audited_memory(), plan, uncovered, "converge"))
+        memory = audited_memory()
+        text = review(2, "1. P002 [major] (S1, In-1) removing S1 drops the In-1 test → restore it\n",
+                      "- ok: D2\n- S1: P002\n")
+        result = memory_build.apply_review(memory, BRIEF, plan, text, "converge", [], "P002")
+        self.assertEqual(result["new"], 1)
+        rendered = memory.render()
+        self.assertIn("- P002 [major] (S1, In-1) new v2:", rendered)
+        self.assertNotIn("S1", rendered.split("## Coverage")[1].split("## Open points")[0])
+
+    def test_observation_cannot_cite_a_changed_anchor(self) -> None:
+        text = review(2, "", "- ok: D2\n", "NO_FURTHER_COMMENTS",
+                      extra="\n## Observations\n- (D2) the new bound is never enforced\n")
+        self.assertIn("observation cites ['D2'], listed in ## Changes",
+                      self.failures(audited_memory(), plan_v2(), text, "converge"))
+
+    def test_coverage_must_match_point_anchors(self) -> None:
+        wrong_item = REVIEW_V1.replace("- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1",
+                                       "- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n- D1: P001")
+        self.assertIn("coverage maps D1 to P001, which does not cite D1",
+                      self.failures(fresh_memory(), PLAN_V1, wrong_item, "audit"))
+        hidden = REVIEW_V1.replace("- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1\n- D2: P001",
+                                   "- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1, D2")
+        self.assertIn("P001 cites D2, but coverage does not map D2 to P001",
+                      self.failures(fresh_memory(), PLAN_V1, hidden, "audit"))
+        converge = review(2, "1. P002 [major] (D2) bound too loose → tighten\n", "- ok: D2\n")
+        self.assertIn("P002 cites D2, but coverage does not map D2 to P002",
+                      self.failures(audited_memory(), plan_v2(), converge, "converge"))
+
     def test_closed_id_cannot_be_reused(self) -> None:
         memory = audited_memory()
         memory_build.apply_review(memory, BRIEF, plan_v2(),
@@ -358,9 +393,18 @@ class CliTests(unittest.TestCase):
         self.commit("review.md", "memory.md")
         self.assertEqual(json.loads(self.run_cli("scope").stdout), {"scope": "converge"})
 
-        self.write("status.md", "# Status — demo\nIteration: 2 of 5\n")
+        self.write("status.md", "# Status — demo\nIteration: 2 of 5\nRetired point IDs: none\n")
         self.assertEqual(json.loads(self.run_cli("feedback").stdout), {"changed": False})
-        self.write("brief.md", BRIEF.replace("None\n", "- 2026-11-26: narrow scope\n"))
+        self.write("brief.md", BRIEF.replace("- C-2 Isolated.", "- C-2 Isolated and fast."))
+        outside = self.run_cli("feedback", "--no-audit", "--retired", "P001")
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn("changed outside ## User feedback", outside.stderr)
+        self.write("brief.md", BRIEF.replace("None\n", "- 2026-11-26: user decided P001\n"))
+        self.assertEqual(self.run_cli("feedback", "--no-audit").returncode, 2)
+        unrecorded = self.run_cli("feedback", "--no-audit", "--retired", "P001")
+        self.assertEqual(unrecorded.returncode, 2)
+        self.assertIn("status.md records as retired", unrecorded.stderr)
+        self.write("status.md", "# Status — demo\nIteration: 2 of 5\nRetired point IDs: P001\n")
         no_audit = self.run_cli("feedback", "--no-audit", "--retired", "P001")
         self.assertEqual(no_audit.returncode, 0, no_audit.stderr)
         memory = (self.repo / TASK / "memory.md").read_text(encoding="utf-8")

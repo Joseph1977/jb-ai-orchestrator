@@ -2,7 +2,7 @@
 
 On Limit reached, read this file before asking the user or writing the limit commit.
 
-Trigger: review vN has open points (any verdict: `CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = limit → Limit reached. Never start plan vN+1 or raise the limit without the user's explicit K. Do not commit `plan-start vN+1`. Leave the recorded limit unchanged until that K is explicit. There is no consensus at the limit with open points.
+Trigger: review vN has open points (any verdict: `CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`), or `memory.md` records `Audit: pending` (even after `NO_FURTHER_COMMENTS`, with open points 0/0/0), and N = limit → Limit reached. Never start plan vN+1 or raise the limit without the user's explicit K. Do not commit `plan-start vN+1`. Leave the recorded limit unchanged until that K is explicit. There is no consensus at the limit with open points.
 
 `NO_FURTHER_COMMENTS` goes to Consensus at any N ≤ limit. Feedback at consensus keeps its implicit one-round rule and is not this flow.
 
@@ -32,7 +32,7 @@ Give the estimate as a number or a small range, with a one-line reason. Late fin
 
 ## K, retire, and stop
 
-On approval of K more iterations: set `Iteration: N of N+K` and `Outcome: none` in `status.md`, `State: planning`, and commit `feedback vN`. Run `memory_build.py feedback` first (`--retired <IDs>` for user-decided points; `--no-audit` unless the user asked for a re-audit or the brief scope changed) and include `memory.md` when it changed. A K-only grant commits `status.md` alone; `brief.md` changes in that commit only to record dated user feedback or user-decided point IDs (each needs an explicit point ID, which is appended to `Retired point IDs`), never the limit. Then continue from loop step 2 with the version after the latest committed plan. Retired IDs cannot be maintained, reused, or removed from that list.
+On approval of K more iterations: set `Iteration: N of N+K` and `Outcome: none` in `status.md`, `State: planning`, and commit `feedback vN`. Run `memory_build.py feedback` first (`--retired <IDs>` for user-decided points; add `--no-audit` only when the brief changed solely to record those retired IDs under `## User feedback`) and include `memory.md` when it changed. A K-only grant commits `status.md` alone; `brief.md` changes in that commit only to record dated user feedback or user-decided point IDs (each needs an explicit point ID, which is appended to `Retired point IDs`), never the limit. Then continue from loop step 2 with the version after the latest committed plan. Retired IDs cannot be maintained, reused, or removed from that list.
 
 K must be an explicit number from the user. Do not reuse a recommendation as approval. Do not raise the limit from silence.
 
