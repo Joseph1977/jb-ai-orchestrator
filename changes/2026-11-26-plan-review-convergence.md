@@ -58,8 +58,13 @@
 - Coverage that marks a cited item `ok`, or maps an item to a point that does
   not cite it, fails; a mapping that only omits a citing point is completed
   from the points' anchors. In an audit of a seeded task only, an `ok` ID the
-  plan mentions mid-line but never defines as an anchor is ignored; the audit
-  prompt now says what counts as a plan anchor.
+  plan mentions mid-line but never defines as an anchor is ignored.
+- `memory_build.py scope` prints the audit `checklist` (committed brief items
+  and plan anchors), and the audit prompt receives it via the required
+  `prompt_build.py --checklist`, so reviewers no longer derive the anchor set.
+  The audit block checks every item through seven fixed lenses: existing gates
+  still apply, isolation, existing callers and records, explicit behaviour
+  changes, persisted state, owned processes and secrets, and tested claims.
 - A pending audit also blocks consensus for tasks in the legacy status format.
 - A maintained point may keep citing an anchor that an earlier plan removed.
 - Retry summaries keep quoted details (non-ASCII arrows and dashes become

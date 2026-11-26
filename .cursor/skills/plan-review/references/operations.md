@@ -133,7 +133,8 @@ IDs and the soft limit. Exit 1 means the floor is still too large: stop and ask 
 
 - `init`: after writing brief.md, before `brief v1`.
 - `plan-check`: before `plan vN` (Format checks).
-- `scope`: before `review-start vN`.
+- `scope`: before `review-start vN`. For `audit` it also prints `checklist`, the committed brief
+  items and plan anchors in order, which the reviewer prompt receives as `--checklist`.
 - `update --scope <scope>`: after the reviewer returns and review.md validates; it applies the
   scope, `[late]`, Observations and Coverage rules, closes points, and prints the counts and
   `next_id` for status.md. `compact: true` triggers the memory gate.

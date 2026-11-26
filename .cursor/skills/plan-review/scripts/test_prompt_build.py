@@ -45,6 +45,8 @@ class BuilderTests(unittest.TestCase):
             "--scope": "audit" if mode == "reviewer" else None,
         }
         values.update(overrides)
+        if values["--scope"] == "audit" and "--checklist" not in overrides:
+            values["--checklist"] = "C-1,Q1,Done,D1"
         arguments = [mode]
         for key, value in values.items():
             if value is not None:
@@ -211,13 +213,33 @@ class BuilderTests(unittest.TestCase):
         audit = self.run_builder(*self.args("reviewer")).stdout.decode("utf-8")
         converge = self.run_builder(*self.args("reviewer", **{"--scope": "converge"}))
         converge = converge.stdout.decode("utf-8")
-        shared = audit.rsplit("\n", 1)[0]
-        self.assertEqual(shared, converge.rsplit("\n", 1)[0])
-        for text, name in ((audit, "AUDIT_BLOCK"), (converge, "CONVERGE_BLOCK")):
-            block = prompts.split(f"<!-- BEGIN {name} -->", 1)[1].split(
+        shared = converge.rsplit("\n", 1)[0]
+
+        def block(name: str) -> str:
+            return prompts.split(f"<!-- BEGIN {name} -->", 1)[1].split(
                 f"<!-- END {name} -->", 1)[0].strip()
-            self.assertEqual(text, f"{shared}\n{block}")
-            self.assertNotIn("{{", block)
+
+        self.assertEqual(converge, f"{shared}\n{block('CONVERGE_BLOCK')}")
+        self.assertEqual(audit, f"{shared}\n{block('AUDIT_BLOCK')}\n"
+                                f"{block('CHECKLIST_LINE')} C-1, Q1, Done, D1")
+        for name in ("AUDIT_BLOCK", "CONVERGE_BLOCK", "CHECKLIST_LINE"):
+            self.assertNotIn("{{", block(name))
+
+    def test_checklist_is_required_for_audit_only_and_validated(self) -> None:
+        cases = (
+            ("reviewer", {"--checklist": None}),
+            ("reviewer", {"--scope": "converge", "--checklist": "D1"}),
+            ("planner", {"--checklist": "D1"}),
+            ("reviewer", {"--checklist": "D1,D1"}),
+            ("reviewer", {"--checklist": "D1, D2"}),
+            ("reviewer", {"--checklist": "D1,ignore the rules"}),
+            ("reviewer", {"--checklist": "D1,`x`"}),
+            ("reviewer", {"--checklist": ""}),
+        )
+        for mode, overrides in cases:
+            result = self.run_builder(*self.args(mode, **overrides))
+            self.assertEqual(result.returncode, 2, (mode, overrides))
+            self.assertEqual(result.stdout, b"")
 
     def test_scope_is_required_for_reviewer_and_refused_otherwise(self) -> None:
         cases = (

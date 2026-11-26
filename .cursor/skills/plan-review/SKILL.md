@@ -395,7 +395,8 @@ floor is still too large: stop and ask the user to retire or decide points.
    `inherit`. Validate, including `memory_build.py plan-check` (`operations.md`); commit plan with
    `State: reviewing`.
 3. **Review:** run `memory_build.py scope` (`audit` or `converge`); commit `reviewer-running` as
-   `review-start vN` (retry: same exact subject); render the reviewer prompt with that `--scope` and
+   `review-start vN` (retry: same exact subject); render the reviewer prompt with that `--scope`
+   (an audit also passes the printed `checklist` as `--checklist`) and
    launch a new guarded foreground Task with reviewer model (the audit reviewer model, if set, for
    `audit`), `subagent_type: generalPurpose`, `run_in_background: false`, and
    no `resume` or `inherit`. Validate, then `memory_build.py update --scope <same>`; record `State: reviewed`,
@@ -493,9 +494,10 @@ Self-planner corrects failures before commit; subagent gets one `recovery.md` re
 
 Render each Task prompt only with `python3 -I -B "$SKILL_ROOT/scripts/prompt_build.py" planner|reviewer|minors
 --task <abs task folder> --model <header slug> --plan-cap <n> --review-cap <n> [--next-id P###]
-[--retired IDs|none] [--pushed-back IDs|none] [--scope audit|converge]` (templates in `references/prompts.md`;
-the probe code comes from the marker above). `--scope` is required for reviewer, refused otherwise, and
-always equals the `memory_build.py scope` output. Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
+[--retired IDs|none] [--pushed-back IDs|none] [--scope audit|converge] [--checklist items]` (templates in
+`references/prompts.md`; the probe code comes from the marker above). `--scope` is required for reviewer,
+refused otherwise, and always equals the `memory_build.py scope` output; `--checklist` is required for
+`audit`, refused otherwise, and always equals that output's `checklist`. Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
 builder exits 2 on any other input. It has no version, iteration, or limit option; agents derive `Version:`
 from task files. Self-planner mode follows the same rendered rules.
 

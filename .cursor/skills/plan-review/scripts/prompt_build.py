@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Render a plan-review prompt from the shipped template plus a fixed set of scalars.
 
-A reviewer prompt also takes `--scope audit|converge`, which appends that scope's block.
+A reviewer prompt also takes `--scope audit|converge`, which appends that scope's block; an audit
+also takes `--checklist`, the item list `memory_build.py scope` prints.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ ID_LIST = re.compile(r"^(none|P[0-9]{3,}(,P[0-9]{3,})*)$")
 TOKEN = re.compile(r"\{\{([A-Z_]+)\}\}")
 UNSAFE = re.compile(r"[\s`]")
 FORMAT_ERROR = re.compile(r"[\x20-\x5f\x61-\x7a|~]{1,600}")
+CHECKLIST = re.compile(r"[A-Z][A-Za-z0-9-]{0,15}(,[A-Z][A-Za-z0-9-]{0,15}){0,499}")
 
 ALLOWED_SCALARS = (
     "TASK_FOLDER",
@@ -142,9 +144,11 @@ def _literal_line(prompts: str, name: str) -> str:
 
 
 def build(mode: str, values: dict[str, str], scope: str | None = None,
-          format_error: str | None = None) -> str:
+          format_error: str | None = None, checklist: str | None = None) -> str:
     if (mode == "reviewer") != (scope is not None):
         raise BuildError("--scope is required for reviewer and refused for planner/minors")
+    if (scope == "audit") != (checklist is not None):
+        raise BuildError("--checklist is required for --scope audit and refused otherwise")
     prompts = _read(PROMPTS_FILE)
     template_name = "REVIEWER_PROMPT" if mode == "reviewer" else "PLANNER_PROMPT"
     prompt = render(_between(prompts, template_name, "prompts.md"), values)
@@ -152,6 +156,9 @@ def build(mode: str, values: dict[str, str], scope: str | None = None,
         prompt = f"{prompt}\n{_literal_line(prompts, 'MINORS_LINE')}"
     if scope is not None:
         prompt = f"{prompt}\n{_literal_line(prompts, SCOPE_BLOCKS[scope])}"
+    if checklist is not None:
+        items = ", ".join(_checklist(checklist).split(","))
+        prompt = f"{prompt}\n{_literal_line(prompts, 'CHECKLIST_LINE')} {items}"
     if format_error is not None:
         prompt = f"{prompt}\n{_literal_line(prompts, 'RETRY_LINE')} {format_error}"
     return prompt
@@ -161,6 +168,13 @@ def _format_error(value: str) -> str:
     if not FORMAT_ERROR.fullmatch(value):
         raise BuildError("--format-error must be one line of at most 600 printable characters "
                          "with no backtick or brace")
+    return value
+
+
+def _checklist(value: str) -> str:
+    items = value.split(",")
+    if not CHECKLIST.fullmatch(value) or len(set(items)) != len(items):
+        raise BuildError("--checklist must be distinct comma-separated item IDs with no spaces")
     return value
 
 
@@ -176,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pushed-back")
     parser.add_argument("--scope", choices=tuple(SCOPE_BLOCKS))
     parser.add_argument("--format-error")
+    parser.add_argument("--checklist")
     return parser
 
 
@@ -184,7 +199,7 @@ def main() -> int:
     try:
         probe = _probe_code(_read(SKILL_FILE))
         error = None if args.format_error is None else _format_error(args.format_error)
-        prompt = build(args.mode, scalars(args, probe), args.scope, error)
+        prompt = build(args.mode, scalars(args, probe), args.scope, error, args.checklist)
     except BuildError as exc:
         print(f"prompt_build: {exc}", file=sys.stderr)
         return 2

@@ -965,7 +965,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     memory_text = require(committed(repo, task, "memory.md"), "memory.md")
     memory = Memory.parse(memory_text)
     if mode == "scope":
-        return {"scope": "audit" if memory.audit == "pending" else "converge"}
+        if memory.audit != "pending":
+            return {"scope": "converge"}
+        brief = require(committed(repo, task, "brief.md"), "brief.md")
+        plan = require(committed(repo, task, "plan.md"), "plan.md")
+        items = dict.fromkeys(brief_items(brief) + list(plan_anchors(plan)[0]))
+        return {"scope": "audit", "checklist": ",".join(items)}
     if mode == "compact":
         if not at_or_over(memory_text, SOFT_LINES, SOFT_BYTES):
             raise BuildError("memory.md is below the soft limit; nothing to compact")

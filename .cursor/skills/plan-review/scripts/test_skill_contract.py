@@ -30,6 +30,11 @@ def block(name: str) -> str:
 
 
 REFERENCE_TASK_BYTES = 100
+REFERENCE_CHECKLIST = ",".join(
+    [f"C-{n}" for n in range(1, 7)] + [f"In-{n}" for n in range(1, 6)]
+    + [f"Out-{n}" for n in range(1, 4)] + [f"Q{n}" for n in range(1, 6)] + ["Done"]
+    + [f"D{n}" for n in range(1, 25)] + [f"S{n}" for n in range(1, 7)]
+)
 
 
 def render(mode: str, reference_path: bool = False, scope: str = "converge") -> str:
@@ -42,6 +47,8 @@ def render(mode: str, reference_path: bool = False, scope: str = "converge") -> 
         task = Path(directory).resolve() / "workspace" / "outcomes" / TASK_NAME
         task.mkdir(parents=True)
         scope_args = ["--scope", scope] if mode == "reviewer" else []
+        if scope_args and scope == "audit":
+            scope_args += ["--checklist", REFERENCE_CHECKLIST]
         result = subprocess.run(
             ["python3", "-I", "-B", str(BUILDER), mode, "--task", str(task),
              "--model", "example-model-1", "--plan-cap", "250", "--review-cap", "150",
@@ -532,10 +539,10 @@ class HonestLimitContractTests(unittest.TestCase):
         self.assertIn("Severity follows impact alone.", self.reviewer)
         audit = " ".join(block("AUDIT_BLOCK").split())
         for sentence in (
-            "Before writing the Verdict, build a checklist of every brief Constraint, In item, "
-            "Out item, numbered question and Done criterion, and every plan anchor (an ID that "
-            "starts a `## Plan` line or `###` heading; an ID mentioned mid-line is not one); "
-            "check each against the plan and the repo.",
+            "Before writing the Verdict, check every item of the audit checklist below against "
+            "the plan and the repo, through each lens:",
+            "(1) every existing setting, flag, gate, hook and permission check still applies",
+            "(7) every claimed check, failure path and mitigation has a test.",
             "Do not stop after the first issue: report every blocker, major and minor you find "
             "in this one review",
             "`## Coverage` lists every checklist item exactly once",
@@ -601,7 +608,7 @@ class HonestLimitContractTests(unittest.TestCase):
 
     def test_templates_are_iteration_blind(self) -> None:
         for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
-                     "CONVERGE_BLOCK", "RETRY_LINE"):
+                     "CONVERGE_BLOCK", "CHECKLIST_LINE", "RETRY_LINE"):
             found = BUDGET_WORDS.findall(block(name))
             self.assertEqual(found, [], f"{name} reveals progress or budget: {found}")
 
@@ -613,7 +620,7 @@ class HonestLimitContractTests(unittest.TestCase):
 
     def test_prompts_do_not_read_status_md(self) -> None:
         for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
-                     "CONVERGE_BLOCK", "RETRY_LINE"):
+                     "CONVERGE_BLOCK", "CHECKLIST_LINE", "RETRY_LINE"):
             self.assertNotIn("status.md", block(name), name)
 
     def test_templates_define_version_derivation(self) -> None:

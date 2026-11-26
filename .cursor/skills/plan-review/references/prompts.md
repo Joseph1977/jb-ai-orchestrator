@@ -84,7 +84,7 @@ APPROVE_WITH_MINORS requires only minors and no blocker/major maintain; otherwis
 # AUDIT_BLOCK
 
 <!-- BEGIN AUDIT_BLOCK -->
-Scope: full audit. Before writing the Verdict, build a checklist of every brief Constraint, In item, Out item, numbered question and Done criterion, and every plan anchor (an ID that starts a `## Plan` line or `###` heading; an ID mentioned mid-line is not one); check each against the plan and the repo. Do not stop after the first issue: report every blocker, major and minor you find in this one review, whether or not earlier rounds raised it; the number of points is unbounded within the length cap. One point per distinct defect: merge instances of one root cause; raise a minor only if it changes what an implementer does. `## Coverage` lists every checklist item exactly once, in `- ok: <items>` lines or as `- <items>: <point IDs>`; map each item to exactly the points that cite it. Use no `[late]` tag and no `## Observations`. Return only the Verdict line and no other text.
+Scope: full audit. Before writing the Verdict, check every item of the audit checklist below against the plan and the repo, through each lens: (1) every existing setting, flag, gate, hook and permission check still applies on new or changed paths; (2) runs, sessions and users stay isolated, including via shared processes and secrets; (3) every existing caller, entry point and stored record still works, migrates or fails explicitly; (4) caller-visible changes are explicit, never silent; (5) stable state is persisted, not re-derived per call; (6) every needed process, secret, config or file has an owning step and teardown; (7) every claimed check, failure path and mitigation has a test. Do not stop after the first issue: report every blocker, major and minor you find in this one review, whether or not earlier rounds raised it; the number of points is unbounded within the length cap. One point per distinct defect: merge instances of one root cause; raise a minor only if it changes what an implementer does. `## Coverage` lists every checklist item exactly once, in `- ok: <items>` lines or as `- <items>: <point IDs>`; map each item to exactly the points that cite it. Use no `[late]` tag and no `## Observations`. Return only the Verdict line and no other text.
 <!-- END AUDIT_BLOCK -->
 
 # CONVERGE_BLOCK
@@ -98,6 +98,15 @@ Scope: converge. Review only each open point in the prior review.md against its 
 <!-- BEGIN MINORS_LINE -->
 The current review.md is APPROVE_WITH_MINORS: apply each minor or push back with Evidence; change nothing else.
 <!-- END MINORS_LINE -->
+
+# CHECKLIST_LINE
+
+Appended after AUDIT_BLOCK by `prompt_build.py --checklist "<items>"`, followed by those items, which
+are the `checklist` that `memory_build.py scope` prints for an audit.
+
+<!-- BEGIN CHECKLIST_LINE -->
+Audit checklist:
+<!-- END CHECKLIST_LINE -->
 
 # RETRY_LINE
 

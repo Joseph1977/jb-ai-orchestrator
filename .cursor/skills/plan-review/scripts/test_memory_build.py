@@ -479,7 +479,8 @@ class CliTests(unittest.TestCase):
                                 "Retired point IDs: none\n")
         self.commit("brief.md", "memory.md", "plan.md", "status.md")
         scope = self.run_cli("scope")
-        self.assertEqual(json.loads(scope.stdout), {"scope": "audit"})
+        self.assertEqual(json.loads(scope.stdout), {
+            "scope": "audit", "checklist": "Q1,Q2,Done,C-1,C-2,In-1,Out-1,D1,D2,S1"})
         self.write("review.md", REVIEW_V1)
         self.assertEqual(self.run_cli("update", "--scope", "converge").returncode, 2)
         updated = self.run_cli("update", "--scope", "audit")
