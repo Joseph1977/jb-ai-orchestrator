@@ -11,9 +11,10 @@ Trigger: review vN has open points (any verdict: `CHANGES_REQUESTED` or `APPROVE
 Estimate the iterations still needed for consensus from:
 
 - all open blocker, major, and minor points and the total-open trend;
+- new points (on changed anchors) separately from late findings and observations, from the `memory.md` Round log;
 - point IDs the reviewer maintained for two consecutive iterations. Those will not converge by iterating. Flag them as needing a user decision.
 
-Give the estimate as a number or a small range, with a one-line reason.
+Give the estimate as a number or a small range, with a one-line reason. Late findings or observations in two consecutive rounds mean the audit missed areas: recommend a re-audit (a `feedback` that sets `Audit: pending`, optionally with `--audit-reviewer-model`) rather than more rounds alone.
 
 ## Commit and question
 
@@ -31,7 +32,7 @@ Give the estimate as a number or a small range, with a one-line reason.
 
 ## K, retire, and stop
 
-On approval of K more iterations: set `Iteration: N of N+K` and `Outcome: none` in `status.md`, `State: planning`, and commit `feedback vN`. A K-only grant commits `status.md` alone; `brief.md` changes in that commit only to record dated user feedback or user-decided point IDs (each needs an explicit point ID, which is appended to `Retired point IDs`), never the limit. Then continue from loop step 2 with the version after the latest committed plan. Retired IDs cannot be maintained, reused, or removed from that list.
+On approval of K more iterations: set `Iteration: N of N+K` and `Outcome: none` in `status.md`, `State: planning`, and commit `feedback vN`. Run `memory_build.py feedback` first (`--retired <IDs>` for user-decided points; `--no-audit` unless the user asked for a re-audit or the brief scope changed) and include `memory.md` when it changed. A K-only grant commits `status.md` alone; `brief.md` changes in that commit only to record dated user feedback or user-decided point IDs (each needs an explicit point ID, which is appended to `Retired point IDs`), never the limit. Then continue from loop step 2 with the version after the latest committed plan. Retired IDs cannot be maintained, reused, or removed from that list.
 
 K must be an explicit number from the user. Do not reuse a recommendation as approval. Do not raise the limit from silence.
 

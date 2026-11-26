@@ -79,19 +79,23 @@ class IgnoreTests(unittest.TestCase):
 
     def test_workspace_is_ignored(self) -> None:
         self.write_gitignore("workspace/\n")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
 
     def test_outcomes_is_ignored(self) -> None:
         self.write_gitignore("workspace/outcomes/\n")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
 
     def test_candidate_folder_is_ignored(self) -> None:
         self.write_gitignore(f"{self.task}/\n")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
 
     def test_markdown_pattern_checks_all_real_paths(self) -> None:
         self.write_gitignore("*.md\n")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
+
+    def test_memory_only_is_detected(self) -> None:
+        self.write_gitignore("memory.md\n")
+        self.assertEqual(self.ignored(), [f"{self.task}/memory.md"])
 
     def test_status_only_is_detected(self) -> None:
         self.write_gitignore("status.md\n")
@@ -100,7 +104,7 @@ class IgnoreTests(unittest.TestCase):
     def test_info_exclude_is_honored(self) -> None:
         exclude = self.repo / ".git" / "info" / "exclude"
         exclude.write_text("workspace/\n", encoding="utf-8")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
 
     def test_global_excludes_file_is_honored(self) -> None:
         home = self.repo / "home"
@@ -117,11 +121,11 @@ class IgnoreTests(unittest.TestCase):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        self.assertEqual(len(self.ignored(env=env)), 4)
+        self.assertEqual(len(self.ignored(env=env)), 5)
 
     def test_excluded_parent_cannot_be_reincluded(self) -> None:
         self.write_gitignore("workspace/\n!workspace/outcomes/**\n")
-        self.assertEqual(len(self.ignored()), 4)
+        self.assertEqual(len(self.ignored()), 5)
 
     def test_git_error_fails_closed(self) -> None:
         result = subprocess.CompletedProcess(

@@ -32,19 +32,20 @@ def block(name: str) -> str:
 REFERENCE_TASK_BYTES = 100
 
 
-def render(mode: str, reference_path: bool = False) -> str:
+def render(mode: str, reference_path: bool = False, scope: str = "converge") -> str:
     """Render a prompt with the shipped builder, exactly as the orchestrator does.
 
     `reference_path` swaps the temporary task path for a fixed 100-byte path so byte budgets
-    do not depend on where the tests run.
+    do not depend on where the tests run. Reviewer prompts use `scope`.
     """
     with tempfile.TemporaryDirectory() as directory:
         task = Path(directory).resolve() / "workspace" / "outcomes" / TASK_NAME
         task.mkdir(parents=True)
+        scope_args = ["--scope", scope] if mode == "reviewer" else []
         result = subprocess.run(
             ["python3", "-I", "-B", str(BUILDER), mode, "--task", str(task),
-             "--model", "example-model-1", "--plan-cap", "150", "--review-cap", "50",
-             "--next-id", "P007", "--retired", "none", "--pushed-back", "none"],
+             "--model", "example-model-1", "--plan-cap", "250", "--review-cap", "150",
+             "--next-id", "P007", "--retired", "none", "--pushed-back", "none", *scope_args],
             check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
@@ -376,7 +377,10 @@ class StaticContractTests(unittest.TestCase):
 
     def test_context_byte_budgets(self) -> None:
         skill_bytes = len(self.text.encode("utf-8"))
-        reviewer_bytes = len(render("reviewer", reference_path=True).encode("utf-8"))
+        reviewer_bytes = max(
+            len(render("reviewer", reference_path=True, scope=scope).encode("utf-8"))
+            for scope in ("audit", "converge")
+        )
         planner_bytes = len(render("planner", reference_path=True).encode("utf-8"))
         self.assertLessEqual(
             skill_bytes, 30_000, f"SKILL.md is {skill_bytes} bytes; limit is 30000"
@@ -525,21 +529,67 @@ class HonestLimitContractTests(unittest.TestCase):
         )
 
     def test_reviewer_template_reviews_whole_plan_at_true_severity(self) -> None:
+        self.assertIn("Severity follows impact alone.", self.reviewer)
+        audit = " ".join(block("AUDIT_BLOCK").split())
         for sentence in (
             "Before writing the Verdict, build a checklist of every brief Constraint, In item, "
             "Out item, numbered question and Done criterion, and every plan anchor; check each "
             "against the plan and the repo.",
             "Do not stop after the first issue: report every blocker, major and minor you find "
             "in this one review",
-            "severity follows impact alone",
             "`## Coverage` lists every checklist item exactly once",
+            "Use no `[late]` tag and no `## Observations`.",
         ):
-            self.assertIn(sentence, self.reviewer)
+            self.assertIn(sentence, audit)
         for kept in ("allocate monotonically from the supplied ID", "never reuse, renumber, or use "
                      "retired IDs", "Settle pushback from cited evidence", "maintain only with "
                      "counterevidence", "Minor means no effect on safety, feasibility, scope, cost, "
                      "or validation"):
             self.assertIn(kept, self.reviewer)
+
+    def test_converge_block_scopes_review_and_routes_late_findings(self) -> None:
+        converge = " ".join(block("CONVERGE_BLOCK").split())
+        for sentence in (
+            "Review only each open point in the prior review.md against its Response and "
+            "`## Changes`, each pushback, and every anchor listed in plan.md `## Changes`",
+            "A new issue on an unlisted anchor is a late finding: raise it only if it is a "
+            "blocker, as `[blocker] [late] (<anchors>) <issue> → <fix> Missed: <why the audit "
+            "missed it>`",
+            "write any other one under `## Observations`",
+        ):
+            self.assertIn(sentence, converge)
+        for name in ("AUDIT_BLOCK", "CONVERGE_BLOCK"):
+            self.assertIn("Return only the Verdict line and no other text.", block(name))
+
+    def test_prompts_read_memory_first_within_ceiling(self) -> None:
+        for prompt in (self.planner, self.reviewer):
+            self.assertIn("Probe memory.md with `metadata` first; at 300 lines or 24 KiB or more, "
+                          "stop the round before reading it.", prompt)
+            self.assertIn("Read each task file once, memory.md first: memory.md, brief.md, "
+                          "plan.md", prompt)
+        self.assertIn("reopen a Settled decision only as a blocker with new evidence",
+                      self.reviewer)
+        self.assertIn("Keep each Settled decision unless a current point requires changing it.",
+                      self.planner)
+
+    def test_operations_defines_memory_contract(self) -> None:
+        template = self.operations.split("# Memory — <title>", 1)[1].split("```", 1)[0]
+        headings = [f"## {name}" for name in (
+            "Settled decisions", "Coverage", "Open points", "Observations", "Closed points",
+            "User decisions / retired IDs", "Round log")]
+        positions = [template.find(heading) for heading in headings]
+        self.assertNotIn(-1, positions)
+        self.assertEqual(positions, sorted(positions))
+        for contract in (
+            "200 lines or 16 KiB", "100 lines and 8 KiB", "300 lines or 24 KiB",
+            "plan-review(<slug>): memory-compact v<N>", "`memory-seed` / `memory-compact`",
+            "plan 250/review 150", "orchestrator owns `memory.md`",
+        ):
+            self.assertIn(contract, self.operations, contract)
+        self.assertIn("orchestrator owns brief/status/memory", self.skill)
+        loop = self.skill.split("## Loop", 1)[1].split("### Minors close", 1)[0]
+        self.assertIn("memory-compact", loop)
+        self.assertLess(loop.index("Memory gate"), loop.index("4. **Decide**"))
 
     def test_caused_by_rule_removed(self) -> None:
         for path in (SKILL, PROMPTS, OPERATIONS, RECOVERY, VALIDATION):
@@ -549,7 +599,8 @@ class HonestLimitContractTests(unittest.TestCase):
                 self.assertNotIn(banned, text, f"{path.name}: {banned}")
 
     def test_templates_are_iteration_blind(self) -> None:
-        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE"):
+        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
+                     "CONVERGE_BLOCK"):
             found = BUDGET_WORDS.findall(block(name))
             self.assertEqual(found, [], f"{name} reveals progress or budget: {found}")
 
@@ -560,7 +611,8 @@ class HonestLimitContractTests(unittest.TestCase):
             self.assertIsNone(re.search(r"\b\d+ of \d+\b", rendered), mode)
 
     def test_prompts_do_not_read_status_md(self) -> None:
-        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE"):
+        for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
+                     "CONVERGE_BLOCK"):
             self.assertNotIn("status.md", block(name), name)
 
     def test_templates_define_version_derivation(self) -> None:

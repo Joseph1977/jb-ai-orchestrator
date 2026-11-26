@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Render a plan-review prompt from the shipped template plus a fixed set of scalars."""
+"""Render a plan-review prompt from the shipped template plus a fixed set of scalars.
+
+A reviewer prompt also takes `--scope audit|converge`, which appends that scope's block.
+"""
 
 from __future__ import annotations
 
@@ -127,15 +130,26 @@ def render(template: str, values: dict[str, str]) -> str:
     return TOKEN.sub(lambda match: values[match.group(1)], template)
 
 
-def build(mode: str, values: dict[str, str]) -> str:
+SCOPE_BLOCKS = {"audit": "AUDIT_BLOCK", "converge": "CONVERGE_BLOCK"}
+
+
+def _literal_line(prompts: str, name: str) -> str:
+    line = _between(prompts, name, "prompts.md")
+    if TOKEN.search(line) or "{{" in line or "}}" in line or "\n" in line:
+        raise BuildError(f"{name} must be one literal line")
+    return line
+
+
+def build(mode: str, values: dict[str, str], scope: str | None = None) -> str:
+    if (mode == "reviewer") != (scope is not None):
+        raise BuildError("--scope is required for reviewer and refused for planner/minors")
     prompts = _read(PROMPTS_FILE)
     template_name = "REVIEWER_PROMPT" if mode == "reviewer" else "PLANNER_PROMPT"
     prompt = render(_between(prompts, template_name, "prompts.md"), values)
     if mode == "minors":
-        line = _between(prompts, "MINORS_LINE", "prompts.md")
-        if TOKEN.search(line) or "{{" in line or "}}" in line or "\n" in line:
-            raise BuildError("MINORS_LINE must be one literal line")
-        prompt = f"{prompt}\n{line}"
+        prompt = f"{prompt}\n{_literal_line(prompts, 'MINORS_LINE')}"
+    if scope is not None:
+        prompt = f"{prompt}\n{_literal_line(prompts, SCOPE_BLOCKS[scope])}"
     return prompt
 
 
@@ -149,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--next-id")
     parser.add_argument("--retired")
     parser.add_argument("--pushed-back")
+    parser.add_argument("--scope", choices=tuple(SCOPE_BLOCKS))
     return parser
 
 
@@ -156,7 +171,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         probe = _probe_code(_read(SKILL_FILE))
-        prompt = build(args.mode, scalars(args, probe))
+        prompt = build(args.mode, scalars(args, probe), args.scope)
     except BuildError as exc:
         print(f"prompt_build: {exc}", file=sys.stderr)
         return 2

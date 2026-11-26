@@ -73,14 +73,75 @@ Verdict: CHANGES_REQUESTED | APPROVE_WITH_MINORS | NO_FURTHER_COMMENTS
 
 ## Points
 1. P001 [blocker|major|minor] (D3, In-2) <issue> → <suggested fix>
+2. P002 [blocker] [late] (S2) <issue> → <fix> Missed: <why the audit missed it> <!-- converge only -->
 
 ## Coverage
 - ok: C-1, C-2, In-1, Q1, Done, D1, D2, S1
 - D3: P001
 
+## Observations <!-- converge only; omit when empty -->
+- (S5) <non-blocker issue on an anchor not listed in plan.md `## Changes`>
+
 ## Pushback assessment <!-- omit in v1 -->
 P001: accept rebuttal | maintain, because <path/standard/brief ref>: <one line>
 ```
+
+`memory.md` (the orchestrator owns `memory.md` and writes it only through `memory_build.py`; agents
+read it first and never write it; `review.md` stays the source of truth for open points):
+
+```markdown
+# Memory — <title>
+
+## Settled decisions
+- D3 — P001 (v2), P004 (v3): <what the plan now says, ≤300 characters>
+## Coverage
+Audit: pending | done vN | waived at seed vN
+- verified v1: C-1, C-2, In-1, Q1, Done, D1
+- unverified: S4
+- open D3: P007
+## Open points
+- P007 [major] (D3, In-2) new v2: <first 160 characters of the issue>
+## Observations
+- v3 (S5): <observation>
+## Closed points
+- P001 [major] (D3) closed v2 fixed: <issue>
+- D3: P001, P004 closed v2–v3 (fixed 1, rebuttal 1)
+## User decisions / retired IDs
+- feedback v4: retired P005
+## Round log
+- v2 converge: responses 3 (...); CHANGES_REQUESTED open 0/1/0; new 1, late 0, observations 1, maintained 0, closed 2
+```
+
+The seven sections appear exactly in that order. Every line is ≤600 characters; no `Iteration:`
+line; Coverage, User decisions and Round log never name the limit, remaining rounds or a budget.
+`Audit: pending` makes the next review `audit` scope, anything else `converge`
+(`memory_build.py scope` prints it). Limits:
+
+- Soft: 200 lines or 16 KiB. The memory gate compacts before the next `plan-start`/`review-start`;
+  `pre` rejects those launches at or above it.
+- Compaction target: 100 lines and 8 KiB (`compact` reports `target_met`).
+- Hard: 300 lines or 24 KiB. Agents stop before reading memory.md at or above it; no non-review
+  commit may leave it there.
+
+`compact` keeps Settled decisions, Coverage, Open points, Observations and User decisions byte for
+byte, groups Closed points by first anchor without losing an ID, and folds all but the last three
+Round log lines into one `- va–vb summary:` line. Commit it alone as
+`plan-review(<slug>): memory-compact v<N>`; `commit_check.py` verifies the kept sections, the closed
+IDs and the soft limit. Exit 1 means the floor is still too large: stop and ask the user.
+
+`memory_build.py` modes (`--repo "$ROOT" --task workspace/outcomes/<task>`; output is JSON):
+
+- `init`: after writing brief.md, before `brief v1`.
+- `plan-check`: before `plan vN` (Format checks).
+- `scope`: before `review-start vN`.
+- `update --scope <scope>`: after the reviewer returns and review.md validates; it applies the
+  scope, `[late]`, Observations and Coverage rules, closes points, and prints the counts and
+  `next_id` for status.md. `compact: true` triggers the memory gate.
+- `feedback [--retired IDs] [--no-audit]`: before `feedback vN`. A changed brief sets
+  `Audit: pending` unless `--no-audit` (point decisions or retired IDs only); retired IDs leave Open
+  points.
+- `seed --audit pending|waived`: on resume of a task without memory.md (`resume.md`).
+- `compact`: at the memory gate.
 
 `status.md`:
 
@@ -94,10 +155,10 @@ Outcome: none | consensus at iteration N of L, open points 0/0/0 | limit-reached
 Working branch: <approved non-protected branch>
 Branch authorization: approved-current@<sha> | from-<source-branch>@<sha>
 Planner mode: self | subagent
-Planner model: <identity>   Reviewer model: <slug>
+Planner model: <identity>   Reviewer model: <slug> | <slug> (audit: <slug>)
 Model changes: <none | "v4: reviewer old → new">
 Open points: <blockers>/<majors>/<minors>
-Trend: <total-open count per iteration>
+Trend: <per review: v3=4 (new 2, late 0, obs 1), ...>
 Next point ID: P001
 Retired point IDs: none | P001, P004
 Stop reason: none | user | error
@@ -128,6 +189,10 @@ Set `status.md` before `git add`:
 | `feedback vN` | planning | N of L′ | none |
 | `stopped vN` | stopped | N of L | stopped Outcome; `Stop reason` set |
 | `approved vN` | approved | N of L | Outcome unchanged |
+| `memory-seed vN` / `memory-compact vN` | unchanged | N of L | Outcome unchanged |
+
+`memory-seed` follows any resumable State; `memory-compact` follows `planning`, `reviewing` or
+`reviewed`.
 
 Minors close uses the `plan-start`/`plan` rows; the `minors` subject (and its Allowed-files entry) is
 legacy-only. Retry: a retried launch commits the exact subject `plan-review(<slug>): plan-start vN`
@@ -168,13 +233,19 @@ On `pre`/commit/`post` failure stop for digest-gated recovery. Inspect the allow
 
 Allowed files:
 
-- `brief`: `brief.md` and `status.md`, both required
+- `brief`: `brief.md`, `status.md` and (new runs) `memory.md`, all required
 - `feedback`: `status.md` required; `brief.md` optional, changed only for dated user feedback or
-  retired-point decisions (a K-only grant changes `status.md` alone)
+  retired-point decisions (a K-only grant changes `status.md` alone); `memory.md` when `feedback`
+  changed it
 - `plan-start` / `review-start`: `status.md`
 - `plan` (and legacy `minors`): `plan.md`, `status.md`
-- `review`: `review.md`, `status.md`
+- `review`: `review.md`, `status.md`, `memory.md` (required once memory exists)
+- `memory-seed` / `memory-compact`: `memory.md` required; pass `status.md` too (it may stay unchanged)
 - `consensus` / `approved` / `limit-reached` / `stopped`: `status.md`
+
+Once memory.md exists every commit keeps it. A current-format run without it cannot commit
+`plan-start`/`review-start`; seed it first. Pre-memory commits are checked as before (`history`
+reports `memory: seeded` with a note).
 
 Initial commit: `brief v1`. Keep `plan-start`/`review-start` as durable launch markers. Before commit,
 require current=`Working branch`, unprotected, with authorization SHA ancestor of `HEAD`. Branch
@@ -184,10 +255,16 @@ replacement/rebase needs fresh approval. Task commits are authorized; push is no
 
 Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 
-- Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\] \(([^()]+)\) .+ → .+$`; ordinals
-  start at 1. Every anchor in the parentheses is a brief item or a current plan anchor.
-- `## Coverage` lists every brief item and every plan anchor exactly once, in `- ok: <items>` lines
-  or as `- <item>: <point IDs>`; every point ID appears there and every listed ID is a point.
+- Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\]( \[late\])? \(([^()]+)\) .+ → .+$`;
+  ordinals start at 1. Every anchor in the parentheses is a brief item or a current plan anchor.
+- `audit` scope: `## Coverage` lists every brief item and every plan anchor exactly once, in
+  `- ok: <items>` lines or as `- <item>: <point IDs>`; every point ID appears there and every listed
+  ID is a point. No `[late]` and no `## Observations`.
+- `converge` scope: `## Coverage` lists exactly the anchors added or changed in plan.md
+  `## Changes`. A new point naming none of them is late: only `[blocker] [late]`, with
+  `Missed: <reason>` in the fix; any other late issue is a `- (<anchors>) <issue>` line under
+  `## Observations`. `memory_build.py update` enforces both scopes (exit 1 is a reviewer format
+  failure).
 - Before `plan vN`, run `python3 -I -B "$SKILL_ROOT/scripts/memory_build.py" plan-check --repo
   "$ROOT" --task workspace/outcomes/<task>`. Exit 1 is a format failure (anchors, sections,
   `## Changes`); exit 2 stops. With a prior review, `## Changes` is required and must list exactly

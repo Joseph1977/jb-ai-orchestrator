@@ -45,6 +45,7 @@ Git hooks run. Never pass `--no-verify`. A nonzero commit or `post` is a stop, n
 ## Limits
 
 - One owned path per capture. Capture again for a different path; never reuse a manifest across runs.
+- `memory.md` is orchestrator-owned and outside every guard allowlist: a subagent change to it is an outside delta.
 - Do not edit the manifest. `compare` rejects a sha256 mismatch.
 - Delete the temporary manifest after normal handling. Preserve an authenticated manifest only for
   inline skill-integrity recovery, then clean it according to the recovery phase.

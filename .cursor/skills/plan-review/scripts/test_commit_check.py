@@ -9,9 +9,21 @@ from pathlib import Path
 
 import commit_check
 
+import memory_build
+
 TASK = "workspace/outcomes/task-demo-run_20261101-120000Z-abcd"
 STATUS = f"{TASK}/status.md"
 BRIEF = f"{TASK}/brief.md"
+MEMORY = f"{TASK}/memory.md"
+
+
+def memory_text(audit: str = "pending", open_ids: tuple[str, ...] = (),
+                closed: tuple[str, ...] = (), log: tuple[str, ...] = ()) -> str:
+    lines = ["# Memory — demo", "", "## Settled decisions", "## Coverage", f"Audit: {audit}",
+             "## Open points", *(f"- {pid} [major] (D1) new v1: issue" for pid in open_ids),
+             "## Observations", "## Closed points", *closed, "## User decisions / retired IDs",
+             "## Round log", *log]
+    return "\n".join(lines) + "\n"
 
 
 class CommitCheckTests(unittest.TestCase):
@@ -201,15 +213,17 @@ class CommitCheckTests(unittest.TestCase):
         manifest_path = Path(self.manifest_directory.name) / "commit-check.json"
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         subject = "plan-review(demo-run): brief v1"
+        memory = f"{TASK}/memory.md"
         self.write(STATUS, "Iteration: 1 of 4\nState: planning\nOutcome: none\n")
         self.write(BRIEF, "brief v1\n")
-        self.git("add", "--", STATUS, BRIEF)
+        self.write(memory, memory_text())
+        self.git("add", "--", STATUS, BRIEF, memory)
         digest = subprocess.run(
             ["python3", str(script), "pre", "--repo", str(self.repo),
-             "--output", str(manifest_path), "--subject", subject, STATUS, BRIEF],
+             "--output", str(manifest_path), "--subject", subject, STATUS, BRIEF, memory],
             check=True, text=True, stdout=subprocess.PIPE, env=env,
         ).stdout.strip()
-        self.commit(STATUS, BRIEF, subject=subject)
+        self.commit(STATUS, BRIEF, memory, subject=subject)
 
         def run_post(sha: str) -> subprocess.CompletedProcess[str]:
             return subprocess.run(
@@ -899,19 +913,34 @@ class CurrentFormatTests(HistoryFixture):
             f"Next action: attempt {attempt}\n"
         )
 
-    def cbrief(self, limit: int = 4) -> None:
-        self.step("brief", 1, {"brief.md": "# Brief\n",
-                               "status.md": self.cstatus("planning", 1, limit)})
+    def cbrief(self, limit: int = 4, memory: bool = True) -> None:
+        self.audit, self.log = "pending", []
+        files = {"brief.md": "# Brief\n", "status.md": self.cstatus("planning", 1, limit)}
+        if memory:
+            files["memory.md"] = memory_text()
+        self.step("brief", 1, files, valid=memory)
 
-    def round_(self, n: int, verdict: str, limit: int, open_points: str = "0/0/0") -> None:
-        self.step("plan-start", n, {"status.md": self.cstatus("planner-running", n, limit)})
+    def reviewed_memory(self, n: int, closed: tuple[str, ...] = ()) -> str:
+        if self.audit == "pending":
+            self.audit = f"done v{n}"
+        self.log.append(f"- v{n} audit: new 0, late 0, observations 0, maintained 0, closed 0")
+        return memory_text(self.audit, closed=closed, log=tuple(self.log))
+
+    def round_(self, n: int, verdict: str, limit: int, open_points: str = "0/0/0",
+               memory: bool = True, closed: tuple[str, ...] = ()) -> None:
+        self.step("plan-start", n, {"status.md": self.cstatus("planner-running", n, limit)},
+                  valid=memory)
         self.step("plan", n, {"plan.md": f"# Plan\nVersion: {n}\n",
-                              "status.md": self.cstatus("reviewing", n, limit)})
-        self.step("review-start", n, {"status.md": self.cstatus("reviewer-running", n, limit)})
-        self.step("review", n, {
+                              "status.md": self.cstatus("reviewing", n, limit)}, valid=memory)
+        self.step("review-start", n, {"status.md": self.cstatus("reviewer-running", n, limit)},
+                  valid=memory)
+        files = {
             "review.md": f"# Review\nVersion: {n}\nVerdict: {verdict}\n",
             "status.md": self.cstatus("reviewed", n, limit, open_points=open_points),
-        })
+        }
+        if memory:
+            files["memory.md"] = self.reviewed_memory(n, closed)
+        self.step("review", n, files, valid=memory)
 
     def limit_reached(self, n: int, open_points: str, **overrides: str) -> None:
         outcome = f"limit-reached at iteration {n} of {n}, open points {open_points}"
@@ -953,7 +982,90 @@ class CurrentFormatTests(HistoryFixture):
 
         self.assertTrue(result["ok"], json.dumps(result, indent=2))
         self.assertEqual((result["format"], result["last_state"]), ("current", "approved"))
+        self.assertEqual(result["memory"], "native")
         self.assertNotIn("note", result)
+        self.assertNotIn("memory_note", result)
+
+    def test_brief_without_memory_rejected(self) -> None:
+        self.assert_pre_rejects("brief", 1, {"brief.md": "# Brief\n",
+                                             "status.md": self.cstatus("planning")},
+                                "brief v1 must create memory.md")
+
+    def test_review_must_update_memory_to_match_points_and_audit(self) -> None:
+        self.cbrief()
+        self.step("plan-start", 1, {"status.md": self.cstatus("planner-running")})
+        self.step("plan", 1, {"plan.md": "# Plan\nVersion: 1\n",
+                              "status.md": self.cstatus("reviewing")})
+        self.step("review-start", 1, {"status.md": self.cstatus("reviewer-running")})
+        review = ("# Review\nVersion: 1\nVerdict: CHANGES_REQUESTED\n\n## Points\n"
+                  "1. P001 [major] (D1) issue → fix\n")
+        status = self.cstatus("reviewed", open_points="0/1/0")
+        self.assert_pre_rejects("review", 1, {"review.md": review, "status.md": status},
+                                "review must update memory.md")
+        self.git("reset", "-q")
+        self.assert_pre_rejects("review", 1, {
+            "review.md": review, "status.md": status,
+            "memory.md": memory_text(log=("- v1 audit: new 1",))},
+            r"Open points \[\] differ from review.md Points \['P001'\].*Audit: done v1")
+        self.git("reset", "-q")
+        self.step("review", 1, {"review.md": review, "status.md": status,
+                                "memory.md": memory_text("done v1", ("P001",))})
+        self.assertTrue(self.history()["ok"])
+
+    def test_soft_limit_blocks_launch_until_memory_compact(self) -> None:
+        self.cbrief()
+        closed = tuple(f"- P{n:03d} [major] (D{n % 3 + 1}) closed v1 fixed: issue {n}"
+                       for n in range(1, 230))
+        self.round_(1, "CHANGES_REQUESTED", 4, "1/0/0", closed=closed)
+        big = (self.repo / MEMORY).read_text(encoding="utf-8")
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 2, 4)},
+            "memory.md is 2[0-9]{2} lines.*commit memory-compact v1 first")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        compacted = memory_build.compact_text(big)
+        self.assert_pre_rejects("memory-compact", 1, {
+            "memory.md": compacted.replace("## Observations\n", "## Observations\n- v1 (D1): x\n"),
+            "status.md": self.cstatus("reviewed", open_points="1/0/0")},
+            "memory-compact changed the Observations section")
+        self.git("reset", "-q")
+        self.step("memory-compact", 1, {"memory.md": compacted,
+                                        "status.md": self.cstatus("reviewed", open_points="1/0/0")})
+        self.step("plan-start", 2, {"status.md": self.cstatus("planner-running", 2, 4)})
+        self.assertTrue(self.history()["ok"], json.dumps(self.history(), indent=2))
+
+    def test_pre_memory_task_must_seed_before_launch(self) -> None:
+        self.cbrief(memory=False)
+        self.round_(1, "CHANGES_REQUESTED", 4, "0/1/0", memory=False)
+        self.assert_pre_rejects("plan-start", 2, {
+            "status.md": self.cstatus("planner-running", 2, 4)},
+            "run memory_build.py seed and commit memory-seed v1 first")
+        self.git("reset", "-q", "--", STATUS)
+        self.git("checkout", "--", STATUS)
+        seeded = memory_text(log=("- seed v1: memory started, audit pending",))
+        self.step("memory-seed", 1, {"memory.md": seeded,
+                                     "status.md": self.cstatus("reviewed", open_points="0/1/0")})
+        self.assert_pre_rejects("memory-seed", 1, {
+            "memory.md": seeded + "- again\n",
+            "status.md": self.cstatus("reviewed", open_points="0/1/0")},
+            "memory-seed requires that memory.md is absent")
+        self.git("reset", "-q")
+        self.git("checkout", "--", MEMORY)
+        self.step("plan-start", 2, {"status.md": self.cstatus("planner-running", 2, 4)})
+
+        result = self.history()
+
+        self.assertTrue(result["ok"], json.dumps(result, indent=2))
+        self.assertEqual(result["memory"], "seeded")
+        self.assertEqual(result["memory_note"], "pre-memory commits: memory checks not applied")
+
+    def test_deleting_memory_after_start_rejected(self) -> None:
+        self.cbrief()
+        (self.repo / STATUS).write_text(self.cstatus("planner-running"), encoding="utf-8")
+        self.git("rm", "-q", "--", MEMORY)
+        self.git("add", "--", STATUS)
+        self.git("commit", "-qm", "plan-review(demo-run): plan-start v1")
+        self.assertIn("memory.md is missing after it was started", self.failures())
 
     def test_limit_reached_requires_review_at_limit(self) -> None:
         self.cbrief()

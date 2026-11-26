@@ -42,6 +42,7 @@ class BuilderTests(unittest.TestCase):
             "--next-id": "P007",
             "--retired": "none",
             "--pushed-back": "P003,P004",
+            "--scope": "audit" if mode == "reviewer" else None,
         }
         values.update(overrides)
         arguments = [mode]
@@ -184,6 +185,31 @@ class BuilderTests(unittest.TestCase):
             "The current review.md is APPROVE_WITH_MINORS: apply each minor or push back "
             "with Evidence; change nothing else.",
         )
+
+    def test_reviewer_scope_appends_exactly_its_block(self) -> None:
+        prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
+        audit = self.run_builder(*self.args("reviewer")).stdout.decode("utf-8")
+        converge = self.run_builder(*self.args("reviewer", **{"--scope": "converge"}))
+        converge = converge.stdout.decode("utf-8")
+        shared = audit.rsplit("\n", 1)[0]
+        self.assertEqual(shared, converge.rsplit("\n", 1)[0])
+        for text, name in ((audit, "AUDIT_BLOCK"), (converge, "CONVERGE_BLOCK")):
+            block = prompts.split(f"<!-- BEGIN {name} -->", 1)[1].split(
+                f"<!-- END {name} -->", 1)[0].strip()
+            self.assertEqual(text, f"{shared}\n{block}")
+            self.assertNotIn("{{", block)
+
+    def test_scope_is_required_for_reviewer_and_refused_otherwise(self) -> None:
+        cases = (
+            ("reviewer", {"--scope": None}),
+            ("reviewer", {"--scope": "full"}),
+            ("planner", {"--scope": "audit"}),
+            ("minors", {"--scope": "converge"}),
+        )
+        for mode, overrides in cases:
+            result = self.run_builder(*self.args(mode, **overrides))
+            self.assertEqual(result.returncode, 2, (mode, overrides))
+            self.assertEqual(result.stdout, b"")
 
     def test_output_and_sha_are_deterministic(self) -> None:
         first = self.run_builder(*self.args("reviewer"))

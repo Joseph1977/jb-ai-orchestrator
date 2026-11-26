@@ -15,7 +15,7 @@ class PreflightError(RuntimeError):
     """Raised when a portable preflight check cannot be proved."""
 
 
-TASK_FILES = ("brief.md", "plan.md", "review.md", "status.md")
+TASK_FILES = ("brief.md", "plan.md", "review.md", "status.md", "memory.md")
 
 
 def resolve_skill_root(skill_file_value: str) -> Path:
