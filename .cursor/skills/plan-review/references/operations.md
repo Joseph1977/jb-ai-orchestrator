@@ -268,8 +268,9 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   `- (<anchors>) <issue>` line under `## Observations`, which never cites a `## Changes` anchor.
 - Both scopes: a coverage line maps an item only to points that cite it, and an in-scope item a
   point cites is never `ok`. A mapping that omits a citing point is completed from the points'
-  own anchors; an audit still maps every point from some item. An `ok` ID the plan mentions
-  mid-line but never defines as an anchor is ignored; any other unknown item fails. `memory_build.py update`
+  own anchors; an audit still maps every point from some item. In an audit of a seeded task, an
+  `ok` ID the plan mentions mid-line but never defines as an anchor is ignored; any other unknown
+  item fails. A maintained point may keep citing an anchor a later plan removed. `memory_build.py update`
   enforces the scope rules (exit 1 is a reviewer format failure).
 - With `Audit: pending`, `consensus` is refused; a `NO_FURTHER_COMMENTS` review then continues with
   `plan-start vN+1`, or at the limit commits `limit-reached vN` (open points may be 0/0/0).

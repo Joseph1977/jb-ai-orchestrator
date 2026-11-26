@@ -88,11 +88,13 @@ class ParserTests(unittest.TestCase):
 
     def test_retry_message_groups_unquotes_and_caps(self) -> None:
         failures = [f"## Plan line {n} is outside any anchor: 'uses `x` {{y}}'" for n in range(1, 11)]
-        failures += ["anchor A3 is defined twice", "plan.md has no `## Plan` section"]
+        failures += ["anchor A3 is defined twice", "plan.md has no `## Plan` section",
+                     "malformed coverage line: '- D1 → `x` — y'"]
         self.assertEqual(
             memory_build.retry_message(failures),
             "10 ## Plan lines are outside any anchor (lines 1, 2, 3, 4, 5, 6, 7, 8, ...); "
-            "anchor A3 is defined twice; plan.md has no ## Plan section",
+            "anchor A3 is defined twice; plan.md has no ## Plan section; "
+            "malformed coverage line: '- D1 -> x - y'",
         )
         long = memory_build.retry_message([f"anchor D{n} is defined twice" for n in range(100)])
         self.assertEqual(len(long), 600)
@@ -298,16 +300,42 @@ class UpdateTests(unittest.TestCase):
                                            "P001")
         self.assertEqual(result["new"], 1)
 
-    def test_ok_ids_the_plan_mentions_but_does_not_define_are_ignored(self) -> None:
+    def test_mentioned_ok_ids_are_ignored_only_in_a_seeded_audit(self) -> None:
         plan = PLAN_V1.replace("- D2 (C-1) Deadline.", "- D2 (C-1) Deadline. A7 holds; A9a too.")
         text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A7, A9a")
-        memory = fresh_memory()
-        memory_build.apply_review(memory, BRIEF, plan, text, "audit", [], "P001")
-        self.assertNotIn("A7", memory.render().split("## Coverage")[1].split("##")[0])
-        mapped = text.replace("- D2: P001", "- D2, A7: P001")
+        self.assertIn("coverage lists unknown items A7, A9a",
+                      self.failures(fresh_memory(), plan, text, "audit"))
+        seeded = fresh_memory()
+        seeded.log.append("- seed v1: memory started, audit pending")
+        memory_build.apply_review(seeded, BRIEF, plan, text, "audit", [], "P001")
+        self.assertNotIn("A7", seeded.render().split("## Coverage")[1].split("##")[0])
+        mapped = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A9a").replace(
+            "- D2: P001", "- D2, A7: P001")
+        again = fresh_memory()
+        again.log.append("- seed v1: memory started, audit pending")
         self.assertIn("coverage lists unknown items A7",
-                      self.failures(fresh_memory(), plan, mapped.replace("S1, A7, A9a", "S1, A9a"),
-                                    "audit"))
+                      self.failures(again, plan, mapped, "audit"))
+
+    def test_maintained_point_keeps_citing_an_anchor_removed_earlier(self) -> None:
+        plan = plan_v2(change="- D2 changed (P001): bounded deadline.\n"
+                              "- S1 removed (consistency): extraction dropped.\n").replace(
+            "### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n", "")
+        memory = audited_memory()
+        point = "1. P002 [major] (S1, In-1) removing S1 drops the In-1 test → restore it\n"
+        memory_build.apply_review(memory, BRIEF, plan, review(2, point, "- ok: D2\n- S1: P002\n"),
+                                  "converge", [], "P002")
+        plan3 = plan.replace("Version: 2", "Version: 3").replace(
+            "- D2 changed (P001): bounded deadline.\n- S1 removed (consistency): extraction dropped.",
+            "- D1 changed (P002): restores the In-1 test.").replace(
+            "Engine wrapper.", "Engine wrapper with its In-1 test.")
+        result = memory_build.apply_review(memory, BRIEF, plan3,
+                                           review(3, point, "- ok: D1\n"), "converge", [], "P003")
+        self.assertEqual(result["maintained"], 1)
+        stray = "1. P003 [major] (S1, D1) another S1 gap → fix it\n"
+        self.assertIn("P003 cites unknown anchors S1",
+                      self.failures(memory, plan3,
+                                    review(3, point + stray.replace("1. P003", "2. P003"),
+                                           "- D1: P003\n"), "converge"))
 
     def test_unknown_coverage_items_are_reported_once(self) -> None:
         text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A2, A4")
@@ -372,6 +400,12 @@ class SeedTests(unittest.TestCase):
               "Retired point IDs: P004\nTrend: 5, 4, 3\n")
     LEGACY_REVIEW = ("# Review — demo\nVersion: 16\nModel: other\nVerdict: CHANGES_REQUESTED\n\n"
                      "## Points\n1. P025 [major] D9 is unsafe → gate it\n")
+
+    def test_seed_accepts_semicolon_anchor_lists(self) -> None:
+        review = self.LEGACY_REVIEW.replace("1. P025 [major] D9 is unsafe → gate it",
+                                            "1. P025 [major] (D1; C-1) D1 is unsafe → gate it")
+        text = memory_build.seed_text(BRIEF, PLAN_V1, review, self.STATUS, "pending")
+        self.assertIn("- P025 [major] (D1, C-1) seeded v16: D1 is unsafe", text)
 
     def test_seed_records_open_closed_and_pending_audit(self) -> None:
         text = memory_build.seed_text(BRIEF, PLAN_V1, self.LEGACY_REVIEW, self.STATUS, "pending")

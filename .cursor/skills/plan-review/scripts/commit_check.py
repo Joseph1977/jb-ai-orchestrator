@@ -584,6 +584,11 @@ def _legacy_checks(ctx: _Context, step: str, version: int) -> list[str]:
             )
         else:
             ctx.closed_plan = version
+    if step == "consensus" and ctx.audit_pending():
+        failures.append(
+            "consensus is rejected: memory.md records Audit: pending, so the latest review "
+            "is not a full audit; run an audit review first"
+        )
     if (
         step in {"consensus", "limit-reached", "plan"}
         and ctx.review_verdict == "APPROVE_WITH_MINORS"

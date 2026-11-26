@@ -533,8 +533,9 @@ class HonestLimitContractTests(unittest.TestCase):
         audit = " ".join(block("AUDIT_BLOCK").split())
         for sentence in (
             "Before writing the Verdict, build a checklist of every brief Constraint, In item, "
-            "Out item, numbered question and Done criterion, and every plan anchor; check each "
-            "against the plan and the repo.",
+            "Out item, numbered question and Done criterion, and every plan anchor (an ID that "
+            "starts a `## Plan` line or `###` heading; an ID mentioned mid-line is not one); "
+            "check each against the plan and the repo.",
             "Do not stop after the first issue: report every blocker, major and minor you find "
             "in this one review",
             "`## Coverage` lists every checklist item exactly once",

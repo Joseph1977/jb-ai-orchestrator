@@ -549,7 +549,8 @@ def parse_review(review: str) -> tuple[list[dict[str, Any]], dict[str, list[str]
         if not match:
             failures.append(f"malformed observation: {line[:80]!r}")
             continue
-        observations.append(([a.strip() for a in match.group(1).split(",")], match.group(2)))
+        observations.append(([a.strip() for a in re.split(r"[,;]", match.group(1)) if a.strip()],
+                             match.group(2)))
     if observation_body is not None and not observations:
         failures.append("## Observations is present but empty")
     accepted = {ACCEPT.match(line.strip()).group(1)
@@ -575,7 +576,8 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
     if len(set(point_ids)) != len(point_ids):
         failures.append("review.md repeats a point ID")
     for point in points:
-        unknown = [a for a in point["anchors"] if a not in known]
+        carried = previous[point["id"]]["anchors"] if point["id"] in previous else []
+        unknown = [a for a in point["anchors"] if a not in known and a not in carried]
         if unknown:
             failures.append(f"{point['id']} cites unknown anchors {', '.join(unknown)}")
         if point["id"] in previous:
@@ -593,9 +595,12 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
         elif scope == "converge" and not set(point["anchors"]) & set(listed):
             failures.append(f"new {point['id']} names no anchor listed in ## Changes; raise it as "
                             "[blocker] [late] or write it under ## Observations")
-    mentioned = set(re.findall(rf"\b{ANCHOR}[a-z]?\b", "\n".join(section(plan, "## Plan") or [])))
-    for item in [i for i, ids in coverage.items() if not ids and i not in known and i in mentioned]:
-        del coverage[item]
+    if scope == "audit" and any(line.startswith("- seed v") for line in memory.log):
+        plan_text = "\n".join(section(plan, "## Plan") or [])
+        mentioned = set(re.findall(rf"\b{ANCHOR}[a-z]?\b", plan_text))
+        for item in [i for i, ids in coverage.items()
+                     if not ids and i not in known and i in mentioned]:
+            del coverage[item]
     unknown_items = [item for item in coverage if item not in known]
     if unknown_items:
         failures.append(f"coverage lists unknown items {', '.join(unknown_items)}; only an ID that "
@@ -831,7 +836,7 @@ def seed_text(brief: str, plan: str | None, review: str | None, status: str,
         modern, legacy = POINT.match(line.rstrip()), LEGACY_POINT.match(line.rstrip())
         if modern:
             _o, pid, severity, late, anchors, issue, _fix = modern.groups()
-            cited = [a.strip() for a in anchors.split(",") if a.strip()]
+            cited = [a.strip() for a in re.split(r"[,;]", anchors) if a.strip()]
         elif legacy:
             pid, severity, issue = legacy.groups()
             late, cited = None, ["legacy"]
@@ -1048,6 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 OUTSIDE_ANCHOR = re.compile(r"^## Plan line ([0-9]+) is outside any anchor")
 RETRY_CHARS = 600
+RETRY_ASCII = str.maketrans({"→": "->", "—": "-", "–": "-", "…": "...", "§": "S"})
 
 
 def retry_message(failures: list[str]) -> str:
@@ -1060,7 +1066,7 @@ def retry_message(failures: list[str]) -> str:
         parts.append(f"{len(outside)} ## Plan lines are outside any anchor (lines {shown})")
     for failure in failures:
         if not OUTSIDE_ANCHOR.match(failure):
-            text = re.sub(r":? *['\"].*$", "", failure)
+            text = failure.translate(RETRY_ASCII)
             parts.append("".join(c for c in text if " " <= c <= "~" and c not in "`{}"))
     message = "; ".join(dict.fromkeys(part for part in parts if part))
     return message if len(message) <= RETRY_CHARS else message[:RETRY_CHARS - 4] + " ..."

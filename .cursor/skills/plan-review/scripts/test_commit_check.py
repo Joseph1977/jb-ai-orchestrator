@@ -1402,6 +1402,13 @@ class CurrentFormatTests(HistoryFixture):
         cli = json.loads(self.cli("history", "--repo", str(self.repo), "--task", TASK).stdout)
         self.assertEqual(cli["format"], "legacy")
 
+    def test_pending_audit_blocks_consensus_in_legacy_status_format(self) -> None:
+        self.through_review("NO_FURTHER_COMMENTS")
+        self.step("memory-seed", 1, {"memory.md": memory_text(log=("- seed v1: audit pending",)),
+                                     "status.md": self.status("reviewed") + "\n"})
+        self.assert_pre_rejects("consensus", 1, {"status.md": self.status("awaiting-user")},
+                                "consensus is rejected: memory.md records Audit: pending")
+
     def test_legacy_status_format_keeps_minors_and_limit_cases(self) -> None:
         self.through_review("APPROVE_WITH_MINORS", limit=1)
         self.minors(iteration=2, limit=2)

@@ -57,8 +57,13 @@
   definition; the failure names the offending `## Plan` line.
 - Coverage that marks a cited item `ok`, or maps an item to a point that does
   not cite it, fails; a mapping that only omits a citing point is completed
-  from the points' anchors. An `ok` ID the plan mentions mid-line but never
-  defines as an anchor is ignored.
+  from the points' anchors. In an audit of a seeded task only, an `ok` ID the
+  plan mentions mid-line but never defines as an anchor is ignored; the audit
+  prompt now says what counts as a plan anchor.
+- A pending audit also blocks consensus for tasks in the legacy status format.
+- A maintained point may keep citing an anchor that an earlier plan removed.
+- Retry summaries keep quoted details (non-ASCII arrows and dashes become
+  ASCII), and seeding accepts `;` between a point's anchors.
 - Review parsing accepts `None.` under an empty `## Points` and `;` between a
   point's anchors, and reports unknown coverage items in one grouped failure.
 - Default caps are plan 250 / review 150 lines. The rendered prompt budget is
