@@ -50,6 +50,11 @@
   audit.
 - Optional `--audit-reviewer-model` runs audit-scope reviews with a separate,
   explicitly selected reviewer.
+- A format retry, and the first planner after a seed whose `plan_format`
+  lists anchor failures, gets `prompt_build.py --format-error`, which appends
+  the checker's message to the prompt. A duplicate anchor definition counts as
+  body text of its enclosing heading anchor, so a legacy plan keeps its first
+  definition.
 - Default caps are plan 250 / review 150 lines. The rendered prompt budget is
   10,500 bytes (planner plus the larger reviewer variant).
 - Tests: `test_memory_build.py` added; `test_commit_check.py`,

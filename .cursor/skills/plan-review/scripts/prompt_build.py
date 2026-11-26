@@ -22,6 +22,7 @@ POINT_ID = re.compile(r"^P[0-9]{3,}$")
 ID_LIST = re.compile(r"^(none|P[0-9]{3,}(,P[0-9]{3,})*)$")
 TOKEN = re.compile(r"\{\{([A-Z_]+)\}\}")
 UNSAFE = re.compile(r"[\s`]")
+FORMAT_ERROR = re.compile(r"[\x20-\x5f\x61-\x7a|~]{1,600}")
 
 ALLOWED_SCALARS = (
     "TASK_FOLDER",
@@ -140,7 +141,8 @@ def _literal_line(prompts: str, name: str) -> str:
     return line
 
 
-def build(mode: str, values: dict[str, str], scope: str | None = None) -> str:
+def build(mode: str, values: dict[str, str], scope: str | None = None,
+          format_error: str | None = None) -> str:
     if (mode == "reviewer") != (scope is not None):
         raise BuildError("--scope is required for reviewer and refused for planner/minors")
     prompts = _read(PROMPTS_FILE)
@@ -150,7 +152,16 @@ def build(mode: str, values: dict[str, str], scope: str | None = None) -> str:
         prompt = f"{prompt}\n{_literal_line(prompts, 'MINORS_LINE')}"
     if scope is not None:
         prompt = f"{prompt}\n{_literal_line(prompts, SCOPE_BLOCKS[scope])}"
+    if format_error is not None:
+        prompt = f"{prompt}\n{_literal_line(prompts, 'RETRY_LINE')} {format_error}"
     return prompt
+
+
+def _format_error(value: str) -> str:
+    if not FORMAT_ERROR.fullmatch(value):
+        raise BuildError("--format-error must be one line of at most 600 printable characters "
+                         "with no backtick or brace")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -164,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retired")
     parser.add_argument("--pushed-back")
     parser.add_argument("--scope", choices=tuple(SCOPE_BLOCKS))
+    parser.add_argument("--format-error")
     return parser
 
 
@@ -171,7 +183,8 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         probe = _probe_code(_read(SKILL_FILE))
-        prompt = build(args.mode, scalars(args, probe), args.scope)
+        error = None if args.format_error is None else _format_error(args.format_error)
+        prompt = build(args.mode, scalars(args, probe), args.scope, error)
     except BuildError as exc:
         print(f"prompt_build: {exc}", file=sys.stderr)
         return 2

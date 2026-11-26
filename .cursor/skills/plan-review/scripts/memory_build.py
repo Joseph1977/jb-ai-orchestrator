@@ -174,10 +174,11 @@ def plan_anchors(text: str) -> tuple[dict[str, str], list[str]]:
                 anchors[name] = [line]
             continue
         match = ANCHOR_LINE.match(line)
+        if match and not line[:1].isspace() and match.group(1) in anchors:
+            failures.append(f"anchor {match.group(1)} is defined twice")
+            match = None
         if match and not line[:1].isspace():
             name = match.group(1)
-            if name in anchors:
-                failures.append(f"anchor {name} is defined twice")
             anchors[name] = [line]
             current = name
         elif line[:1].isspace() and current is not None:
@@ -946,10 +947,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if mode == "seed":
         if committed(repo, task, "memory.md") is not None:
             raise BuildError("memory.md already exists; seed only starts it")
+        plan = committed(repo, task, "plan.md")
         text = seed_text(require(committed(repo, task, "brief.md"), "brief.md"),
-                         committed(repo, task, "plan.md"), committed(repo, task, "review.md"),
+                         plan, committed(repo, task, "review.md"),
                          require(committed(repo, task, "status.md"), "status.md"), args.audit)
-        return write_memory(repo, task, text)
+        return {**write_memory(repo, task, text),
+                "plan_format": plan_anchors(plan)[1] if plan else []}
     memory_text = require(committed(repo, task, "memory.md"), "memory.md")
     memory = Memory.parse(memory_text)
     if mode == "scope":

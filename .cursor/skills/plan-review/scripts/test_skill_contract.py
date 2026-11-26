@@ -600,7 +600,7 @@ class HonestLimitContractTests(unittest.TestCase):
 
     def test_templates_are_iteration_blind(self) -> None:
         for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
-                     "CONVERGE_BLOCK"):
+                     "CONVERGE_BLOCK", "RETRY_LINE"):
             found = BUDGET_WORDS.findall(block(name))
             self.assertEqual(found, [], f"{name} reveals progress or budget: {found}")
 
@@ -612,7 +612,7 @@ class HonestLimitContractTests(unittest.TestCase):
 
     def test_prompts_do_not_read_status_md(self) -> None:
         for name in ("PLANNER_PROMPT", "REVIEWER_PROMPT", "MINORS_LINE", "AUDIT_BLOCK",
-                     "CONVERGE_BLOCK"):
+                     "CONVERGE_BLOCK", "RETRY_LINE"):
             self.assertNotIn("status.md", block(name), name)
 
     def test_templates_define_version_derivation(self) -> None:

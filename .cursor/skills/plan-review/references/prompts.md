@@ -98,3 +98,12 @@ Scope: converge. Review only each open point in the prior review.md against its 
 <!-- BEGIN MINORS_LINE -->
 The current review.md is APPROVE_WITH_MINORS: apply each minor or push back with Evidence; change nothing else.
 <!-- END MINORS_LINE -->
+
+# RETRY_LINE
+
+Appended by `prompt_build.py --format-error "<checker message>"`, followed by that message, on a
+format retry and on the first planner after `seed` reports `plan_format` failures.
+
+<!-- BEGIN RETRY_LINE -->
+The last attempt or the current owned file failed this format check; make the file you write pass it:
+<!-- END RETRY_LINE -->

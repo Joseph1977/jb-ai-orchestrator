@@ -293,4 +293,5 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 - Enforce caps (default plan 250/review 150), one ≤600-character line per point/response reason,
   one ≤300-character line per `## Changes` entry.
 
-Subagent format failure gets one `recovery.md` retry, then stops. Correct self-planner before commit.
+Subagent format failure gets one `recovery.md` retry, then stops. The retry prompt carries the
+checker's failures through `prompt_build.py --format-error`. Correct self-planner before commit.

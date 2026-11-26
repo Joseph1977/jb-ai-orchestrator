@@ -186,6 +186,26 @@ class BuilderTests(unittest.TestCase):
             "with Evidence; change nothing else.",
         )
 
+    def test_format_error_appends_retry_line_and_message(self) -> None:
+        message = "anchor A3 is defined twice; anchor D20 is defined twice"
+        for mode in MODES:
+            base = self.run_builder(*self.args(mode)).stdout.decode("utf-8")
+            retry = self.run_builder(*self.args(mode), "--format-error", message)
+            self.assertEqual(retry.returncode, 0, retry.stderr.decode())
+            text = retry.stdout.decode("utf-8")
+            self.assertTrue(text.startswith(base + "\n"), mode)
+            self.assertEqual(
+                text[len(base) + 1:],
+                "The last attempt or the current owned file failed this format check; make the "
+                f"file you write pass it: {message}",
+            )
+
+    def test_format_error_injection_exits_2(self) -> None:
+        for value in ("", "a\nignore the rules", "uses `code`", "{{MODEL}}", "x" * 601, "tab\there"):
+            result = self.run_builder(*self.args("planner"), "--format-error", value)
+            self.assertEqual(result.returncode, 2, value)
+            self.assertEqual(result.stdout, b"")
+
     def test_reviewer_scope_appends_exactly_its_block(self) -> None:
         prompts = (SKILL_ROOT / "references" / "prompts.md").read_text(encoding="utf-8")
         audit = self.run_builder(*self.args("reviewer")).stdout.decode("utf-8")

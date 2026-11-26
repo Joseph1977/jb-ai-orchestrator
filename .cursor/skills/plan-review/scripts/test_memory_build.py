@@ -86,6 +86,13 @@ class ParserTests(unittest.TestCase):
         self.assertIn("Continues here.", anchors["D1"])
         self.assertIn("Entry: branch cut.", anchors["S1"])
 
+    def test_duplicate_definition_stays_body_of_its_heading_anchor(self) -> None:
+        plan = PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n"
+        anchors, failures = memory_build.plan_anchors(plan)
+        self.assertEqual(failures, ["anchor D2 is defined twice"])
+        self.assertEqual(anchors["D2"], "- D2 (C-1) Deadline.")
+        self.assertIn("- D2 adds one read per call.", anchors["R1"])
+
 
 class PlanCheckTests(unittest.TestCase):
     def check(self, plan: str, previous: str | None = PLAN_V1, review: str | None = REVIEW_V1):
@@ -426,11 +433,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("compact").returncode, 2)
         seeded = self.run_cli("seed", "--audit", "pending")
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertEqual(json.loads(seeded.stdout)["plan_format"], [])
         self.commit("memory.md")
         self.assertEqual(self.run_cli("seed", "--audit", "pending").returncode, 2)
         below = self.run_cli("compact")
         self.assertEqual(below.returncode, 2)
         self.assertIn("below the soft limit", below.stderr)
+
+    def test_seed_reports_anchor_failures_in_the_committed_plan(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.write("plan.md", PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n")
+        self.write("status.md", "# Status — demo\nIteration: 3 of 4\nNext point ID: P004\n")
+        self.commit("brief.md", "plan.md", "status.md")
+        seeded = self.run_cli("seed", "--audit", "pending")
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertEqual(json.loads(seeded.stdout)["plan_format"],
+                         ["anchor D2 is defined twice"])
 
     def test_bad_task_path_exits_2(self) -> None:
         result = subprocess.run(["python3", "-I", "-B", str(SCRIPT), "plan-check", "--repo",

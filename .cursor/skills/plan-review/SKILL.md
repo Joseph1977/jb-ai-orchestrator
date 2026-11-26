@@ -486,7 +486,8 @@ manifest for diagnosis but never rerun `post`.
 ## Format and consistency checks
 
 Digest-check; apply every loaded `operations.md` format rule. Reread only per Operations gate.
-Self-planner corrects failures before commit; subagent gets one `recovery.md` retry, then stops.
+Self-planner corrects failures before commit; subagent gets one `recovery.md` retry, rendered with
+`--format-error`, then stops.
 
 ### Prompts
 
