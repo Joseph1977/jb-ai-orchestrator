@@ -228,25 +228,44 @@ def post(manifest: dict[str, Any]) -> dict[str, Any]:
 
 
 TASK_NAME = re.compile(r"^task-([a-z0-9]+(?:-[a-z0-9]+){1,4})_[0-9]{8}-[0-9]{6}Z-[0-9a-f]{4}$")
-SUBJECT = re.compile(
-    r"^plan-review\(([a-z0-9-]+)\): (brief|feedback|plan-start|review-start|plan|review|"
-    r"minors|consensus|approved|limit-reached|stopped) v([0-9]+)$"
+STEPS = (
+    r"brief|feedback|plan-start|review-start|plan|review|minors|consensus|approved|"
+    r"limit-reached|stopped|memory-seed|memory-compact"
 )
-TASK_FILES = {"brief.md", "plan.md", "review.md", "status.md"}
+SUBJECT = re.compile(rf"^plan-review\(([a-z0-9-]+)\): ({STEPS}) v([0-9]+)$")
+TASK_FILES = {"brief.md", "plan.md", "review.md", "status.md", "memory.md"}
 STEP_FILES = {
-    "brief": {"brief.md", "status.md"},
-    "feedback": {"brief.md", "status.md"},
+    "brief": {"brief.md", "status.md", "memory.md"},
+    "feedback": {"brief.md", "status.md", "memory.md"},
     "plan": {"plan.md", "status.md"},
     "minors": {"plan.md", "status.md"},
-    "review": {"review.md", "status.md"},
+    "review": {"review.md", "status.md", "memory.md"},
+    "memory-seed": {"memory.md", "status.md"},
+    "memory-compact": {"memory.md", "status.md"},
 }
 STEP_REQUIRED = {
     "brief": {"brief.md", "status.md"},
     "plan": {"plan.md", "status.md"},
     "minors": {"plan.md", "status.md"},
     "review": {"review.md", "status.md"},
+    "memory-seed": {"memory.md"},
+    "memory-compact": {"memory.md"},
 }
-STEP_STATE = {
+MEMORY_STEPS = {"memory-seed", "memory-compact"}
+MEMORY_SECTIONS = (
+    "Settled decisions", "Coverage", "Open points", "Observations", "Closed points",
+    "User decisions / retired IDs", "Round log",
+)
+MEMORY_KEPT = (
+    "Settled decisions", "Coverage", "Open points", "Observations", "User decisions / retired IDs",
+)
+MEMORY_SOFT = (200, 16 * 1024)
+MEMORY_HARD = (300, 24 * 1024)
+MEMORY_LINE_CHARS = 600
+MEMORY_AUDIT = re.compile(r"^Audit: (pending|done v[0-9]+|waived at seed v[0-9]+)$")
+MEMORY_BLIND = re.compile(r"(?i)\blimit\b|\bremaining\b|\bbudget\b|\bfinal\b|\b[0-9]+ of [0-9]+\b")
+MEMORY_NOTE = "pre-memory commits: memory checks not applied"
+STEP_STATE: dict[str, str | None] = {
     "brief": "planning",
     "feedback": "planning",
     "plan-start": "planner-running",
@@ -258,6 +277,8 @@ STEP_STATE = {
     "approved": "approved",
     "limit-reached": "limit-reached",
     "stopped": "stopped",
+    "memory-seed": None,
+    "memory-compact": None,
 }
 STEP_PREVIOUS = {
     "brief": {None},
@@ -271,6 +292,9 @@ STEP_PREVIOUS = {
     "approved": {"awaiting-user"},
     "limit-reached": {"reviewed"},
     "stopped": {"planner-running", "reviewer-running", "reviewed", "limit-reached"},
+    "memory-seed": {"planning", "planner-running", "reviewing", "reviewer-running", "reviewed",
+                    "limit-reached", "stopped"},
+    "memory-compact": {"planning", "reviewing", "reviewed"},
 }
 RECOVERY_PREFIX = "Recovery:"
 COMMIT_RECOVERY = re.compile(
@@ -382,10 +406,7 @@ def write_recovery_marker(repo: Path, status_value: str, commit: str, pre_head: 
     return line
 
 
-SUBJECT_SUFFIX = re.compile(
-    r"^plan-review\(([a-z0-9-]+)\): (brief|feedback|plan-start|review-start|plan|review|"
-    r"minors|consensus|approved|limit-reached|stopped) v([0-9]+)\s.+$"
-)
+SUBJECT_SUFFIX = re.compile(rf"^plan-review\(([a-z0-9-]+)\): ({STEPS}) v([0-9]+)\s.+$")
 ITERATION = re.compile(r"([0-9]+) of ([0-9]+)")
 COUNTS = re.compile(r"[0-9]+/[0-9]+/[0-9]+")
 OUTCOME_CONSENSUS = re.compile(
@@ -426,6 +447,13 @@ class _Context:
         self.limit: int | None = None
         self.outcome: str | None = None
         self.review: dict[str, Any] | None = None
+        self.memory: str | None = None
+        self.memory_text: str | None = None
+        self.brief_text: str | None = None
+        self.retired: set[str] = set()
+
+    def audit_pending(self) -> bool:
+        return self.memory_text is not None and _audit_state(_memory_parts(self.memory_text)[0]) == "pending"
 
 
 def _validate_step(
@@ -479,8 +507,10 @@ def _validate_step(
         if ctx.strict and ctx.format == "legacy":
             failures.append("brief v1 status.md must record an Outcome line")
     new_state = _header(status, "State")
-    if new_state != STEP_STATE[step]:
-        failures.append(f"{step} must set State {STEP_STATE[step]}, got {new_state}")
+    expected_state = STEP_STATE[step] if STEP_STATE[step] is not None else ctx.state
+    if new_state != expected_state:
+        verb = "set" if STEP_STATE[step] is not None else "keep"
+        failures.append(f"{step} must {verb} State {expected_state}, got {new_state}")
     if ctx.state not in STEP_PREVIOUS[step]:
         failures.append(f"{step} is not allowed after State {ctx.state}")
     iteration = ITERATION.fullmatch(_header(status, "Iteration") or "")
@@ -507,6 +537,9 @@ def _validate_step(
         failures.extend(_current_checks(ctx, step, version, status, iteration))
     else:
         failures.extend(_legacy_checks(ctx, step, version))
+    failures.extend(_memory_checks(ctx, task, step, version, changed, read))
+    ctx.brief_text = read("brief.md")
+    ctx.retired = set(re.findall(r"P[0-9]{3,}", _header(status, "Retired point IDs") or ""))
 
     outcome = _header(status, "Outcome")
     if iteration and ctx.format == "current":
@@ -551,6 +584,11 @@ def _legacy_checks(ctx: _Context, step: str, version: int) -> list[str]:
             )
         else:
             ctx.closed_plan = version
+    if step == "consensus" and ctx.audit_pending():
+        failures.append(
+            "consensus is rejected: memory.md records Audit: pending, so the latest review "
+            "is not a full audit; run an audit review first"
+        )
     if (
         step in {"consensus", "limit-reached", "plan"}
         and ctx.review_verdict == "APPROVE_WITH_MINORS"
@@ -598,8 +636,16 @@ def _current_checks(
     if step in {"brief", "feedback", "plan-start", "plan", "review-start", "review"}:
         if outcome is not None and outcome != "none":
             failures.append(f"{step} must set Outcome none, got {outcome}")
+    elif step in MEMORY_STEPS:
+        if outcome != ctx.outcome:
+            failures.append(f"{step} must keep Outcome {ctx.outcome!r}, got {outcome!r}")
     elif step == "consensus":
         expected = f"consensus at iteration {count} of {limit}, open points 0/0/0"
+        if ctx.audit_pending():
+            failures.append(
+                "consensus is rejected: memory.md records Audit: pending, so the latest review "
+                "is not a full audit; run an audit review first"
+            )
         if not review or review["version"] != version or review["verdict"] != "NO_FURTHER_COMMENTS":
             got = "none" if not review else f"v{review['version']} {review['verdict']}"
             failures.append(
@@ -611,11 +657,14 @@ def _current_checks(
         if open_points != "0/0/0":
             failures.append(f"consensus must record Open points 0/0/0, got {open_points}")
     elif step == "limit-reached":
-        if not review or review["version"] != version or review["verdict"] not in OPEN_VERDICTS:
+        pending = ctx.audit_pending()
+        verdicts = OPEN_VERDICTS | ({"NO_FURTHER_COMMENTS"} if pending else set())
+        if not review or review["version"] != version or review["verdict"] not in verdicts:
             got = "none" if not review else f"v{review['version']} {review['verdict']}"
             failures.append(
                 f"limit-reached requires the latest committed review at version {version} with "
-                f"open points (CHANGES_REQUESTED or APPROVE_WITH_MINORS), got {got}"
+                f"open points (CHANGES_REQUESTED or APPROVE_WITH_MINORS) or a pending audit, "
+                f"got {got}"
             )
         else:
             review_limit = int(review["iteration"].split(" of ")[1])
@@ -634,7 +683,9 @@ def _current_checks(
                     f"limit-reached Open points {open_points} must equal the review's "
                     f"{review['open']}"
                 )
-        if open_points is None or not COUNTS.fullmatch(open_points) or open_points == "0/0/0":
+        if open_points is None or not COUNTS.fullmatch(open_points) or (
+            open_points == "0/0/0" and not pending
+        ):
             failures.append(f"limit-reached must keep nonzero Open points, got {open_points}")
         expected = f"limit-reached at iteration {count} of {limit}, open points {open_points}"
         if outcome != expected:
@@ -657,6 +708,186 @@ def _current_checks(
                 f"approved must keep the consensus Outcome {ctx.outcome!r}, got {outcome!r}"
             )
     return failures
+
+
+def _memory_parts(text: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Split memory.md into its fixed sections (non-blank lines); report format failures."""
+    failures: list[str] = []
+    lines = text.splitlines()
+    if not lines or not lines[0].startswith("# Memory — "):
+        failures.append("memory.md must start with '# Memory — <title>'")
+    parts: dict[str, list[str]] = {}
+    order: list[str] = []
+    current: str | None = None
+    for line in lines[1:]:
+        if len(line) > MEMORY_LINE_CHARS:
+            failures.append(f"memory.md has a line over {MEMORY_LINE_CHARS} characters")
+        if line.startswith("Iteration:"):
+            failures.append("memory.md must not record an Iteration line")
+        if line.startswith("## "):
+            current = line[3:].strip()
+            order.append(current)
+            parts[current] = []
+        elif current is None:
+            if line.strip():
+                failures.append("memory.md has text before its first section")
+        elif line.strip():
+            parts[current].append(line)
+    if tuple(order) != MEMORY_SECTIONS:
+        failures.append(f"memory.md sections must be exactly {list(MEMORY_SECTIONS)}, got {order}")
+        return {name: parts.get(name, []) for name in MEMORY_SECTIONS}, failures
+    coverage = parts["Coverage"]
+    if not coverage or not MEMORY_AUDIT.match(coverage[0]) or any(
+        line.startswith("Audit:") for line in coverage[1:]
+    ):
+        failures.append("memory.md Coverage must start with one valid Audit line")
+    for name in ("Coverage", "User decisions / retired IDs", "Round log"):
+        if any(MEMORY_BLIND.search(line) for line in parts[name]):
+            failures.append(f"memory.md {name} reveals progress or budget")
+    return parts, failures
+
+
+def _memory_size(text: str) -> tuple[int, int]:
+    data = text.encode("utf-8")
+    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0), len(data)
+
+
+def _over(size: tuple[int, int], limit: tuple[int, int]) -> bool:
+    return size[0] >= limit[0] or size[1] >= limit[1]
+
+
+def _audit_state(parts: dict[str, list[str]]) -> str | None:
+    coverage = parts.get("Coverage") or [""]
+    match = MEMORY_AUDIT.match(coverage[0])
+    return match.group(1) if match else None
+
+
+def _ids(lines: list[str], pattern: str = r"P[0-9]{3,}") -> set[str]:
+    return {token for line in lines for token in re.findall(pattern, line)}
+
+
+def _review_ids(text: str) -> set[str]:
+    ids: set[str] = set()
+    in_points = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_points = line.rstrip() == "## Points"
+            continue
+        match = re.match(r"^[0-9]+\. (P[0-9]{3,}) ", line)
+        if in_points and match:
+            ids.add(match.group(1))
+    return ids
+
+
+def _memory_checks(
+    ctx: _Context,
+    task: str,
+    step: str,
+    version: int,
+    changed: set[str],
+    read: Callable[[str], str | None],
+) -> list[str]:
+    """Rules for the orchestrator-owned memory.md, from the commit that starts it."""
+    failures: list[str] = []
+    text = read("memory.md")
+    touched = f"{task}/memory.md" in changed
+    previous = ctx.memory_text
+    current = ctx.previous_subject_version or version
+    if ctx.memory is None:
+        if text is None:
+            if step == "memory-compact":
+                failures.append("memory-compact requires an existing memory.md")
+            if ctx.strict and step == "brief":
+                failures.append("brief v1 must create memory.md (memory_build.py init)")
+            if ctx.strict and ctx.format == "current" and step in {"plan-start", "review-start"}:
+                failures.append(
+                    f"{step} requires memory.md; run memory_build.py seed and commit "
+                    f"memory-seed v{current} first"
+                )
+            return failures
+        if step not in {"brief", "memory-seed"}:
+            failures.append(f"{step} cannot start memory.md; only brief v1 or memory-seed may")
+        ctx.memory = "native" if step == "brief" else "seeded"
+    elif text is None:
+        failures.append("memory.md is missing after it was started")
+        return failures
+    elif step == "memory-seed":
+        failures.append("memory-seed requires that memory.md is absent")
+    if step == "review" and not touched:
+        failures.append("review must update memory.md")
+
+    parts, parse_failures = _memory_parts(text)
+    if touched or previous is None:
+        failures.extend(parse_failures)
+    size = _memory_size(text)
+    if step in {"plan-start", "review-start"} and _over(size, MEMORY_SOFT):
+        failures.append(
+            f"{step} is rejected: memory.md is {size[0]} lines, {size[1]} bytes, at or above the "
+            f"soft limit ({MEMORY_SOFT[0]} lines or {MEMORY_SOFT[1]} bytes); commit "
+            f"memory-compact v{current} first"
+        )
+    if touched and step != "review" and _over(size, MEMORY_HARD):
+        failures.append(
+            f"{step} leaves memory.md at {size[0]} lines, {size[1]} bytes, at or above the hard "
+            f"limit ({MEMORY_HARD[0]} lines or {MEMORY_HARD[1]} bytes)"
+        )
+    if touched and previous is not None and not parse_failures:
+        before, _ = _memory_parts(previous)
+        closed_before, closed_now = _ids(before["Closed points"]), _ids(parts["Closed points"])
+        if closed_before - closed_now:
+            failures.append(f"memory.md lost closed point IDs {sorted(closed_before - closed_now)}")
+        audit_before, audit_now = _audit_state(before), _audit_state(parts)
+        if step == "review":
+            open_ids = _ids(parts["Open points"], r"^- (P[0-9]{3,}) ")
+            review_ids = _review_ids(read("review.md") or "")
+            if open_ids != review_ids:
+                failures.append(
+                    f"memory.md Open points {sorted(open_ids)} differ from review.md Points "
+                    f"{sorted(review_ids)}"
+                )
+            expected = f"done v{version}" if audit_before == "pending" else audit_before
+            if audit_now != expected:
+                failures.append(f"review must record 'Audit: {expected}', got {audit_now!r}")
+        elif step == "feedback" and audit_now not in {audit_before, "pending"}:
+            failures.append(f"feedback may only set Audit pending, got {audit_now!r}")
+        elif step == "memory-compact":
+            for name in MEMORY_KEPT:
+                if parts[name] != before[name]:
+                    failures.append(f"memory-compact changed the {name} section")
+            if closed_now != closed_before:
+                failures.append("memory-compact changed the closed point IDs")
+            if _over(size, MEMORY_SOFT):
+                failures.append("memory-compact must end below the soft limit")
+    brief = read("brief.md")
+    status_text = read("status.md") or ""
+    retired = set(re.findall(r"P[0-9]{3,}", _header(status_text, "Retired point IDs") or ""))
+    if (
+        step == "feedback" and not parse_failures and _audit_state(parts) != "pending"
+        and f"{task}/brief.md" in changed and ctx.brief_text is not None
+    ):
+        if _brief_outside_feedback(brief or "") != _brief_outside_feedback(ctx.brief_text):
+            failures.append(
+                "feedback changed brief.md outside ## User feedback, so memory.md must record "
+                "Audit: pending"
+            )
+        elif not retired - ctx.retired:
+            failures.append(
+                "feedback changed brief.md without retiring a point, so memory.md must record "
+                "Audit: pending"
+            )
+    ctx.memory_text = text
+    return failures
+
+
+def _brief_outside_feedback(text: str) -> list[str]:
+    kept: list[str] = []
+    feedback = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            feedback = line.rstrip() == "## User feedback"
+        if not feedback:
+            kept.append(line)
+    return kept
 
 
 def _show_task_file(repo: Path, commit: str, task: str) -> Callable[[str], str | None]:
@@ -716,7 +947,8 @@ def _replay(repo: Path, task: str, slug: str, strict: bool = False) -> tuple[_Co
                 failures.append(f"{short}: {path} has mode {mode} {kind}, expected 100644 blob")
             else:
                 present_files.add(name)
-        missing_persistent = {"brief.md", "status.md"} - present_files
+        persistent = {"brief.md", "status.md"} | ({"memory.md"} if ctx.memory else set())
+        missing_persistent = persistent - present_files
         if missing_persistent:
             failures.append(
                 f"{short}: persistent task files are missing {sorted(missing_persistent)}"
@@ -738,11 +970,14 @@ def history(repo_value: str, task_value: str) -> dict[str, Any]:
         "last_commit": commits[-1] if commits else None,
         "last_state": ctx.state,
         "format": ctx.format,
+        "memory": ctx.memory or "absent",
         "recovery": recovery_marker(repo, task),
         "failures": failures,
     }
     if ctx.format == "legacy":
         result["note"] = LEGACY_NOTE
+    if ctx.memory == "seeded":
+        result["memory_note"] = MEMORY_NOTE
     return result
 
 

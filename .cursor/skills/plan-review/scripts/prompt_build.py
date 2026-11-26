@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Render a plan-review prompt from the shipped template plus a fixed set of scalars."""
+"""Render a plan-review prompt from the shipped template plus a fixed set of scalars.
+
+A reviewer prompt also takes `--scope audit|converge`, which appends that scope's block; an audit
+also takes `--checklist`, the item list `memory_build.py scope` prints, and `--second-audit` for the
+second audit reviewer, which writes review-2.md instead of review.md.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +24,10 @@ POINT_ID = re.compile(r"^P[0-9]{3,}$")
 ID_LIST = re.compile(r"^(none|P[0-9]{3,}(,P[0-9]{3,})*)$")
 TOKEN = re.compile(r"\{\{([A-Z_]+)\}\}")
 UNSAFE = re.compile(r"[\s`]")
+FORMAT_ERROR = re.compile(r"[\x20-\x5f\x61-\x7a|~]{1,600}")
+CHECKLIST = re.compile(r"[A-Z][A-Za-z0-9-]{0,15}(,[A-Z][A-Za-z0-9-]{0,15})*")
+CHECKLIST_CHARS = 2000
+REVIEW_FILES = {False: "review.md", True: "review-2.md"}
 
 ALLOWED_SCALARS = (
     "TASK_FOLDER",
@@ -28,6 +37,7 @@ ALLOWED_SCALARS = (
     "NEXT_POINT_ID",
     "RETIRED_IDS",
     "PUSHED_BACK_IDS",
+    "REVIEW_FILE",
     "POLICY_PROBE_PY",
 )
 MODES = ("planner", "reviewer", "minors")
@@ -127,16 +137,54 @@ def render(template: str, values: dict[str, str]) -> str:
     return TOKEN.sub(lambda match: values[match.group(1)], template)
 
 
-def build(mode: str, values: dict[str, str]) -> str:
+SCOPE_BLOCKS = {"audit": "AUDIT_BLOCK", "converge": "CONVERGE_BLOCK"}
+
+
+def _literal_line(prompts: str, name: str) -> str:
+    line = _between(prompts, name, "prompts.md")
+    if TOKEN.search(line) or "{{" in line or "}}" in line or "\n" in line:
+        raise BuildError(f"{name} must be one literal line")
+    return line
+
+
+def build(mode: str, values: dict[str, str], scope: str | None = None,
+          format_error: str | None = None, checklist: str | None = None,
+          second_audit: bool = False) -> str:
+    if (mode == "reviewer") != (scope is not None):
+        raise BuildError("--scope is required for reviewer and refused for planner/minors")
+    if (scope == "audit") != (checklist is not None):
+        raise BuildError("--checklist is required for --scope audit and refused otherwise")
+    if second_audit and scope != "audit":
+        raise BuildError("--second-audit is only allowed with --scope audit")
+    values = {**values, "REVIEW_FILE": REVIEW_FILES[second_audit]}
     prompts = _read(PROMPTS_FILE)
     template_name = "REVIEWER_PROMPT" if mode == "reviewer" else "PLANNER_PROMPT"
     prompt = render(_between(prompts, template_name, "prompts.md"), values)
     if mode == "minors":
-        line = _between(prompts, "MINORS_LINE", "prompts.md")
-        if TOKEN.search(line) or "{{" in line or "}}" in line or "\n" in line:
-            raise BuildError("MINORS_LINE must be one literal line")
-        prompt = f"{prompt}\n{line}"
+        prompt = f"{prompt}\n{_literal_line(prompts, 'MINORS_LINE')}"
+    if scope is not None:
+        prompt = f"{prompt}\n{_literal_line(prompts, SCOPE_BLOCKS[scope])}"
+    if checklist is not None:
+        prompt = f"{prompt}\n{_literal_line(prompts, 'CHECKLIST_LINE')} {_checklist(checklist)}"
+    if format_error is not None:
+        prompt = f"{prompt}\n{_literal_line(prompts, 'RETRY_LINE')} {format_error}"
     return prompt
+
+
+def _format_error(value: str) -> str:
+    if not FORMAT_ERROR.fullmatch(value):
+        raise BuildError("--format-error must be one line of at most 600 printable characters "
+                         "with no backtick or brace")
+    return value
+
+
+def _checklist(value: str) -> str:
+    items = value.split(",")
+    if (len(value) > CHECKLIST_CHARS or not CHECKLIST.fullmatch(value)
+            or len(set(items)) != len(items)):
+        raise BuildError(f"--checklist must be at most {CHECKLIST_CHARS} characters of distinct "
+                         "comma-separated item IDs with no spaces")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -149,6 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--next-id")
     parser.add_argument("--retired")
     parser.add_argument("--pushed-back")
+    parser.add_argument("--scope", choices=tuple(SCOPE_BLOCKS))
+    parser.add_argument("--format-error")
+    parser.add_argument("--checklist")
+    parser.add_argument("--second-audit", action="store_true")
     return parser
 
 
@@ -156,7 +208,9 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         probe = _probe_code(_read(SKILL_FILE))
-        prompt = build(args.mode, scalars(args, probe))
+        error = None if args.format_error is None else _format_error(args.format_error)
+        prompt = build(args.mode, scalars(args, probe), args.scope, error, args.checklist,
+                       args.second_audit)
     except BuildError as exc:
         print(f"prompt_build: {exc}", file=sys.stderr)
         return 2

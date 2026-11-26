@@ -1,0 +1,119 @@
+# Plan-review: exhaustive first audit, converging later rounds, and task memory
+
+- **Date:** 2026-11-26
+- **Branch:** `fix/plan-review-convergence` (pull request #29 against `feature/opencode-engine-plan`)
+
+## What changed
+
+- The first review of a run is a full audit. The reviewer is given a checklist of
+  every brief Constraint, In and Out item, numbered question and Done criterion,
+  plus every plan anchor, and reports every blocker, major and minor it finds in
+  that one review. `## Coverage` must list each checklist item exactly once.
+- Briefs number their items (`C-n`, `In-n`, `Out-n`, `Q<n>`, `Done`), plans anchor
+  every line (`D1`, `S2`, ...), and review points cite anchors:
+  `N. P### [sev] (<anchors>) issue → fix`.
+- Later reviews converge. The planner lists every anchor it added, changed or
+  removed in a new `## Changes` section, and `memory_build.py plan-check` compares
+  that list with the committed plan. A converge review checks open points,
+  pushbacks and the listed anchors. A new issue on an unlisted anchor is a late
+  finding: it is allowed only as `[blocker] [late]` with `Missed: <reason>`, and
+  any other late issue goes to `## Observations`, is kept in memory and is
+  listed to the user at consensus.
+- New orchestrator-owned task file `memory.md`, built only by the new
+  `scripts/memory_build.py` (`init`, `plan-check`, `scope`, `update`, `feedback`,
+  `seed`, `compact`). It has seven fixed sections: Settled decisions, Coverage
+  (with an `Audit:` line that selects the review scope), Open points (short
+  reference lines; `review.md` stays the source of truth), Observations, Closed
+  points, User decisions / retired IDs, and Round log. Both agents read it first.
+- Memory limits: at 200 lines or 16 KiB, it is compacted before the next launch
+  as its own commit `plan-review(<slug>): memory-compact v<N>`, aiming for 100
+  lines and 8 KiB. At 300 lines or 24 KiB, agents stop before reading it. Lines
+  are at most 600 characters.
+- `prompt_build.py reviewer` requires `--scope audit|converge` and appends the
+  matching `AUDIT_BLOCK` or `CONVERGE_BLOCK` from `references/prompts.md`.
+- `commit_check.py` accepts the subjects `memory-seed` and `memory-compact`.
+  It requires `memory.md` from `brief v1` in new runs and keeps it in every later
+  commit. It checks that each review updates memory to match its points and the
+  audit state, that compaction keeps the other sections and every closed ID, and
+  that launches are refused at the soft limit. `history` reports `memory`
+  (`native`, `seeded` or `absent`).
+- While memory records `Audit: pending`, `consensus` is refused, so an old
+  `NO_FURTHER_COMMENTS` review cannot end a seeded or re-audited run. A
+  `feedback` that changes the brief must set `Audit: pending`. The only
+  exception is a change limited to `## User feedback` that records newly retired
+  point IDs (`--no-audit`).
+- Review coverage must agree with each point's anchors. Observations may not
+  cite anchors listed in `## Changes`. Removed anchors can be cited and must be
+  covered in a converge review.
+- Resuming a task without `memory.md` seeds it from the committed files
+  (`memory-seed vN`, default `Audit: pending`), so the next review is a full
+  audit.
+- Optional `--audit-reviewer-model` runs audit-scope reviews with a separate,
+  explicitly selected reviewer.
+- A format retry, and the first planner after a seed whose `plan_format`
+  lists anchor failures, gets `prompt_build.py --format-error`, which appends
+  the checker's message to the prompt. A duplicate anchor definition counts as
+  body text of its enclosing heading anchor, so a legacy plan keeps its first
+  definition; the failure names the offending `## Plan` line.
+- Coverage that marks a cited item `ok`, or maps an item to a point that does
+  not cite it, fails; a mapping that only omits a citing point is completed
+  from the points' anchors. In an audit of a seeded task only, an `ok` ID the
+  plan mentions mid-line but never defines as an anchor is ignored.
+- `memory_build.py scope` prints the audit `checklist` (committed brief items
+  and plan anchors), and the audit prompt receives it via the required
+  `prompt_build.py --checklist`, so reviewers no longer derive the anchor set.
+  The audit block checks every item through seven fixed lenses: existing gates
+  still apply, isolation, existing callers and records, explicit behaviour
+  changes, persisted state, owned processes and secrets, and tested claims.
+  The checklist is rendered without spaces and capped at 2,000 characters;
+  `plan-check` fails a plan that would exceed it.
+- Optional `--second-audit-model` (an experiment, off by default) runs a second
+  independent audit reviewer, which writes `review-2.md` (`prompt_build.py
+  --second-audit`), before the audit reviewer. `memory_build.py merge` validates
+  both files separately, then rewrites `review.md` deterministically: primary
+  points, IDs and pushback assessment kept; second-review points renumbered
+  after them; only exact repeats (severity, anchor set, normalized issue words)
+  dropped; coverage unioned; Verdict recomputed; `review-2.md` deleted.
+  Overlapping but non-identical points stay separate: on the replay, true
+  duplicates shared at most 0.15 word overlap, so no looser rule could tell them
+  from distinct defects without dropping some.
+- `references/m13-rubric.md` freezes the M13 rubric: the 16 historical points
+  present in plan v1 (commit `b2f18e9`), the 9 excluded with reasons, the
+  matching rule and standing rulings, and the recorded runs. M13 now scores
+  that rubric (target 10 of 16), and the merged review when a second audit
+  model is used. M12 is split into routing (M12) and real-reviewer detection
+  (M12b).
+- A pending audit also blocks consensus for tasks in the legacy status format.
+- A maintained point may keep citing an anchor that an earlier plan removed.
+- Retry summaries keep quoted details (non-ASCII arrows and dashes become
+  ASCII), and seeding accepts `;` between a point's anchors.
+- Review parsing accepts `None.` under an empty `## Points` and `;` between a
+  point's anchors, and reports unknown coverage items in one grouped failure.
+- Default caps are plan 250 / review 150 lines; a merged audit may use twice
+  the review cap. The rendered prompt budget (planner plus the larger reviewer
+  variant) is 10,500 bytes with a one-item checklist and 12,500 bytes with the
+  longest accepted checklist.
+- Validation status: M12 routing passes; M12b detection is unmet (in two
+  deliberate trials the converge reviewer did not raise the planted defect).
+  M13 is unmet: the best single audit matched 6 of 16, and the merged
+  two-model audit matched 9 of 16.
+- Tests: `test_memory_build.py` added; `test_commit_check.py`,
+  `test_prompt_build.py`, `test_skill_contract.py` and `test_preflight.py` were
+  extended. `references/validation.md` adds manual checks M10–M15.
+
+## Why
+
+Reviews did not converge. In task `opencode-engine-replan`, 16 iterations raised
+about 25 majors one or two at a time, several of them on plan text that was
+unchanged since v1. Reviewers stopped after the first issues, had no record of
+what earlier rounds had settled, and no rule separated new defects from ones an
+earlier review had missed.
+
+## Migration / breaking
+
+No Alembic revision. New runs need `memory.md` from `brief v1`, and `pre`
+refuses `plan-start`/`review-start` in a current-format run without it. Reviewer
+prompts need `--scope`. New default caps apply to new runs only. The skill digest
+changes, so resume in-flight runs in a new chat. They are seeded with
+`memory-seed vN` before their next launch, and their pre-memory commits are
+still checked under the earlier rules.

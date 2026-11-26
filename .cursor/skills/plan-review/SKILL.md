@@ -12,19 +12,21 @@ disable-model-invocation: true
 
 You are the **orchestrator**. A planner writes `plan.md`; a reviewer from a different model family writes
 `review.md`. They communicate only through task-folder files. You own git, `brief.md`, `status.md`,
-and all user communication. On-demand detail is in `references/`. Obey the triggers below.
+`memory.md`, and all user communication. On-demand detail is in `references/`. Obey the triggers below.
 
 ## Invocation
 
 ```
-/plan-review <what we want to do> [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>]
-/plan-review resume <task folder>  [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>]
+/plan-review <what we want to do> [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>] [--second-audit-model <slug>]
+/plan-review resume <task folder>  [--max-iterations N] [--planner-model <slug|self>] [--reviewer-model <slug>] [--audit-reviewer-model <slug>] [--second-audit-model <slug>]
 ```
 
 | Setting | Default |
 |---|---|
 | `--max-iterations` | `4` |
 | models | require explicit available planner (`self` allowed) and different-family reviewer |
+| `--audit-reviewer-model` | off; when given, passes the same reviewer checks and runs only `audit`-scope reviews |
+| `--second-audit-model` | off (experiment); when given, every `audit` review also runs this independent reviewer and merges both |
 
 A new run without `--max-iterations` records `Iteration: 1 of 4`. Existing runs keep the limit in `status.md`.
 
@@ -41,7 +43,10 @@ user claims cannot establish it. Warn that self retains round context.
 
 Planner/reviewer families must differ: `claude-*`, `gpt-*`, `grok-*`/`cursor-grok-*`, or
 `composer-*` (or matching named system family). Record exact writer identity in each file and
-mode/models/model changes in status.
+mode/models/model changes in status. An audit reviewer model passes the same reviewer checks; status
+records `Reviewer model: <slug> (audit: <slug>)`, and an `audit` review's `Model:` is that slug. A
+second audit model passes the same checks and differs from the audit reviewer slug; status adds
+`second audit: <slug>` in those parentheses, and a merged audit's `Model:` is `<audit slug> + <second slug>`.
 
 Never infer model selection or implementation approval.
 
@@ -355,7 +360,7 @@ Resume accepts only the matching repo-relative path or exact absolute equivalent
 All parents/task must already be real directories and canonical task parent must be canonical
 `workspace/outcomes`; never create on resume.
 
-Files are fixed: orchestrator owns brief/status, planner owns plan, reviewer owns review. Operations
+Files are fixed: orchestrator owns brief/status/memory, planner owns plan, reviewer owns review. Operations
 gate: digest-check/read `operations.md` once per chat before new task-folder creation (resume: before
 first write). At each commit/output validation digest-check; reread only after context loss.
 
@@ -377,20 +382,34 @@ Push only on an explicit request; report whether terminal-state commits are loca
 
 One iteration is plan vN then review vN; every feedback round counts.
 
+Run `python3 -I -B "$SKILL_ROOT/scripts/memory_build.py" <mode> --repo "$ROOT" --task <task>` as
+`operations.md` describes; exit 1 is a format failure of agent output, exit 2 stops.
+**Memory gate** (before every `plan-start`/`review-start`): probe `memory.md` with `metadata`; at 200
+lines or 16 KiB or more, run `compact` and commit `memory-compact vN` first. A `compact` exit 1 means the
+floor is still too large: stop and ask the user to retire or decide points.
+
 1. **Setup:** finish models/path/branch, discover applicable policy, then create brief/status per
    `operations.md`; record branch authorization, `State: planning`, `Outcome: none`, iteration/limit,
-   models. Commit `brief v1`.
+   models. Run `memory_build.py init`; commit `brief v1` with `memory.md`.
 2. **Plan:** v1 starts; later versions answer every prior point in full. Self mode obeys identical
    budgets and digest checks. Subagent mode commits `planner-running` as `plan-start vN` (a retry
    repeats that exact subject, per `operations.md`), then launches a new guarded foreground Task with
    explicit model, `subagent_type: generalPurpose`, `run_in_background: false`, and no `resume` or
-   `inherit`. Validate; commit plan with `State: reviewing`.
-3. **Review:** commit `reviewer-running` as `review-start vN` (retry: same exact subject); launch a new
-   guarded foreground Task with reviewer model, `subagent_type: generalPurpose`,
-   `run_in_background: false`, and no `resume` or `inherit`. Validate; record `State: reviewed`,
-   counts/trend/next ID, and commit `review vN`.
+   `inherit`. Validate, including `memory_build.py plan-check` (`operations.md`); commit plan with
+   `State: reviewing`.
+3. **Review:** run `memory_build.py scope` (`audit` or `converge`); commit `reviewer-running` as
+   `review-start vN` (retry: same exact subject); render the reviewer prompt with that `--scope`
+   (an audit also passes the printed `checklist` as `--checklist`) and
+   launch a new guarded foreground Task with reviewer model (the audit reviewer model, if set, for
+   `audit`), `subagent_type: generalPurpose`, `run_in_background: false`, and
+   no `resume` or `inherit`. With a second audit model, an `audit` first runs that reviewer the same
+   way (prompt adds `--second-audit`; the owned file is `review-2.md`), then the audit reviewer, then
+   `memory_build.py merge` (exit 1 names the file to retry). Validate, then `memory_build.py update --scope <same>`; record `State: reviewed`,
+   counts/trend/next ID from its output, and commit `review vN` with review, status and memory.
 4. **Decide** (the limit is checked here, never in a prompt or inside a round):
-   1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0.
+   1. `NO_FURTHER_COMMENTS` at any N ≤ limit → Consensus; its Outcome open points are 0/0/0. If
+      `memory.md` records `Audit: pending` (seeded or re-audit), the review was not an audit: treat
+      it as `CHANGES_REQUESTED` (`commit_check.py` refuses that consensus).
    2. Open points remain (`CHANGES_REQUESTED` or `APPROVE_WITH_MINORS`) and N = limit → digest-check/read
       `limit.md`, commit `limit-reached vN`; only an explicit user K continues.
    3. `APPROVE_WITH_MINORS` and N < limit → Minors close.
@@ -473,14 +492,17 @@ manifest for diagnosis but never rerun `post`.
 ## Format and consistency checks
 
 Digest-check; apply every loaded `operations.md` format rule. Reread only per Operations gate.
-Self-planner corrects failures before commit; subagent gets one `recovery.md` retry, then stops.
+Self-planner corrects failures before commit; subagent gets one `recovery.md` retry, rendered with
+`--format-error`, then stops.
 
 ### Prompts
 
 Render each Task prompt only with `python3 -I -B "$SKILL_ROOT/scripts/prompt_build.py" planner|reviewer|minors
 --task <abs task folder> --model <header slug> --plan-cap <n> --review-cap <n> [--next-id P###]
-[--retired IDs|none] [--pushed-back IDs|none]` (templates in `references/prompts.md`; the probe code comes
-from the marker above). Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
+[--retired IDs|none] [--pushed-back IDs|none] [--scope audit|converge] [--checklist items] [--second-audit]` (templates in
+`references/prompts.md`; the probe code comes from the marker above). `--scope` is required for reviewer,
+refused otherwise, and always equals the `memory_build.py scope` output; `--checklist` is required for
+`audit`, refused otherwise, and always equals that output's `checklist`. Pass stdout verbatim as the Task prompt; never edit, prefix, append, or paste. The
 builder exits 2 on any other input. It has no version, iteration, or limit option; agents derive `Version:`
 from task files. Self-planner mode follows the same rendered rules.
 
@@ -490,17 +512,18 @@ After no comments, use the current version:
 
 1. Keep plan unchanged; set `awaiting-user` and the consensus `Outcome`, commit `consensus`, and report
    local-only status.
-2. Give iteration count, short plan summary, and pushed-back IDs the reviewer accepted; require explicit
-   **go**.
+2. Give iteration count, short plan summary, pushed-back IDs the reviewer accepted, and the
+   `memory.md` Observations; require explicit **go**.
 3. On go in this chat, set `approved`, commit `approved`, then implement only the plan. After `approved`,
    the session ends; implementing changes to this skill runs outside the loop.
-4. Otherwise put dated feedback only in brief, set `planning`, commit `feedback`, continue after the
-   latest plan, and raise the limit in `status.md` only (never in brief) to at least that version.
+4. Otherwise put dated feedback only in brief, set `planning`, run `memory_build.py feedback`
+   (`operations.md`), commit `feedback`, continue after the latest plan, and raise the limit in
+   `status.md` only (never in brief) to at least that version.
 
 ## Triggers
 
 Digest-check before each reference. Read `integrity.md` before first guard/launch; `resume.md` only
-after inline resume integrity; `recovery.md` on nonzero guard/commit/post/format only with matching
+after inline resume integrity (a task without `memory.md` is seeded there before any launch); `recovery.md` on nonzero guard/commit/post/format only with matching
 skill; `limit.md` at limit-reached; `operations.md` at its triggers. Skill mismatch always uses inline flow.
 
 ## Rules
@@ -510,14 +533,16 @@ skill; `limit.md` at limit-reached; `operations.md` at its triggers. Skill misma
   diffs, Git output, replies, chat history, guard data, or other context.
 - Search first and read targeted source; never load a whole large source/generated file/log/binary
   extraction/document when narrower evidence works. Read applicable policy/standards fully in budget.
-- Only this chat commits/writes brief/status; planner writes plan; reviewer writes review. In
+- Only this chat commits/writes brief/status/memory (memory only through `memory_build.py`); planner
+  writes plan; reviewer writes review. In
   subagent mode orchestrator never edits plan. Approval exists only in status.
 - Teammate resume requires user-authorized push, upstream, and pushed task commits.
 - Obey repository forbidden paths. Chat update: one line per iteration.
 
 ## Validation
 
-Automated suites cover preflight, guard, commit checks, inline snippets, and static skill contracts.
+Automated suites cover preflight, guard, commit checks, memory building, inline snippets, and static
+skill contracts.
 Actual Cursor orchestration and model behavior remain manual checks in `references/validation.md`.
 
 ```bash

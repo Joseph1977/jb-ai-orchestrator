@@ -7,8 +7,13 @@ Read only while maintaining or explicitly validating the skill.
 - Default limit is 4; resume preserves an existing limit unless explicitly changed.
 - Bad verdict, missing Evidence, duplicate IDs, bad pushback assessment, deferral wording or a plan
   that points to an earlier version, and line/length cap violations fail format validation.
-- M1 seeded missed major: plan v2 keeps a major defect review v1 missed; review v2 reports it as major with no prefix.
-- M2 whole-plan review: review v2 raises a seeded issue in a section untouched by v1 points.
+- Unanchored `## Plan` lines, a `## Changes` list that differs from the anchors actually changed,
+  unanchored review points and incomplete `## Coverage` fail format validation.
+- `[late]` below blocker or without `Missed:`, a new converge point on an anchor not listed in
+  `## Changes`, Observations in an audit, and converge coverage that differs from the listed anchors
+  fail `memory_build.py update`.
+- M1 seeded missed major: plan v2 keeps a major defect audit review v1 missed on an unchanged anchor; converge review v2 records it under Observations, or as `[blocker] [late]` with `Missed:` only if it is a blocker.
+- M2 whole-plan audit: audit review v1 raises seeded issues in every section, mapped through `## Coverage`; a feedback that changes the brief makes the next review an audit again.
 - M3 prompt integrity: each Task prompt equals `prompt_build.py` output (sha256 match); no added text in any round.
 - M4 blindness: rendered prompts disclose no budget; brief.md has no `Iteration:` line and does not state this run's limit or "N of L"; plan/review may discuss limits as subject matter; agents never open `status.md`; derived Versions pass format checks in v1, v2 and a Minors close.
 - M5 limit: `--max-iterations 1` with a seeded major ends `limit-reached v1`, open points unchanged, no `plan-start v2`, plain-text question asked; granting K=1 commits `feedback v1` changing only `status.md`, and `plan-start v2` follows.
@@ -16,11 +21,19 @@ Read only while maintaining or explicitly validating the skill.
 - M7 legacy: `history` on older folders without `Outcome:` reports `format: legacy` and only pre-existing failure messages.
 - M8 retry: a guard-failed planner retry commits `plan-start vN` again with attempt 2 and passes `pre`/`history`.
 - M9 Minors close: a seeded minor at N < L yields `plan vN+1` then `review vN+1`; a pushed-back minor is assessed there; consensus only at 0/0/0, otherwise the gate continues.
+- M10 seeded gaps: a fresh run whose plan v1 carries 5 known gaps on distinct anchors (a constraint with no decision, a wrong file path, an In item with no test, contradictory slice entry criteria, an ungated assumption); audit review v1 reports all 5, each mapped through `## Coverage`.
+- M11 convergence: plan v2 fixes the 5 gaps and changes only those anchors; review v2 raises no new non-late point on unchanged anchors; consensus within 3 rounds.
+- M12 late routing: in M11, a non-blocker found on an unchanged anchor goes to Observations, appears in `memory.md`, and is listed in the consensus report. This checks routing only; a scripted observation may exercise it.
+- M12b late detection: plan v2 keeps a planted non-blocker defect on an anchor not listed in `## Changes`; the real converge reviewer raises it under Observations. A scripted observation does not satisfy M12b.
+- M13 evidence replay: a fresh task with the `opencode-engine-replan` brief and its frozen plan v1; score audit review v1 against the 16-item rubric in `references/m13-rubric.md` (target at least 10 of 16) and record rounds to consensus (target at most 4). With `--second-audit-model`, score the merged `review.md`, never the union of separate runs. Record each run in that rubric.
+- M14 resume: a scratch-branch copy of that task resumes with `memory-seed v16`, `plan-start v17` and an audit review v17; `history` reports `memory: seeded` and no failures.
+- M15 compaction: a large audit fixture pushes memory over the soft limit; `memory-compact` lands before the next `plan-start` with the kept sections unchanged.
 
 ## Context and models
 
 - `SKILL.md` is at most 30,000 UTF-8 bytes; exact rendered planner+reviewer prompts total at most
-  7,600 bytes. Contract tests measure shipped content and print actual values on failure.
+  10,500 bytes with a one-item audit checklist and at most 12,500 bytes with the longest accepted
+  checklist (2,000 characters; `plan-check` rejects plans beyond it). Contract tests measure shipped content and print actual values on failure.
 - Trigger-only task schemas, commit mechanics, and format detail live in digest-gated
   `operations.md`; trusted mismatch bootstrap remains inline.
 - Planner defaults to a fresh explicit model; reviewer is always fresh and a different family.
@@ -46,7 +59,7 @@ Read only while maintaining or explicitly validating the skill.
 
 - Project-level, direct user-level, and symlinked user-level installs resolve canonical skill root.
 - Existing `main`, `master`, and remote default are protected when no repository policy exists.
-- Ignore checks cover all four task files and honor `.gitignore`, `.git/info/exclude`, global
+- Ignore checks cover all five task files and honor `.gitignore`, `.git/info/exclude`, global
   excludes, ignored-parent negation behavior, and fail closed on Git errors.
 - Resume rejects symlinked/special task files and sees staged, unstaged, and untracked task deltas.
 - Explicit discard restores index and worktree for the task folder only.
@@ -82,7 +95,7 @@ Read only while maintaining or explicitly validating the skill.
 
 - Static contract tests validate declared prompt/checkpoint structure; this matrix validates actual
   Cursor behavior manually. Verbatim delivery of rendered prompts to the Task tool and semantic
-  severity honesty are manual-only (M1–M3).
+  severity honesty are manual-only (M1–M3, M10–M15, M12b).
 - Guards cover guarded subagent windows; commit checks cover declared transaction invariants; skill
   digest covers declared checkpoints. No host-wide, arbitrary-hook-worktree, or cross-session claim
   is made.

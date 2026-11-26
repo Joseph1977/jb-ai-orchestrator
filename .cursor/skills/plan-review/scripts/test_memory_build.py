@@ -1,0 +1,665 @@
+from __future__ import annotations
+
+import ast
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+import memory_build
+
+SCRIPT = Path(memory_build.__file__)
+TASK = "workspace/outcomes/task-demo-run_20261101-120000Z-abcd"
+
+BRIEF = """# Brief — demo
+Model: example
+
+## Goal
+Plan the thing.
+1. Which path?
+2. Which test?
+Done means: a reviewed plan.
+## Constraints
+- C-1 Bounded.
+- C-2 Isolated.
+## Scope
+### In
+- In-1 Engine.
+### Out
+- Out-1 Rollout.
+## Relevant files
+- src/app.py
+## User feedback
+None
+"""
+
+PLAN_V1 = """# Plan — demo
+Version: 1
+Model: example-model-1
+
+## Plan
+### Decisions
+- D1 (In-1) Engine wrapper.
+  Continues here.
+- D2 (C-1) Deadline.
+### S1 — Extraction
+Entry: branch cut. Exit: tests green.
+"""
+
+REVIEW_V1 = """# Review — demo
+Version: 1
+Model: other-model-1
+Verdict: CHANGES_REQUESTED
+
+## Points
+1. P001 [major] (D2, C-1) Deadline is unbounded → Bound it.
+
+## Coverage
+- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1
+- D2: P001
+- C-1: P001
+"""
+
+
+def plan_v2(change: str = "- D2 changed (P001): bounded deadline.\n", d2: str = "Bounded deadline.") -> str:
+    return (
+        "# Plan — demo\nVersion: 2\nModel: example-model-1\n\n"
+        "## Response to review v1\n| Point ID | Decision | Reason / change made |\n|---|---|---|\n"
+        "| P001 | accepted | Bounded. |\n\n"
+        f"## Changes\n{change}\n"
+        "## Plan\n### Decisions\n- D1 (In-1) Engine wrapper.\n  Continues here.\n"
+        f"- D2 (C-1) {d2}\n### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n"
+    )
+
+
+class ParserTests(unittest.TestCase):
+    def test_brief_items_follow_brief_order(self) -> None:
+        self.assertEqual(memory_build.brief_items(BRIEF),
+                         ["Q1", "Q2", "Done", "C-1", "C-2", "In-1", "Out-1"])
+
+    def test_plan_anchors_cover_heading_and_continuation_lines(self) -> None:
+        anchors, failures = memory_build.plan_anchors(PLAN_V1)
+        self.assertEqual(failures, [])
+        self.assertEqual(sorted(anchors), ["D1", "D2", "S1"])
+        self.assertIn("Continues here.", anchors["D1"])
+        self.assertIn("Entry: branch cut.", anchors["S1"])
+
+    def test_retry_message_groups_unquotes_and_caps(self) -> None:
+        failures = [f"## Plan line {n} is outside any anchor: 'uses `x` {{y}}'" for n in range(1, 11)]
+        failures += ["anchor A3 is defined twice", "plan.md has no `## Plan` section",
+                     "malformed coverage line: '- D1 → `x` — y'"]
+        self.assertEqual(
+            memory_build.retry_message(failures),
+            "10 ## Plan lines are outside any anchor (lines 1, 2, 3, 4, 5, 6, 7, 8, ...); "
+            "anchor A3 is defined twice; plan.md has no ## Plan section; "
+            "malformed coverage line: '- D1 -> x - y'",
+        )
+        long = memory_build.retry_message([f"anchor D{n} is defined twice" for n in range(100)])
+        self.assertEqual(len(long), 600)
+        self.assertTrue(long.endswith(" ..."))
+
+    def test_duplicate_definition_stays_body_of_its_heading_anchor(self) -> None:
+        plan = PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n"
+        anchors, failures = memory_build.plan_anchors(plan)
+        self.assertEqual(failures, ["anchor D2 is defined twice (## Plan line 8 starts with it; "
+                                    "reword that line to begin with other text)"])
+        self.assertEqual(anchors["D2"], "- D2 (C-1) Deadline.")
+        self.assertIn("- D2 adds one read per call.", anchors["R1"])
+
+
+class PlanCheckTests(unittest.TestCase):
+    def check(self, plan: str, previous: str | None = PLAN_V1, review: str | None = REVIEW_V1):
+        return memory_build.check_plan(plan, previous, review)
+
+    def failures(self, plan: str, previous: str | None = PLAN_V1,
+                 review: str | None = REVIEW_V1) -> str:
+        with self.assertRaises(memory_build.FormatError) as caught:
+            self.check(plan, previous, review)
+        return "\n".join(caught.exception.failures)
+
+    def test_first_plan_passes_without_changes(self) -> None:
+        self.assertEqual(self.check(PLAN_V1, None, None), {"anchors": 3, "changes": 0})
+
+    def test_first_plan_rejects_changes_section(self) -> None:
+        plan = PLAN_V1.replace("## Plan", "## Changes\n- D1 added (consistency): x\n\n## Plan")
+        self.assertIn("only written when a prior review", self.failures(plan, None, None))
+
+    def test_exact_changes_pass(self) -> None:
+        self.assertEqual(self.check(plan_v2()), {"anchors": 3, "changes": 1})
+
+    def test_missing_changes_section_fails(self) -> None:
+        plan = plan_v2().replace("## Changes\n- D2 changed (P001): bounded deadline.\n\n", "")
+        self.assertIn("## Changes is required", self.failures(plan))
+
+    def test_unlisted_changed_anchor_fails(self) -> None:
+        plan = plan_v2(change="- D1 changed (consistency): nothing really.\n")
+        failures = self.failures(plan)
+        self.assertIn("D2 was changed but ## Changes does not list it", failures)
+        self.assertIn("## Changes lists D1, whose text did not change", failures)
+        self.assertIn("accepted P001 is cited by no ## Changes line", failures)
+
+    def test_wrong_kind_and_unlisted_removal_fail(self) -> None:
+        plan = plan_v2(change="- D2 added (P001): x\n").replace(
+            "### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n", "")
+        failures = self.failures(plan)
+        self.assertIn("## Changes marks D2 added, but it was changed", failures)
+        self.assertIn("S1 was removed but ## Changes does not list it", failures)
+
+    def test_duplicate_p_and_unanchored_lines_fail(self) -> None:
+        plan = PLAN_V1 + "### Notes\n- D1 again\n- P1 forbidden\nloose line\n"
+        failures = self.failures(plan, None, None)
+        self.assertIn("anchor D1 is defined twice", failures)
+        self.assertIn("outside any anchor", failures)
+
+    def test_extra_section_and_bad_citation_fail(self) -> None:
+        plan = plan_v2(change="- D2 changed (P009): x\n") + "\n## Files\n- a\n"
+        failures = self.failures(plan)
+        self.assertIn("section '## Files' is not allowed", failures)
+        self.assertIn("cites P009, not a prior review point", failures)
+
+    def test_long_change_line_fails(self) -> None:
+        plan = plan_v2(change="- D2 changed (P001): " + "x" * 300 + "\n")
+        self.assertIn("exceeds 300 characters", self.failures(plan))
+
+    def test_legacy_previous_plan_skips_exact_check(self) -> None:
+        legacy = PLAN_V1.replace("### Decisions\n", "### Decisions\nloose legacy line\n")
+        self.assertEqual(self.check(plan_v2(), previous=legacy)["changes"], 1)
+
+
+def review(version: int, points: str, coverage: str, verdict: str = "CHANGES_REQUESTED",
+           extra: str = "") -> str:
+    return (f"# Review — demo\nVersion: {version}\nModel: other-model-1\nVerdict: {verdict}\n\n"
+            f"## Points\n{points}\n## Coverage\n{coverage}\n{extra}")
+
+
+def fresh_memory() -> memory_build.Memory:
+    memory = memory_build.Memory("demo")
+    memory.coverage = {item: "unverified" for item in memory_build.brief_items(BRIEF)}
+    return memory
+
+
+def audited_memory() -> memory_build.Memory:
+    memory = fresh_memory()
+    memory_build.apply_review(memory, BRIEF, PLAN_V1, REVIEW_V1, "audit", [], "P001")
+    return memory
+
+
+class UpdateTests(unittest.TestCase):
+    def failures(self, memory: memory_build.Memory, plan: str, text: str, scope: str) -> str:
+        with self.assertRaises(memory_build.FormatError) as caught:
+            memory_build.apply_review(memory, BRIEF, plan, text, scope, [], None)
+        return "\n".join(caught.exception.failures)
+
+    def test_audit_records_points_coverage_and_audit_done(self) -> None:
+        memory = fresh_memory()
+        result = memory_build.apply_review(memory, BRIEF, PLAN_V1, REVIEW_V1, "audit", [], "P001")
+        self.assertEqual((result["open"], result["new"], result["next_id"]), ("0/1/0", 1, "P002"))
+        text = memory.render()
+        self.assertIn("Audit: done v1", text)
+        self.assertIn("- P001 [major] (D2, C-1) new v1: Deadline is unbounded", text)
+        self.assertIn("- open D2: P001", text)
+        self.assertIn("- v1 audit:", text)
+        self.assertEqual(memory_build.memory_sections(text)[1], [])
+
+    def test_multi_item_coverage_line_is_accepted(self) -> None:
+        text = REVIEW_V1.replace("- D2: P001\n- C-1: P001\n", "- D2, C-1: P001\n")
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, text, "audit", [], "P001")
+        self.assertEqual(result["new"], 1)
+
+    def test_audit_requires_full_coverage_and_no_late(self) -> None:
+        partial = review(1, "1. P001 [major] (D2) x → y\n", "- ok: C-1\n- D2: P001\n")
+        self.assertIn("audit coverage misses", self.failures(fresh_memory(), PLAN_V1, partial, "audit"))
+        late = REVIEW_V1.replace("[major] (D2", "[major] [late] (D2")
+        self.assertIn("tagged [late] in an audit", self.failures(fresh_memory(), PLAN_V1, late, "audit"))
+        observed = REVIEW_V1 + "\n## Observations\n- (D1) x\n"
+        self.assertIn("writes no ## Observations",
+                      self.failures(fresh_memory(), PLAN_V1, observed, "audit"))
+
+    def test_converge_routes_new_points_on_unlisted_anchors(self) -> None:
+        unlisted = review(2, "1. P002 [major] (S1) x → y\n", "- ok: D2\n")
+        self.assertIn("names no anchor listed",
+                      self.failures(audited_memory(), plan_v2(), unlisted, "converge"))
+        minor_late = review(2, "1. P002 [minor] [late] (S1) x → y Missed: z\n", "- ok: D2\n")
+        self.assertIn("below blocker",
+                      self.failures(audited_memory(), plan_v2(), minor_late, "converge"))
+        no_reason = review(2, "1. P002 [blocker] [late] (S1) x → y\n", "- ok: D2\n")
+        self.assertIn("no 'Missed: <reason>'",
+                      self.failures(audited_memory(), plan_v2(), no_reason, "converge"))
+        wrong_coverage = review(2, "", "- ok: D2, S1\n", "NO_FURTHER_COMMENTS")
+        self.assertIn("exactly the ## Changes anchors",
+                      self.failures(audited_memory(), plan_v2(), wrong_coverage, "converge"))
+
+    def test_converge_closes_points_settles_and_keeps_observations(self) -> None:
+        memory = audited_memory()
+        text = review(2, "1. P002 [blocker] [late] (S1) gap → fix Missed: hidden\n", "- ok: D2\n",
+                      extra="\n## Observations\n- (D1) wording could be tighter\n")
+        result = memory_build.apply_review(memory, BRIEF, plan_v2(), text, "converge", [], "P002")
+        self.assertEqual((result["closed"], result["late"], result["observations"]), (1, 1, 1))
+        rendered = memory.render()
+        self.assertIn("Audit: done v1", rendered)
+        self.assertIn("- P001 [major] (D2, C-1) closed v2 fixed:", rendered)
+        self.assertIn("- D2 — P001 (v2): bounded deadline.", rendered)
+        self.assertIn("- P002 [blocker] [late] (S1) late v2: gap", rendered)
+        self.assertIn("- v2 (D1): wording could be tighter", rendered)
+        self.assertIn("- verified v2: C-1, D2", rendered)
+        self.assertIn("- open S1: P002", rendered)
+        self.assertEqual(memory_build.Memory.parse(rendered).closed_ids(), {"P001"})
+
+    def test_removed_anchor_can_be_cited_and_must_be_covered(self) -> None:
+        plan = plan_v2(change="- D2 changed (P001): bounded deadline.\n"
+                              "- S1 removed (consistency): extraction dropped.\n").replace(
+            "### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n", "")
+        uncovered = review(2, "", "- ok: D2\n", "NO_FURTHER_COMMENTS")
+        self.assertIn("exactly the ## Changes anchors",
+                      self.failures(audited_memory(), plan, uncovered, "converge"))
+        memory = audited_memory()
+        text = review(2, "1. P002 [major] (S1, In-1) removing S1 drops the In-1 test → restore it\n",
+                      "- ok: D2\n- S1: P002\n")
+        result = memory_build.apply_review(memory, BRIEF, plan, text, "converge", [], "P002")
+        self.assertEqual(result["new"], 1)
+        rendered = memory.render()
+        self.assertIn("- P002 [major] (S1, In-1) new v2:", rendered)
+        self.assertNotIn("S1", rendered.split("## Coverage")[1].split("## Open points")[0])
+
+    def test_observation_cannot_cite_a_changed_anchor(self) -> None:
+        text = review(2, "", "- ok: D2\n", "NO_FURTHER_COMMENTS",
+                      extra="\n## Observations\n- (D2) the new bound is never enforced\n")
+        self.assertIn("observation cites ['D2'], listed in ## Changes",
+                      self.failures(audited_memory(), plan_v2(), text, "converge"))
+
+    def test_coverage_must_match_point_anchors(self) -> None:
+        wrong_item = REVIEW_V1.replace("- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1",
+                                       "- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n- D1: P001")
+        self.assertIn("coverage maps D1 to P001, which does not cite D1",
+                      self.failures(fresh_memory(), PLAN_V1, wrong_item, "audit"))
+        hidden = REVIEW_V1.replace("- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1\n- D2: P001",
+                                   "- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1, D2")
+        self.assertIn("P001 cites D2, but coverage marks D2 ok",
+                      self.failures(fresh_memory(), PLAN_V1, hidden, "audit"))
+        converge = review(2, "1. P002 [major] (D2) bound too loose → tighten\n", "- ok: D2\n")
+        self.assertIn("P002 cites D2, but coverage marks D2 ok",
+                      self.failures(audited_memory(), plan_v2(), converge, "converge"))
+
+    def test_partial_mapping_is_completed_from_point_anchors(self) -> None:
+        text = review(1, "1. P001 [major] (D2, C-1) Deadline is unbounded → Bound it.\n"
+                         "2. P002 [minor] (D1, D2) Name the unit → Say seconds.\n",
+                      "- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n- D2, C-1: P001\n- D1: P002\n")
+        memory = fresh_memory()
+        memory_build.apply_review(memory, BRIEF, PLAN_V1, text, "audit", [], "P001")
+        self.assertIn("- open D2: P001, P002", memory.render())
+
+    def test_none_points_and_semicolon_anchor_lists_are_accepted(self) -> None:
+        empty = review(2, "None.\n", "- ok: D2\n", "NO_FURTHER_COMMENTS")
+        result = memory_build.apply_review(audited_memory(), BRIEF, plan_v2(), empty, "converge",
+                                           [], "P002")
+        self.assertEqual(result["open"], "0/0/0")
+        mixed = REVIEW_V1.replace("(D2, C-1)", "(D2; C-1)")
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, mixed, "audit", [],
+                                           "P001")
+        self.assertEqual(result["new"], 1)
+
+    def test_mentioned_ok_ids_are_ignored_only_in_a_seeded_audit(self) -> None:
+        plan = PLAN_V1.replace("- D2 (C-1) Deadline.", "- D2 (C-1) Deadline. A7 holds; A9a too.")
+        text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A7, A9a")
+        self.assertIn("coverage lists unknown items A7, A9a",
+                      self.failures(fresh_memory(), plan, text, "audit"))
+        seeded = fresh_memory()
+        seeded.log.append("- seed v1: memory started, audit pending")
+        memory_build.apply_review(seeded, BRIEF, plan, text, "audit", [], "P001")
+        self.assertNotIn("A7", seeded.render().split("## Coverage")[1].split("##")[0])
+        mapped = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A9a").replace(
+            "- D2: P001", "- D2, A7: P001")
+        again = fresh_memory()
+        again.log.append("- seed v1: memory started, audit pending")
+        self.assertIn("coverage lists unknown items A7",
+                      self.failures(again, plan, mapped, "audit"))
+
+    def test_maintained_point_keeps_citing_an_anchor_removed_earlier(self) -> None:
+        plan = plan_v2(change="- D2 changed (P001): bounded deadline.\n"
+                              "- S1 removed (consistency): extraction dropped.\n").replace(
+            "### S1 — Extraction\nEntry: branch cut. Exit: tests green.\n", "")
+        memory = audited_memory()
+        point = "1. P002 [major] (S1, In-1) removing S1 drops the In-1 test → restore it\n"
+        memory_build.apply_review(memory, BRIEF, plan, review(2, point, "- ok: D2\n- S1: P002\n"),
+                                  "converge", [], "P002")
+        plan3 = plan.replace("Version: 2", "Version: 3").replace(
+            "- D2 changed (P001): bounded deadline.\n- S1 removed (consistency): extraction dropped.",
+            "- D1 changed (P002): restores the In-1 test.").replace(
+            "Engine wrapper.", "Engine wrapper with its In-1 test.")
+        result = memory_build.apply_review(memory, BRIEF, plan3,
+                                           review(3, point, "- ok: D1\n"), "converge", [], "P003")
+        self.assertEqual(result["maintained"], 1)
+        stray = "1. P003 [major] (S1, D1) another S1 gap → fix it\n"
+        self.assertIn("P003 cites unknown anchors S1",
+                      self.failures(memory, plan3,
+                                    review(3, point + stray.replace("1. P003", "2. P003"),
+                                           "- D1: P003\n"), "converge"))
+
+    def test_unknown_coverage_items_are_reported_once(self) -> None:
+        text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A2, A4")
+        failures = self.failures(fresh_memory(), PLAN_V1, text, "audit")
+        self.assertIn("coverage lists unknown items A2, A4; only an ID that starts a ## Plan line "
+                      "or ### heading is a plan anchor", failures)
+
+    def test_closed_id_cannot_be_reused(self) -> None:
+        memory = audited_memory()
+        memory_build.apply_review(memory, BRIEF, plan_v2(),
+                                  review(2, "", "- ok: D2\n", "NO_FURTHER_COMMENTS"),
+                                  "converge", [], None)
+        reused = review(3, "1. P001 [major] (D2) again → fix\n", "- D2: P001\n")
+        self.assertIn("reuses a closed", self.failures(memory, plan_v2(), reused, "converge"))
+
+
+SECOND_V1 = """# Review — demo
+Version: 1
+Model: second-model-1
+Verdict: CHANGES_REQUESTED
+
+## Points
+1. P001 [major] (C-1, D2) deadline is UNBOUNDED. → Bound it differently.
+2. P002 [minor] (D1) Wrapper has no test → Add one.
+
+## Coverage
+- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1
+- D1: P002
+- C-1, D2: P001
+"""
+
+
+class MergeTests(unittest.TestCase):
+    def test_exact_repeats_are_dropped_and_new_points_renumbered(self) -> None:
+        merged, counts = memory_build.merge_reviews(REVIEW_V1, SECOND_V1, "P001")
+        self.assertEqual(counts, {"points": 2, "from_second": 1, "duplicates": 1})
+        self.assertIn("Model: other-model-1 + second-model-1\nVerdict: CHANGES_REQUESTED", merged)
+        self.assertIn("1. P001 [major] (D2, C-1) Deadline is unbounded → Bound it.", merged)
+        self.assertIn("2. P002 [minor] (D1) Wrapper has no test → Add one.", merged)
+        self.assertIn("- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n", merged)
+        self.assertIn("- D1: P002\n", merged)
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, merged, "audit", [],
+                                           "P001")
+        self.assertEqual(result["new"], 2)
+
+    def test_distinct_points_on_the_same_anchors_are_all_kept(self) -> None:
+        second = SECOND_V1.replace("deadline is UNBOUNDED.", "Deadline ignores cancellation")
+        merged, counts = memory_build.merge_reviews(REVIEW_V1, second, "P001")
+        self.assertEqual(counts, {"points": 3, "from_second": 2, "duplicates": 0})
+        self.assertIn("2. P002 [major] (C-1, D2) Deadline ignores cancellation", merged)
+        self.assertIn("3. P003 [minor] (D1)", merged)
+        self.assertIn("- D2: P001, P002\n", merged)
+        memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, merged, "audit", [], "P001")
+
+    def test_second_review_ids_the_primary_keeps_or_accepted_are_dropped(self) -> None:
+        primary = review(2, "1. P004 [major] (D2) Still unbounded → Bound it.",
+                         "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1, S1\n- D2: P004",
+                         extra="\n## Pushback assessment\nP003: accept rebuttal\n"
+                               "P004: maintain, because brief C-1: unbounded\n")
+        second = review(2, "1. P003 [major] (D1) Rebutted again → x\n"
+                           "2. P004 [major] (D2) Same ID → y\n3. P005 [minor] (S1) New → z",
+                        "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done\n- D1: P003\n- D2: P004\n"
+                        "- S1: P005")
+        merged, counts = memory_build.merge_reviews(primary, second, "P005")
+        self.assertEqual(counts, {"points": 2, "from_second": 1, "duplicates": 2})
+        self.assertIn("2. P005 [minor] (S1) New → z", merged)
+        self.assertNotIn("P003 [major]", merged)
+        self.assertIn("- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1\n", merged)
+        self.assertTrue(merged.endswith("## Pushback assessment\nP003: accept rebuttal\n"
+                                        "P004: maintain, because brief C-1: unbounded\n"))
+
+    def test_verdict_is_recomputed_from_merged_points(self) -> None:
+        clean = review(1, "None", "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D1, D2, S1",
+                       verdict="NO_FURTHER_COMMENTS")
+        minor = review(1, "1. P001 [minor] (D1) Name → Rename.",
+                       "- ok: C-1, C-2, In-1, Out-1, Q1, Q2, Done, D2, S1\n- D1: P001",
+                       verdict="APPROVE_WITH_MINORS")
+        self.assertIn("Verdict: APPROVE_WITH_MINORS", memory_build.merge_reviews(clean, minor,
+                                                                               "P001")[0])
+        merged = memory_build.merge_reviews(clean, clean, "P001")[0]
+        self.assertIn("Verdict: NO_FURTHER_COMMENTS\n\n## Points\nNone\n", merged)
+
+    def test_plan_check_caps_the_audit_checklist(self) -> None:
+        anchors = "".join(f"- D{n} (In-1) Step {n}.\n" for n in range(1, 500))
+        plan = PLAN_V1.replace("- D1 (In-1) Engine wrapper.\n  Continues here.\n- D2 (C-1) "
+                               "Deadline.\n", anchors)
+        with self.assertRaises(memory_build.FormatError) as caught:
+            memory_build.check_plan(plan, None, None, BRIEF)
+        self.assertIn("over 2000 characters", "\n".join(caught.exception.failures))
+        memory_build.check_plan(PLAN_V1, None, None, BRIEF)
+
+
+class MemoryFormatTests(unittest.TestCase):
+    def test_blindness_and_line_length_fail(self) -> None:
+        text = audited_memory().render()
+        leaked = text.replace("## Round log\n", "## Round log\n- note: two rounds remaining\n")
+        self.assertTrue(any("reveals progress" in f for f in memory_build.memory_sections(leaked)[1]))
+        long_line = text.replace("## Observations\n", "## Observations\n- " + "x" * 600 + "\n")
+        self.assertTrue(any("600" in f for f in memory_build.memory_sections(long_line)[1]))
+        reordered = text.replace("## Observations\n", "").replace("## Round log\n",
+                                                                  "## Round log\n## Observations\n")
+        self.assertTrue(memory_build.memory_sections(reordered)[1])
+
+    def test_settled_text_may_name_limits(self) -> None:
+        memory = audited_memory()
+        memory.settled["D2"] = (["P001 (v2)"], "the iteration limit stays 4")
+        self.assertEqual(memory_build.memory_sections(memory.render())[1], [])
+
+
+class CompactTests(unittest.TestCase):
+    def big_memory(self) -> str:
+        memory = audited_memory()
+        memory.closed = [f"- P{n:03d} [major] (D{n % 3 + 1}) closed v{n // 10 + 1} fixed: issue {n}"
+                         for n in range(2, 160)]
+        memory.log += [f"- v{n} converge: responses 1 (x); CHANGES_REQUESTED open 0/1/0; new 1, "
+                       f"late 0, observations 0, maintained 0, closed 1" for n in range(2, 60)]
+        return memory.render()
+
+    def test_compact_groups_closed_points_and_keeps_sections(self) -> None:
+        text = self.big_memory()
+        self.assertTrue(memory_build.at_or_over(text, 200, 16 * 1024))
+        result = memory_build.compact_text(text)
+        self.assertFalse(memory_build.at_or_over(result, 200, 16 * 1024))
+        before, _ = memory_build.memory_sections(text)
+        after, failures = memory_build.memory_sections(result)
+        self.assertEqual(failures, [])
+        for name in memory_build.KEPT_SECTIONS:
+            self.assertEqual(before[name], after[name], name)
+        self.assertEqual(memory_build.Memory.parse(result).closed_ids(),
+                         memory_build.Memory.parse(text).closed_ids())
+        self.assertEqual(len([l for l in after["Round log"] if memory_build.ROUND_LINE.match(l)]), 3)
+        self.assertTrue(any(memory_build.SUMMARY_LINE.match(l) for l in after["Round log"]))
+        self.assertEqual(memory_build.compact_text(result).count("summary"), 1)
+
+
+class SeedTests(unittest.TestCase):
+    STATUS = ("# Status — demo\nIteration: 16 of 16\nNext point ID: P026\n"
+              "Retired point IDs: P004\nTrend: 5, 4, 3\n")
+    LEGACY_REVIEW = ("# Review — demo\nVersion: 16\nModel: other\nVerdict: CHANGES_REQUESTED\n\n"
+                     "## Points\n1. P025 [major] D9 is unsafe → gate it\n")
+
+    def test_seed_accepts_semicolon_anchor_lists(self) -> None:
+        review = self.LEGACY_REVIEW.replace("1. P025 [major] D9 is unsafe → gate it",
+                                            "1. P025 [major] (D1; C-1) D1 is unsafe → gate it")
+        text = memory_build.seed_text(BRIEF, PLAN_V1, review, self.STATUS, "pending")
+        self.assertIn("- P025 [major] (D1, C-1) seeded v16: D1 is unsafe", text)
+
+    def test_seed_records_open_closed_and_pending_audit(self) -> None:
+        text = memory_build.seed_text(BRIEF, PLAN_V1, self.LEGACY_REVIEW, self.STATUS, "pending")
+        parts, failures = memory_build.memory_sections(text)
+        self.assertEqual(failures, [])
+        self.assertEqual(parts["Coverage"][0], "Audit: pending")
+        self.assertEqual(parts["Open points"],
+                         ["- P025 [major] (legacy) seeded v16: D9 is unsafe"])
+        closed = memory_build.Memory.parse(text).closed_ids()
+        self.assertIn("P001", closed)
+        self.assertNotIn("P004", closed)
+        self.assertNotIn("P025", closed)
+        self.assertIn("- seed v16: retired P004", text)
+        self.assertIn("- pre-memory trend: 5, 4, 3", text)
+
+    def test_waived_audit(self) -> None:
+        text = memory_build.seed_text(BRIEF, PLAN_V1, None, self.STATUS, "waived")
+        self.assertIn("Audit: waived at seed v16", text)
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.repo = Path(self.directory.name).resolve()
+        self.env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Memory Test")
+        self.git("config", "user.email", "memory@example.invalid")
+        self.git("config", "commit.gpgsign", "false")
+        (self.repo / TASK).mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+
+    def write(self, name: str, text: str) -> None:
+        (self.repo / TASK / name).write_text(text, encoding="utf-8")
+
+    def commit(self, *names: str) -> None:
+        self.git("add", "--", *(f"{TASK}/{name}" for name in names))
+        self.git("commit", "-qm", "step")
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["python3", "-I", "-B", str(SCRIPT), *args, "--repo", str(self.repo),
+                               "--task", TASK], check=False, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=self.env)
+
+    def test_plan_check_compares_with_committed_plan(self) -> None:
+        self.write("plan.md", PLAN_V1)
+        self.write("review.md", REVIEW_V1)
+        self.commit("plan.md", "review.md")
+        self.write("plan.md", plan_v2())
+        result = self.run_cli("plan-check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"anchors": 3, "changes": 1})
+        self.write("plan.md", plan_v2(change="- D1 changed (P001): x\n"))
+        failed = self.run_cli("plan-check")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("D2 was changed", failed.stderr)
+        self.assertIn("memory_build: retry: ", failed.stderr.splitlines()[-1])
+
+    def test_merge_validates_both_audits_then_replaces_review_and_removes_the_second(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.assertEqual(self.run_cli("init").returncode, 0)
+        self.write("plan.md", PLAN_V1)
+        self.write("status.md", "# Status — demo\nIteration: 1 of 4\nNext point ID: P001\n"
+                                "Retired point IDs: none\n")
+        self.commit("brief.md", "memory.md", "plan.md", "status.md")
+        self.write("review.md", REVIEW_V1)
+        self.assertEqual(self.run_cli("merge").returncode, 2)
+        broken = SECOND_V1.replace("- D1: P002\n", "")
+        self.write("review-2.md", broken)
+        failed = self.run_cli("merge")
+        self.assertEqual(failed.returncode, 1)
+        self.assertIn("review-2.md: audit coverage misses ['D1']", failed.stderr)
+        self.assertEqual((self.repo / TASK / "review.md").read_text(encoding="utf-8"), REVIEW_V1)
+        self.write("review-2.md", SECOND_V1)
+        merged = self.run_cli("merge")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.assertEqual(json.loads(merged.stdout),
+                         {"points": 2, "from_second": 1, "duplicates": 1})
+        self.assertFalse((self.repo / TASK / "review-2.md").exists())
+        self.assertIn("Model: other-model-1 + second-model-1",
+                      (self.repo / TASK / "review.md").read_text(encoding="utf-8"))
+        updated = self.run_cli("update", "--scope", "audit")
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        self.assertEqual(json.loads(updated.stdout)["next_id"], "P003")
+        self.commit("review.md", "memory.md")
+        self.write("review-2.md", SECOND_V1)
+        self.assertEqual(self.run_cli("merge").returncode, 2)
+
+    def test_init_scope_update_feedback_round_trip(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.assertEqual(self.run_cli("init").returncode, 0)
+        self.assertEqual(self.run_cli("init").returncode, 2)
+        self.write("plan.md", PLAN_V1)
+        self.write("status.md", "# Status — demo\nIteration: 1 of 4\nNext point ID: P001\n"
+                                "Retired point IDs: none\n")
+        self.commit("brief.md", "memory.md", "plan.md", "status.md")
+        scope = self.run_cli("scope")
+        self.assertEqual(json.loads(scope.stdout), {
+            "scope": "audit", "checklist": "Q1,Q2,Done,C-1,C-2,In-1,Out-1,D1,D2,S1"})
+        self.write("review.md", REVIEW_V1)
+        self.assertEqual(self.run_cli("update", "--scope", "converge").returncode, 2)
+        updated = self.run_cli("update", "--scope", "audit")
+        self.assertEqual(updated.returncode, 0, updated.stderr)
+        self.assertEqual(json.loads(updated.stdout)["next_id"], "P002")
+        self.commit("review.md", "memory.md")
+        self.assertEqual(json.loads(self.run_cli("scope").stdout), {"scope": "converge"})
+
+        self.write("status.md", "# Status — demo\nIteration: 2 of 5\nRetired point IDs: none\n")
+        self.assertEqual(json.loads(self.run_cli("feedback").stdout), {"changed": False})
+        self.write("brief.md", BRIEF.replace("- C-2 Isolated.", "- C-2 Isolated and fast."))
+        outside = self.run_cli("feedback", "--no-audit", "--retired", "P001")
+        self.assertEqual(outside.returncode, 2)
+        self.assertIn("changed outside ## User feedback", outside.stderr)
+        self.write("brief.md", BRIEF.replace("None\n", "- 2026-11-26: user decided P001\n"))
+        self.assertEqual(self.run_cli("feedback", "--no-audit").returncode, 2)
+        unrecorded = self.run_cli("feedback", "--no-audit", "--retired", "P001")
+        self.assertEqual(unrecorded.returncode, 2)
+        self.assertIn("status.md records as retired", unrecorded.stderr)
+        self.write("status.md", "# Status — demo\nIteration: 2 of 5\nRetired point IDs: P001\n")
+        no_audit = self.run_cli("feedback", "--no-audit", "--retired", "P001")
+        self.assertEqual(no_audit.returncode, 0, no_audit.stderr)
+        memory = (self.repo / TASK / "memory.md").read_text(encoding="utf-8")
+        self.assertIn("Audit: done v1", memory)
+        self.assertIn("- feedback v2: retired P001", memory)
+        self.assertNotIn("- P001 [major]", memory.split("## Open points")[1].split("##")[0])
+        self.assertEqual(self.run_cli("feedback").returncode, 0)
+        self.assertIn("Audit: pending", (self.repo / TASK / "memory.md").read_text("utf-8"))
+
+    def test_seed_and_compact_refusals(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.write("status.md", "# Status — demo\nIteration: 3 of 4\nNext point ID: P004\n")
+        self.commit("brief.md", "status.md")
+        self.assertEqual(self.run_cli("compact").returncode, 2)
+        seeded = self.run_cli("seed", "--audit", "pending")
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertEqual(json.loads(seeded.stdout)["plan_format"], "")
+        self.commit("memory.md")
+        self.assertEqual(self.run_cli("seed", "--audit", "pending").returncode, 2)
+        below = self.run_cli("compact")
+        self.assertEqual(below.returncode, 2)
+        self.assertIn("below the soft limit", below.stderr)
+
+    def test_seed_reports_anchor_failures_in_the_committed_plan(self) -> None:
+        self.write("brief.md", BRIEF)
+        self.write("plan.md", PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n")
+        self.write("status.md", "# Status — demo\nIteration: 3 of 4\nNext point ID: P004\n")
+        self.commit("brief.md", "plan.md", "status.md")
+        seeded = self.run_cli("seed", "--audit", "pending")
+        self.assertEqual(seeded.returncode, 0, seeded.stderr)
+        self.assertIn("anchor D2 is defined twice (## Plan line 8",
+                      json.loads(seeded.stdout)["plan_format"])
+
+    def test_bad_task_path_exits_2(self) -> None:
+        result = subprocess.run(["python3", "-I", "-B", str(SCRIPT), "plan-check", "--repo",
+                                 str(self.repo), "--task", "workspace/outcomes/not-a-task"],
+                                check=False, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=self.env)
+        self.assertEqual(result.returncode, 2)
+
+
+class StaticTests(unittest.TestCase):
+    def test_no_local_imports(self) -> None:
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        local = {path.stem for path in SCRIPT.parent.glob("*.py")}
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [(node.module or "").split(".")[0]]
+            self.assertFalse(set(names) & local, names)
+
+
+if __name__ == "__main__":
+    unittest.main()

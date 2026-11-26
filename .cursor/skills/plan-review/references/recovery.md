@@ -41,8 +41,13 @@ A later resume of `planner-running` or `reviewer-running` still needs the user's
 A format or consistency failure is one retry, then `stopped`. This includes a plan that defers or splits work across versions or points to an earlier version, a wrong derived `Version:` header, a bad verdict, a missing `Evidence: ` field, a bad maintain line, and a length-cap miss.
 
 - Self-planner output: correct the owned file yourself before `plan vN` or `minors vN+1` is committed. There is no subagent retry.
-- Subagent output: only a format failure after guard exit 0 is retriable. Restore the valid pre-run owned file, or remove its invalid first version. Retry once with a new subagent. The retry is a new guarded run: capture a fresh manifest, launch, compare, then validate. Commit its launch as the exact subject `plan-start vN` (or `review-start vN`) again, per `operations.md` §Status before each commit, with no suffix.
+- Format failures include unanchored or duplicate plan anchors, a `## Changes` list that differs from the actual anchor diff (`plan-check` exit 1), `[late]` on a non-blocker or without `Missed:`, a new converge point on an unlisted anchor, and incomplete audit coverage (`update` exit 1). A `memory_build.py` or `prompt_build.py` exit 2 is an orchestrator error, not a format failure: stop.
+- Subagent output: only a format failure after guard exit 0 is retriable. Restore the valid pre-run owned file, or remove its invalid first version. Retry once with a new subagent whose prompt is rendered with `--format-error "<message>"`: the `memory_build: retry:` line of a `plan-check` or `update` failure, or a one-line summary of the failed operations rule. The retry is a new guarded run: capture a fresh manifest, launch, compare, then validate. Commit its launch as the exact subject `plan-start vN` (or `review-start vN`) again, per `operations.md` §Status before each commit, with no suffix.
 - A second format failure: restore again, set `State: stopped` and `Stop reason: error`, record the failure, commit only `status.md` as `stopped vN`, and report. Never leave or resume from invalid output.
 - A guard nonzero result is not a format retry. Use the guard-failure steps above.
+
+With a second audit model, each audit reviewer is its own guarded run with its own owned file
+(`review-2.md`, then `review.md`); a `merge` exit 1 retries only the named reviewer. A `review-2.md`
+left by an interrupted audit is never committed: delete it before relaunching that review.
 
 A missing, truncated, symlinked, or malformed owned file fails these checks and is restored the same way. `lstat` it before reading subagent output, as `references/integrity.md` requires.
