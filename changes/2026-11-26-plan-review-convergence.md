@@ -1,7 +1,7 @@
 # Plan-review: exhaustive first audit, converging later rounds, and task memory
 
 - **Date:** 2026-11-26
-- **Branch:** `fix/plan-review-convergence` (pull request against `feature/opencode-engine-plan`)
+- **Branch:** `fix/plan-review-convergence` (pull request #29 against `feature/opencode-engine-plan`)
 
 ## What changed
 
