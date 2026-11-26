@@ -952,7 +952,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                          plan, committed(repo, task, "review.md"),
                          require(committed(repo, task, "status.md"), "status.md"), args.audit)
         return {**write_memory(repo, task, text),
-                "plan_format": plan_anchors(plan)[1] if plan else []}
+                "plan_format": retry_message(plan_anchors(plan)[1]) if plan else ""}
     memory_text = require(committed(repo, task, "memory.md"), "memory.md")
     memory = Memory.parse(memory_text)
     if mode == "scope":
@@ -1042,6 +1042,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+OUTSIDE_ANCHOR = re.compile(r"^## Plan line ([0-9]+) is outside any anchor")
+RETRY_CHARS = 600
+
+
+def retry_message(failures: list[str]) -> str:
+    """One `prompt_build.py --format-error` value: grouped, unquoted, at most 600 characters."""
+    outside = [match.group(1) for failure in failures
+               if (match := OUTSIDE_ANCHOR.match(failure))]
+    parts = []
+    if outside:
+        shown = ", ".join(outside[:8]) + (", ..." if len(outside) > 8 else "")
+        parts.append(f"{len(outside)} ## Plan lines are outside any anchor (lines {shown})")
+    for failure in failures:
+        if not OUTSIDE_ANCHOR.match(failure):
+            text = re.sub(r":? *['\"].*$", "", failure)
+            parts.append("".join(c for c in text if " " <= c <= "~" and c not in "`{}"))
+    message = "; ".join(dict.fromkeys(part for part in parts if part))
+    return message if len(message) <= RETRY_CHARS else message[:RETRY_CHARS - 4] + " ..."
+
+
 def main() -> int:
     args = build_parser().parse_args()
     try:
@@ -1049,6 +1069,7 @@ def main() -> int:
     except FormatError as exc:
         for failure in exc.failures:
             print(f"memory_build: {failure}", file=sys.stderr)
+        print(f"memory_build: retry: {retry_message(exc.failures)}", file=sys.stderr)
         return 1
     except (BuildError, OSError) as exc:
         print(f"memory_build: {exc}", file=sys.stderr)

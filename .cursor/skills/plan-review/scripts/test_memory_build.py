@@ -86,6 +86,18 @@ class ParserTests(unittest.TestCase):
         self.assertIn("Continues here.", anchors["D1"])
         self.assertIn("Entry: branch cut.", anchors["S1"])
 
+    def test_retry_message_groups_unquotes_and_caps(self) -> None:
+        failures = [f"## Plan line {n} is outside any anchor: 'uses `x` {{y}}'" for n in range(1, 11)]
+        failures += ["anchor A3 is defined twice", "plan.md has no `## Plan` section"]
+        self.assertEqual(
+            memory_build.retry_message(failures),
+            "10 ## Plan lines are outside any anchor (lines 1, 2, 3, 4, 5, 6, 7, 8, ...); "
+            "anchor A3 is defined twice; plan.md has no ## Plan section",
+        )
+        long = memory_build.retry_message([f"anchor D{n} is defined twice" for n in range(100)])
+        self.assertEqual(len(long), 600)
+        self.assertTrue(long.endswith(" ..."))
+
     def test_duplicate_definition_stays_body_of_its_heading_anchor(self) -> None:
         plan = PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n"
         anchors, failures = memory_build.plan_anchors(plan)
@@ -386,6 +398,7 @@ class CliTests(unittest.TestCase):
         failed = self.run_cli("plan-check")
         self.assertEqual(failed.returncode, 1)
         self.assertIn("D2 was changed", failed.stderr)
+        self.assertIn("memory_build: retry: ", failed.stderr.splitlines()[-1])
 
     def test_init_scope_update_feedback_round_trip(self) -> None:
         self.write("brief.md", BRIEF)
@@ -433,7 +446,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.run_cli("compact").returncode, 2)
         seeded = self.run_cli("seed", "--audit", "pending")
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
-        self.assertEqual(json.loads(seeded.stdout)["plan_format"], [])
+        self.assertEqual(json.loads(seeded.stdout)["plan_format"], "")
         self.commit("memory.md")
         self.assertEqual(self.run_cli("seed", "--audit", "pending").returncode, 2)
         below = self.run_cli("compact")
@@ -447,8 +460,7 @@ class CliTests(unittest.TestCase):
         self.commit("brief.md", "plan.md", "status.md")
         seeded = self.run_cli("seed", "--audit", "pending")
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
-        self.assertEqual(json.loads(seeded.stdout)["plan_format"],
-                         ["anchor D2 is defined twice"])
+        self.assertEqual(json.loads(seeded.stdout)["plan_format"], "anchor D2 is defined twice")
 
     def test_bad_task_path_exits_2(self) -> None:
         result = subprocess.run(["python3", "-I", "-B", str(SCRIPT), "plan-check", "--repo",
