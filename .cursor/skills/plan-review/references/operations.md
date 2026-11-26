@@ -16,13 +16,15 @@ Model: <orchestrator identity>
 
 ## Goal
 ...
+1. <numbered question the plan must answer; cited as Q1>
+Done means: <acceptance; cited as Done>
 ## Constraints
-...
+- C-1 ...
 ## Scope
 ### In
-...
+- In-1 ...
 ### Out
-...
+- Out-1 ...
 ## Relevant files
 ...
 ## User feedback
@@ -41,9 +43,25 @@ Model: <planner identity>
 |---|---|---|
 | P001 | accepted / partly accepted / pushed back / closed by user | ... |
 
+## Changes <!-- omit in v1 -->
+- D3 changed (P001): <what changed, ≤300 characters>
+- S4 added (consistency): ...
+
 ## Plan
-<what / where / why, steps, files, risks, validation>
+### Decisions
+- D1 (In-1, C-2) <decision>
+  <indented continuation>
+### S1 — <slice name; the heading anchor covers the lines below it>
+Entry: ... Exit: ...
 ```
+
+Anchors: every non-heading line under `## Plan` belongs to an anchor: one capital letter other
+than `P` plus digits (`D1`, `S2`, `A3`, `R4`, `T5`) at the start of the line (after an optional
+`- `, `* ` or `1. `), or in a `###`/`####` heading that covers the lines below it until the next
+heading or anchor. An ID at a line start always defines that anchor, so a line citing another
+anchor must not begin with it. Indented lines continue the current anchor. Anchors are unique, never renumbered
+or reused. Brief items are cited as `C-<n>`, `In-<n>`, `Out-<n>`, `Q<n>` and `Done`. plan.md has
+only the title/header lines and the `## Response to review`, `## Changes` and `## Plan` sections.
 
 `review.md`:
 
@@ -54,7 +72,11 @@ Model: <reviewer slug>
 Verdict: CHANGES_REQUESTED | APPROVE_WITH_MINORS | NO_FURTHER_COMMENTS
 
 ## Points
-1. P001 [blocker|major|minor] <issue> → <suggested fix>
+1. P001 [blocker|major|minor] (D3, In-2) <issue> → <suggested fix>
+
+## Coverage
+- ok: C-1, C-2, In-1, Q1, Done, D1, D2, S1
+- D3: P001
 
 ## Pushback assessment <!-- omit in v1 -->
 P001: accept rebuttal | maintain, because <path/standard/brief ref>: <one line>
@@ -82,7 +104,7 @@ Stop reason: none | user | error
 Next action: <one line>
 ```
 
-No caps means plan 150/review 50. Change only by explicit instruction plus dated brief feedback.
+No caps means plan 250/review 150. Change only by explicit instruction plus dated brief feedback.
 Never record new commit/`Recovery:`. Resume: `git log -1 -- <task folder>`. No consensus
 `Outcome` has nonzero open points. A status without an `Outcome:` line (older run) uses the legacy
 rules in `commit_check.py`; `pre` rejects a new `brief v1` without it.
@@ -162,7 +184,16 @@ replacement/rebase needs fresh approval. Task commits are authorized; push is no
 
 Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 
-- Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\] .+ → .+$`; ordinals start at 1.
+- Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\] \(([^()]+)\) .+ → .+$`; ordinals
+  start at 1. Every anchor in the parentheses is a brief item or a current plan anchor.
+- `## Coverage` lists every brief item and every plan anchor exactly once, in `- ok: <items>` lines
+  or as `- <item>: <point IDs>`; every point ID appears there and every listed ID is a point.
+- Before `plan vN`, run `python3 -I -B "$SKILL_ROOT/scripts/memory_build.py" plan-check --repo
+  "$ROOT" --task workspace/outcomes/<task>`. Exit 1 is a format failure (anchors, sections,
+  `## Changes`); exit 2 stops. With a prior review, `## Changes` is required and must list exactly
+  the anchors whose text differs from the committed plan.md (skipped once when that plan has no
+  valid anchors), with the matching `added`/`changed`/`removed` word; every `accepted` point is
+  cited by a `## Changes` line. Without a prior review, `## Changes` is absent.
 - IDs increase from `Next point ID`, stay while open/reframed, and are never repeated, reused,
   renumbered, or retired while current/maintained.
 - Plan v2+ has one row per preceding review point, no older-only/duplicates. Decision is exactly
@@ -176,6 +207,7 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   maintained blocker/major. `NO_FURTHER_COMMENTS` has no points or maintained pushback.
 - A Response reason or `## Plan` containing `defer`, `next round`, `next version`, `follow-up`, `TBD`
   or `TODO`, or a `## Plan` that points to an earlier version instead of restating it, fails format.
-- Enforce caps (default plan 150/review 50), one ≤600-character line per point/response reason.
+- Enforce caps (default plan 250/review 150), one ≤600-character line per point/response reason,
+  one ≤300-character line per `## Changes` entry.
 
 Subagent format failure gets one `recovery.md` retry, then stops. Correct self-planner before commit.

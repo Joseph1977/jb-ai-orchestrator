@@ -384,7 +384,8 @@ One iteration is plan vN then review vN; every feedback round counts.
    budgets and digest checks. Subagent mode commits `planner-running` as `plan-start vN` (a retry
    repeats that exact subject, per `operations.md`), then launches a new guarded foreground Task with
    explicit model, `subagent_type: generalPurpose`, `run_in_background: false`, and no `resume` or
-   `inherit`. Validate; commit plan with `State: reviewing`.
+   `inherit`. Validate, including `memory_build.py plan-check` (`operations.md`); commit plan with
+   `State: reviewing`.
 3. **Review:** commit `reviewer-running` as `review-start vN` (retry: same exact subject); launch a new
    guarded foreground Task with reviewer model, `subagent_type: generalPurpose`,
    `run_in_background: false`, and no `resume` or `inherit`. Validate; record `State: reviewed`,

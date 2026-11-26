@@ -7,6 +7,8 @@ Read only while maintaining or explicitly validating the skill.
 - Default limit is 4; resume preserves an existing limit unless explicitly changed.
 - Bad verdict, missing Evidence, duplicate IDs, bad pushback assessment, deferral wording or a plan
   that points to an earlier version, and line/length cap violations fail format validation.
+- Unanchored `## Plan` lines, a `## Changes` list that differs from the anchors actually changed,
+  unanchored review points and incomplete `## Coverage` fail format validation.
 - M1 seeded missed major: plan v2 keeps a major defect review v1 missed; review v2 reports it as major with no prefix.
 - M2 whole-plan review: review v2 raises a seeded issue in a section untouched by v1 points.
 - M3 prompt integrity: each Task prompt equals `prompt_build.py` output (sha256 match); no added text in any round.
@@ -20,7 +22,7 @@ Read only while maintaining or explicitly validating the skill.
 ## Context and models
 
 - `SKILL.md` is at most 30,000 UTF-8 bytes; exact rendered planner+reviewer prompts total at most
-  7,600 bytes. Contract tests measure shipped content and print actual values on failure.
+  10,500 bytes. Contract tests measure shipped content and print actual values on failure.
 - Trigger-only task schemas, commit mechanics, and format detail live in digest-gated
   `operations.md`; trusted mismatch bootstrap remains inline.
 - Planner defaults to a fresh explicit model; reviewer is always fresh and a different family.

@@ -383,10 +383,10 @@ class StaticContractTests(unittest.TestCase):
         )
         self.assertLessEqual(
             reviewer_bytes + planner_bytes,
-            7_600,
+            10_500,
             "rendered prompts are "
             f"{reviewer_bytes + planner_bytes} bytes "
-            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 7600",
+            f"(reviewer={reviewer_bytes}, planner={planner_bytes}); limit is 10500",
         )
 
     def test_explicit_foreground_subagent_contracts(self) -> None:
@@ -525,12 +525,16 @@ class HonestLimitContractTests(unittest.TestCase):
         )
 
     def test_reviewer_template_reviews_whole_plan_at_true_severity(self) -> None:
-        self.assertIn(
-            "Every review covers the whole current plan against brief.md and the repo, not only "
-            "earlier points. Report every issue you find at its true severity, whether new, "
-            "previously missed, or caused by a change; severity follows impact alone.",
-            self.reviewer,
-        )
+        for sentence in (
+            "Before writing the Verdict, build a checklist of every brief Constraint, In item, "
+            "Out item, numbered question and Done criterion, and every plan anchor; check each "
+            "against the plan and the repo.",
+            "Do not stop after the first issue: report every blocker, major and minor you find "
+            "in this one review",
+            "severity follows impact alone",
+            "`## Coverage` lists every checklist item exactly once",
+        ):
+            self.assertIn(sentence, self.reviewer)
         for kept in ("allocate monotonically from the supplied ID", "never reuse, renumber, or use "
                      "retired IDs", "Settle pushback from cited evidence", "maintain only with "
                      "counterevidence", "Minor means no effect on safety, feasibility, scope, cost, "
