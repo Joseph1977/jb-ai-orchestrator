@@ -89,3 +89,9 @@ unchanged text, is excluded: no v1 audit can be expected to raise it.
 | 2026-11-26 | experiment | single gemini-4-carbon-medium, lens list | 7/16 |
 | 2026-11-26 | `2a6ff91` | single, gpt-5.6-sol-medium | 5/16 |
 | 2026-11-26 | `2a6ff91` | single, gemini-4-carbon-medium | 6/16 |
+| 2026-11-26 | `feff1c1` | merged: gpt-5.6-sol-medium, second audit gemini-4-carbon-medium | 9/16 |
+
+The merged run had 25 points (12 + 13, no exact repeats, 4 near-duplicate pairs) and matched P001,
+P002, P003, P005, P007, P008, P017, P021 and P023. Its first scoring also counted P009; that was
+overruled because the matched point names no D21 fallback secret, as the standing P009 ruling
+requires. Rounds to consensus were not measured.
