@@ -175,7 +175,8 @@ def plan_anchors(text: str) -> tuple[dict[str, str], list[str]]:
             continue
         match = ANCHOR_LINE.match(line)
         if match and not line[:1].isspace() and match.group(1) in anchors:
-            failures.append(f"anchor {match.group(1)} is defined twice")
+            failures.append(f"anchor {match.group(1)} is defined twice (## Plan line {number} "
+                            "starts with it; reword that line to begin with other text)")
             match = None
         if match and not line[:1].isspace():
             name = match.group(1)

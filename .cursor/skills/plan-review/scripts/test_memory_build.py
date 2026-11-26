@@ -101,7 +101,8 @@ class ParserTests(unittest.TestCase):
     def test_duplicate_definition_stays_body_of_its_heading_anchor(self) -> None:
         plan = PLAN_V1 + "### R1 Risks\n- D2 adds one read per call.\n"
         anchors, failures = memory_build.plan_anchors(plan)
-        self.assertEqual(failures, ["anchor D2 is defined twice"])
+        self.assertEqual(failures, ["anchor D2 is defined twice (## Plan line 8 starts with it; "
+                                    "reword that line to begin with other text)"])
         self.assertEqual(anchors["D2"], "- D2 (C-1) Deadline.")
         self.assertIn("- D2 adds one read per call.", anchors["R1"])
 
@@ -460,7 +461,8 @@ class CliTests(unittest.TestCase):
         self.commit("brief.md", "plan.md", "status.md")
         seeded = self.run_cli("seed", "--audit", "pending")
         self.assertEqual(seeded.returncode, 0, seeded.stderr)
-        self.assertEqual(json.loads(seeded.stdout)["plan_format"], "anchor D2 is defined twice")
+        self.assertIn("anchor D2 is defined twice (## Plan line 8",
+                      json.loads(seeded.stdout)["plan_format"])
 
     def test_bad_task_path_exits_2(self) -> None:
         result = subprocess.run(["python3", "-I", "-B", str(SCRIPT), "plan-check", "--repo",
