@@ -260,7 +260,7 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
 - Points match `^\d+\. P[0-9]{3,} \[(blocker|major|minor)\]( \[late\])? \(([^()]+)\) .+ → .+$`;
   ordinals start at 1. Every anchor in the parentheses is a brief item or a current plan anchor.
 - `audit` scope: `## Coverage` lists every brief item and every plan anchor exactly once, in
-  `- ok: <items>` lines or as `- <item>: <point IDs>`; every point ID appears there and every listed
+  `- ok: <items>` lines or as `- <items>: <point IDs>`; every point ID appears there and every listed
   ID is a point. No `[late]` and no `## Observations`.
 - `converge` scope: `## Coverage` lists exactly the anchors in plan.md `## Changes`, removed ones
   included, and points may cite removed anchors. A new point naming none of them is late: only

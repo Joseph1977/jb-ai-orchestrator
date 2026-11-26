@@ -34,7 +34,7 @@ POINT = re.compile(
 )
 LEGACY_POINT = re.compile(r"^[0-9]+\. (P[0-9]{3,}) \[(blocker|major|minor)\] (.+?)(?: → .*)?$")
 COVERAGE_OK = re.compile(r"^- ok: (.+)$")
-COVERAGE_POINTS = re.compile(r"^- (\S+): (P[0-9]{3,}(?:, P[0-9]{3,})*)$")
+COVERAGE_POINTS = re.compile(r"^- ([^:]+?): (P[0-9]{3,}(?:, P[0-9]{3,})*)$")
 OBSERVATION = re.compile(r"^- \(([^()]+)\) (.+)$")
 ACCEPT = re.compile(r"^(P[0-9]{3,}): accept rebuttal$")
 PLAN_SECTIONS = ("## Response to review", "## Changes", "## Plan")
@@ -529,7 +529,8 @@ def parse_review(review: str) -> tuple[list[dict[str, Any]], dict[str, list[str]
             continue
         ok, pointed = COVERAGE_OK.match(line), COVERAGE_POINTS.match(line)
         entries = ([(item.strip(), []) for item in ok.group(1).split(",")] if ok
-                   else [(pointed.group(1), pointed.group(2).split(", "))] if pointed else None)
+                   else [(item.strip(), pointed.group(2).split(", "))
+                         for item in pointed.group(1).split(",")] if pointed else None)
         if entries is None:
             failures.append(f"malformed coverage line: {line[:80]!r}")
             continue

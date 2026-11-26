@@ -181,6 +181,11 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("- v1 audit:", text)
         self.assertEqual(memory_build.memory_sections(text)[1], [])
 
+    def test_multi_item_coverage_line_is_accepted(self) -> None:
+        text = REVIEW_V1.replace("- D2: P001\n- C-1: P001\n", "- D2, C-1: P001\n")
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, text, "audit", [], "P001")
+        self.assertEqual(result["new"], 1)
+
     def test_audit_requires_full_coverage_and_no_late(self) -> None:
         partial = review(1, "1. P001 [major] (D2) x → y\n", "- ok: C-1\n- D2: P001\n")
         self.assertIn("audit coverage misses", self.failures(fresh_memory(), PLAN_V1, partial, "audit"))
