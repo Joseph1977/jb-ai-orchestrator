@@ -280,6 +280,22 @@ class UpdateTests(unittest.TestCase):
         self.assertIn("P002 cites D2, but coverage does not map D2 to P002",
                       self.failures(audited_memory(), plan_v2(), converge, "converge"))
 
+    def test_none_points_and_semicolon_anchor_lists_are_accepted(self) -> None:
+        empty = review(2, "None.\n", "- ok: D2\n", "NO_FURTHER_COMMENTS")
+        result = memory_build.apply_review(audited_memory(), BRIEF, plan_v2(), empty, "converge",
+                                           [], "P002")
+        self.assertEqual(result["open"], "0/0/0")
+        mixed = REVIEW_V1.replace("(D2, C-1)", "(D2; C-1)")
+        result = memory_build.apply_review(fresh_memory(), BRIEF, PLAN_V1, mixed, "audit", [],
+                                           "P001")
+        self.assertEqual(result["new"], 1)
+
+    def test_unknown_coverage_items_are_reported_once(self) -> None:
+        text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A2, A4")
+        failures = self.failures(fresh_memory(), PLAN_V1, text, "audit")
+        self.assertIn("coverage lists unknown items A2, A4; only an ID that starts a ## Plan line "
+                      "or ### heading is a plan anchor", failures)
+
     def test_closed_id_cannot_be_reused(self) -> None:
         memory = audited_memory()
         memory_build.apply_review(memory, BRIEF, plan_v2(),

@@ -512,7 +512,7 @@ def parse_review(review: str) -> tuple[list[dict[str, Any]], dict[str, list[str]
     failures: list[str] = []
     points: list[dict[str, Any]] = []
     for line in (raw.rstrip() for raw in section(review, "## Points") or []):
-        if not line:
+        if not line or line in ("None", "None."):
             continue
         match = POINT.match(line)
         if not match:
@@ -520,7 +520,7 @@ def parse_review(review: str) -> tuple[list[dict[str, Any]], dict[str, list[str]
             continue
         _ordinal, point, severity, late, anchors, issue, fix = match.groups()
         points.append({"id": point, "severity": severity, "late": bool(late),
-                       "anchors": [a.strip() for a in anchors.split(",") if a.strip()],
+                       "anchors": [a.strip() for a in re.split(r"[,;]", anchors) if a.strip()],
                        "issue": issue, "fix": fix})
     coverage: dict[str, list[str]] = {}
     body = section(review, "## Coverage")
@@ -577,7 +577,7 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
     for point in points:
         unknown = [a for a in point["anchors"] if a not in known]
         if unknown:
-            failures.append(f"{point['id']} cites unknown anchors {unknown}")
+            failures.append(f"{point['id']} cites unknown anchors {', '.join(unknown)}")
         if point["id"] in previous:
             continue
         if point["id"] in memory.closed_ids() | retired_set:
@@ -593,9 +593,10 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
         elif scope == "converge" and not set(point["anchors"]) & set(listed):
             failures.append(f"new {point['id']} names no anchor listed in ## Changes; raise it as "
                             "[blocker] [late] or write it under ## Observations")
-    for item in coverage:
-        if item not in known:
-            failures.append(f"coverage lists unknown item {item}")
+    unknown_items = [item for item in coverage if item not in known]
+    if unknown_items:
+        failures.append(f"coverage lists unknown items {', '.join(unknown_items)}; only an ID that "
+                        "starts a ## Plan line or ### heading is a plan anchor")
     by_id = {point["id"]: point for point in points}
     for item, ids in coverage.items():
         for point in ids:
