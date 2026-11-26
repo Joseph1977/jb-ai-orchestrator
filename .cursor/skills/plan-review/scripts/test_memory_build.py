@@ -298,6 +298,17 @@ class UpdateTests(unittest.TestCase):
                                            "P001")
         self.assertEqual(result["new"], 1)
 
+    def test_ok_ids_the_plan_mentions_but_does_not_define_are_ignored(self) -> None:
+        plan = PLAN_V1.replace("- D2 (C-1) Deadline.", "- D2 (C-1) Deadline. A7 holds; A9a too.")
+        text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A7, A9a")
+        memory = fresh_memory()
+        memory_build.apply_review(memory, BRIEF, plan, text, "audit", [], "P001")
+        self.assertNotIn("A7", memory.render().split("## Coverage")[1].split("##")[0])
+        mapped = text.replace("- D2: P001", "- D2, A7: P001")
+        self.assertIn("coverage lists unknown items A7",
+                      self.failures(fresh_memory(), plan, mapped.replace("S1, A7, A9a", "S1, A9a"),
+                                    "audit"))
+
     def test_unknown_coverage_items_are_reported_once(self) -> None:
         text = REVIEW_V1.replace("Done, D1, S1", "Done, D1, S1, A2, A4")
         failures = self.failures(fresh_memory(), PLAN_V1, text, "audit")

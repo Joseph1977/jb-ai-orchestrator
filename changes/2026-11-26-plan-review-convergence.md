@@ -57,7 +57,8 @@
   definition; the failure names the offending `## Plan` line.
 - Coverage that marks a cited item `ok`, or maps an item to a point that does
   not cite it, fails; a mapping that only omits a citing point is completed
-  from the points' anchors.
+  from the points' anchors. An `ok` ID the plan mentions mid-line but never
+  defines as an anchor is ignored.
 - Review parsing accepts `None.` under an empty `## Points` and `;` between a
   point's anchors, and reports unknown coverage items in one grouped failure.
 - Default caps are plan 250 / review 150 lines. The rendered prompt budget is

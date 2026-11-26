@@ -593,6 +593,9 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
         elif scope == "converge" and not set(point["anchors"]) & set(listed):
             failures.append(f"new {point['id']} names no anchor listed in ## Changes; raise it as "
                             "[blocker] [late] or write it under ## Observations")
+    mentioned = set(re.findall(rf"\b{ANCHOR}[a-z]?\b", "\n".join(section(plan, "## Plan") or [])))
+    for item in [i for i, ids in coverage.items() if not ids and i not in known and i in mentioned]:
+        del coverage[item]
     unknown_items = [item for item in coverage if item not in known]
     if unknown_items:
         failures.append(f"coverage lists unknown items {', '.join(unknown_items)}; only an ID that "
