@@ -274,11 +274,19 @@ class UpdateTests(unittest.TestCase):
                       self.failures(fresh_memory(), PLAN_V1, wrong_item, "audit"))
         hidden = REVIEW_V1.replace("- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1\n- D2: P001",
                                    "- ok: C-2, In-1, Out-1, Q1, Q2, Done, D1, S1, D2")
-        self.assertIn("P001 cites D2, but coverage does not map D2 to P001",
+        self.assertIn("P001 cites D2, but coverage marks D2 ok",
                       self.failures(fresh_memory(), PLAN_V1, hidden, "audit"))
         converge = review(2, "1. P002 [major] (D2) bound too loose → tighten\n", "- ok: D2\n")
-        self.assertIn("P002 cites D2, but coverage does not map D2 to P002",
+        self.assertIn("P002 cites D2, but coverage marks D2 ok",
                       self.failures(audited_memory(), plan_v2(), converge, "converge"))
+
+    def test_partial_mapping_is_completed_from_point_anchors(self) -> None:
+        text = review(1, "1. P001 [major] (D2, C-1) Deadline is unbounded → Bound it.\n"
+                         "2. P002 [minor] (D1, D2) Name the unit → Say seconds.\n",
+                      "- ok: C-2, In-1, Out-1, Q1, Q2, Done, S1\n- D2, C-1: P001\n- D1: P002\n")
+        memory = fresh_memory()
+        memory_build.apply_review(memory, BRIEF, PLAN_V1, text, "audit", [], "P001")
+        self.assertIn("- open D2: P001, P002", memory.render())
 
     def test_none_points_and_semicolon_anchor_lists_are_accepted(self) -> None:
         empty = review(2, "None.\n", "- ok: D2\n", "NO_FURTHER_COMMENTS")

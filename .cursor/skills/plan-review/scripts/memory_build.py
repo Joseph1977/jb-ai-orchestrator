@@ -606,9 +606,8 @@ def apply_review(memory: Memory, brief: str, plan: str, review: str, scope: str,
                 failures.append(f"coverage maps {item} to {point}, which does not cite {item}")
     for point in points:
         for anchor in point["anchors"]:
-            if anchor in scope_items and point["id"] not in coverage.get(anchor, [point["id"]]):
-                failures.append(f"{point['id']} cites {anchor}, but coverage does not map "
-                                f"{anchor} to {point['id']}")
+            if anchor in scope_items and coverage.get(anchor) == []:
+                failures.append(f"{point['id']} cites {anchor}, but coverage marks {anchor} ok")
     if scope == "audit":
         missing = [item for item in checklist if item not in coverage]
         if missing:

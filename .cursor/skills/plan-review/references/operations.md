@@ -266,8 +266,9 @@ Require exact unformatted `Version: N`, `Model: <expected>`, and other headers.
   included, and points may cite removed anchors. A new point naming none of them is late: only
   `[blocker] [late]`, with `Missed: <reason>` in the fix; any other late issue is a
   `- (<anchors>) <issue>` line under `## Observations`, which never cites a `## Changes` anchor.
-- Both scopes: a coverage line maps an item only to points that cite it, and every point is mapped
-  from each in-scope item it cites (so such an item is never `ok`). `memory_build.py update`
+- Both scopes: a coverage line maps an item only to points that cite it, and an in-scope item a
+  point cites is never `ok`. A mapping that omits a citing point is completed from the points'
+  own anchors; an audit still maps every point from some item. `memory_build.py update`
   enforces the scope rules (exit 1 is a reviewer format failure).
 - With `Audit: pending`, `consensus` is refused; a `NO_FURTHER_COMMENTS` review then continues with
   `plan-start vN+1`, or at the limit commits `limit-reached vN` (open points may be 0/0/0).
